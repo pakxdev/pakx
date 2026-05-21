@@ -1,0 +1,15 @@
+[package]
+name = "pakx-registry-client"
+description = "pakx federated registry client — MCP Registry, Smithery, Glama, GitHub raw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+pakx-core = { workspace = true }
+
+[lints]
+workspace = true

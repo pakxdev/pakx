@@ -1,0 +1,28 @@
+[package]
+name = "pakx"
+description = "Universal package manager for AI agent context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+default-run = "pakx"
+
+[[bin]]
+name = "pakx"
+path = "src/main.rs"
+
+[dependencies]
+pakx-core = { workspace = true }
+pakx-agents = { workspace = true }
+pakx-registry-client = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+
+[lints]
+workspace = true
