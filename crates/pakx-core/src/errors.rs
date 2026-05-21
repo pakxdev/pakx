@@ -23,7 +23,7 @@ pub enum ManifestError {
     #[error("agents.yml is not valid YAML{path}: {source}", path = fmt_path(.path.as_ref()))]
     ParseYaml {
         #[source]
-        source: serde_yml::Error,
+        source: serde_yaml_ng::Error,
         path: Option<PathBuf>,
     },
     /// The YAML parsed but did not match the manifest schema.
