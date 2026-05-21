@@ -16,8 +16,8 @@ pub use install::{
     compute_integrity, Command, Hook, McpServer, McpTransport, Prompt, Skill, SkillFile, Subagent,
 };
 pub use lockfile::{
-    parse_lockfile, write_lockfile, Integrity, LockEntry, Lockfile, RegistrySource,
-    LOCKFILE_VERSION, REGISTRY_SOURCES,
+    parse_lockfile, read_from as read_lockfile_from, write_lockfile, write_to as write_lockfile_to,
+    Integrity, LockEntry, Lockfile, RegistrySource, LOCKFILE_VERSION, REGISTRY_SOURCES,
 };
 pub use manifest::{
     add_dep, add_shorthand, parse_manifest, read_from as read_manifest_from, write_manifest,

@@ -12,8 +12,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use commands::add::{self, AddArgs};
+use commands::doctor::{self, DoctorArgs};
 use commands::init::{self, InitArgs};
 use commands::install::{self as install_cmd, InstallArgs};
+use commands::list::{self as list_cmd, ListArgs};
+use commands::search::{self, SearchArgs};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,6 +38,12 @@ enum Command {
     Add(AddArgs),
     /// Install everything in `agents.yml` to detected agents.
     Install(InstallArgs),
+    /// List pinned dependencies (reads `agents.lock`).
+    List(ListArgs),
+    /// Health-check the project + agent install state.
+    Doctor(DoctorArgs),
+    /// Search the federated registry for packages.
+    Search(SearchArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -44,5 +53,8 @@ async fn main() -> Result<()> {
         Command::Init(args) => init::run(args).await,
         Command::Add(args) => add::run(args).await,
         Command::Install(args) => install_cmd::run_cmd(args).await,
+        Command::List(args) => list_cmd::run(args).await,
+        Command::Doctor(args) => doctor::run(args).await,
+        Command::Search(args) => search::run(args).await,
     }
 }
