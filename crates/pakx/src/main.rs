@@ -13,6 +13,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use commands::add::{self, AddArgs};
+use commands::completion::{self as completion_cmd, CompletionArgs};
 use commands::doctor::{self, DoctorArgs};
 use commands::info::{self as info_cmd, InfoArgs};
 use commands::init::{self, InitArgs};
@@ -67,6 +68,8 @@ enum Command {
     /// Check GitHub Releases for a newer pakx version.
     #[command(alias = "update")]
     Upgrade(UpgradeArgs),
+    /// Emit shell completion script for bash / zsh / fish / powershell / elvish.
+    Completion(CompletionArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -86,5 +89,6 @@ async fn main() -> Result<()> {
         Command::Publish(args) => publish_cmd::run(args).await,
         Command::Unpublish(args) => unpublish_cmd::run(args).await,
         Command::Upgrade(args) => upgrade_cmd::run(args).await,
+        Command::Completion(args) => completion_cmd::run::<Cli>(args).await,
     }
 }
