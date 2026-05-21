@@ -98,5 +98,6 @@ const fn tag_to_static_str(tag: RegistrySource) -> &'static str {
         RegistrySource::Glama => "glama",
         RegistrySource::Github => "github",
         RegistrySource::Git => "git",
+        RegistrySource::Pakx => "pakx",
     }
 }
