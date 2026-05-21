@@ -80,7 +80,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
                 id: pkg.id.as_str(),
                 name: pkg.name.as_str(),
                 version: pkg.version.as_str(),
-                source: source_tag(pkg.source),
+                source: pkg.source.as_tag(),
                 description: pkg.description.as_deref(),
             })
             .collect();
@@ -98,7 +98,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         let desc = pkg.description.as_deref().unwrap_or("");
         println!(
             "{source:14} {name:50} {version:10}  {desc}",
-            source = source_tag(pkg.source),
+            source = pkg.source.as_tag(),
             name = truncate(&pkg.name, 50),
             version = pkg.version,
             desc = truncate(desc, 60),
@@ -138,17 +138,6 @@ fn build_client(
         client = client.with_source(Box::new(pakx));
     }
     client
-}
-
-const fn source_tag(s: pakx_core::RegistrySource) -> &'static str {
-    match s {
-        pakx_core::RegistrySource::OfficialMcp => "official-mcp",
-        pakx_core::RegistrySource::Smithery => "smithery",
-        pakx_core::RegistrySource::Glama => "glama",
-        pakx_core::RegistrySource::Github => "github",
-        pakx_core::RegistrySource::Git => "git",
-        pakx_core::RegistrySource::Pakx => "pakx",
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

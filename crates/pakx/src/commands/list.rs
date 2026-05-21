@@ -117,7 +117,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                 id: entry.name.as_str(),
                 version: entry.version.as_str(),
                 kind: entry.kind.as_str(),
-                registry: registry_tag(entry.registry),
+                registry: entry.registry.as_tag(),
                 resolved_from: entry.resolved_from.as_str(),
                 integrity: entry.integrity.as_str(),
                 agents: entry
@@ -150,17 +150,6 @@ pub async fn run(args: ListArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-const fn registry_tag(s: pakx_core::RegistrySource) -> &'static str {
-    match s {
-        pakx_core::RegistrySource::OfficialMcp => "official-mcp",
-        pakx_core::RegistrySource::Smithery => "smithery",
-        pakx_core::RegistrySource::Glama => "glama",
-        pakx_core::RegistrySource::Github => "github",
-        pakx_core::RegistrySource::Git => "git",
-        pakx_core::RegistrySource::Pakx => "pakx",
-    }
 }
 
 fn build_claude(

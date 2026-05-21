@@ -42,6 +42,24 @@ pub const REGISTRY_SOURCES: [RegistrySource; 6] = [
     RegistrySource::Pakx,
 ];
 
+impl RegistrySource {
+    /// Stable kebab-case tag. Matches the serde representation (so a
+    /// round-trip through `serde_json` / `serde_yaml_ng` produces the
+    /// same string), but available without serializing. Used by the CLI
+    /// for human + JSON output and is part of the documented JSON
+    /// contract — only add new variants, never rename existing ones.
+    pub const fn as_tag(self) -> &'static str {
+        match self {
+            Self::OfficialMcp => "official-mcp",
+            Self::Smithery => "smithery",
+            Self::Glama => "glama",
+            Self::Github => "github",
+            Self::Git => "git",
+            Self::Pakx => "pakx",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Integrity (SRI-style sha256)
 // ---------------------------------------------------------------------------
@@ -133,4 +151,32 @@ pub struct Lockfile {
     /// `pakx doctor`.
     pub manifest_hash: Integrity,
     pub entries: BTreeMap<String, LockEntry>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RegistrySource, REGISTRY_SOURCES};
+
+    /// `RegistrySource::as_tag` is the single source of truth for the
+    /// kebab-case representation used by the CLI's human + JSON output.
+    /// It MUST match the serde representation so a round-trip through
+    /// JSON / YAML produces the same string — locking that in here.
+    #[test]
+    fn as_tag_matches_serde_kebab_case() {
+        for src in REGISTRY_SOURCES {
+            let via_serde = serde_json::to_string(&src).expect("serialize variant");
+            let trimmed = via_serde.trim_matches('"');
+            assert_eq!(trimmed, src.as_tag(), "as_tag must match serde for {src:?}");
+        }
+    }
+
+    #[test]
+    fn as_tag_returns_documented_strings() {
+        assert_eq!(RegistrySource::OfficialMcp.as_tag(), "official-mcp");
+        assert_eq!(RegistrySource::Smithery.as_tag(), "smithery");
+        assert_eq!(RegistrySource::Glama.as_tag(), "glama");
+        assert_eq!(RegistrySource::Github.as_tag(), "github");
+        assert_eq!(RegistrySource::Git.as_tag(), "git");
+        assert_eq!(RegistrySource::Pakx.as_tag(), "pakx");
+    }
 }
