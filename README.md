@@ -23,6 +23,7 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx list` | Show pinned lockfile entries with `[ok]` / `[drift]` against on-disk reality. `--json` for pipelines. |
 | `pakx doctor` | 5-section health check (manifest, lockfile, drift, adapter detection, on-disk vs lockfile). |
 | `pakx search <query>` | Federated search across all sources. `--json` for pipelines. |
+| `pakx test` | Validate `agents.yml` without installing — resolves every dep against the registry, exits non-zero on the first failure. `--offline` checks against the lockfile only. Intended for CI / pre-commit. |
 | `pakx info <owner>/<name>` | Read-only registry inspection — metadata + version list. `--json` for pipelines. |
 | `pakx login` | GitHub-backed login. Validates an API token against `registry.pakx.dev/api/v1/whoami` and writes `~/.pakx/credentials.json` (mode 0600). |
 | `pakx whoami` | Stored login, or live whoami (`--offline` skips the network). |

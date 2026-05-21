@@ -24,6 +24,7 @@ use commands::login::{self as login_cmd, LoginArgs};
 use commands::pack::{self as pack_cmd, PackArgs};
 use commands::publish::{self as publish_cmd, PublishArgs};
 use commands::search::{self, SearchArgs};
+use commands::test::{self as test_cmd, TestArgs};
 use commands::unpublish::{self as unpublish_cmd, UnpublishArgs};
 use commands::upgrade::{self as upgrade_cmd, UpgradeArgs};
 use commands::whoami::{self as whoami_cmd, WhoamiArgs};
@@ -54,6 +55,8 @@ enum Command {
     Doctor(DoctorArgs),
     /// Search the federated registry for packages.
     Search(SearchArgs),
+    /// Validate `agents.yml` without installing anything (CI / pre-commit).
+    Test(TestArgs),
     /// Print registry metadata + version list for a published package.
     Info(InfoArgs),
     /// Log in to a pakx-registry deployment.
@@ -85,6 +88,7 @@ async fn main() -> Result<()> {
         Command::List(args) => list_cmd::run(args).await,
         Command::Doctor(args) => doctor::run(args).await,
         Command::Search(args) => search::run(args).await,
+        Command::Test(args) => test_cmd::run(args).await,
         Command::Info(args) => info_cmd::run(args).await,
         Command::Login(args) => login_cmd::run(args).await,
         Command::Whoami(args) => whoami_cmd::run(args).await,

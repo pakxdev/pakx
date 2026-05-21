@@ -1,0 +1,182 @@
+//! Integration tests for `pakx test`.
+
+use assert_cmd::Command;
+use predicates::prelude::*;
+use serde_json::json;
+use tempfile::TempDir;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const BIN: &str = "pakx";
+
+fn write_manifest(dir: &std::path::Path, body: &str) {
+    std::fs::write(dir.join("agents.yml"), body).unwrap();
+}
+
+#[test]
+fn test_fails_when_manifest_missing() {
+    let project = TempDir::new().unwrap();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("read manifest"));
+}
+
+#[test]
+fn test_offline_succeeds_with_no_mcp_deps() {
+    let project = TempDir::new().unwrap();
+    write_manifest(project.path(), "name: example\nversion: 0.1.0\n");
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("manifest"))
+        .stdout(predicate::str::contains("parsed"))
+        .stdout(predicate::str::contains("all entries ok"));
+}
+
+#[test]
+fn test_offline_requires_lockfile_entry_for_each_mcp_dep() {
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/cool\n",
+    );
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("fail: mcp/io.github.acme/cool"));
+}
+
+#[test]
+fn test_offline_passes_with_matching_lockfile_entry() {
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/cool\n",
+    );
+    std::fs::write(
+        project.path().join("agents.lock"),
+        r#"{"lockfileVersion":1,"manifestHash":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","entries":{
+  "mcp/io.github.acme/cool@1.2.3":{
+    "name":"io.github.acme/cool",
+    "type":"mcp",
+    "version":"1.2.3",
+    "resolvedFrom":"official-mcp:io.github.acme/cool",
+    "registry":"official-mcp",
+    "integrity":"sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    "agents":["claude-code"],
+    "dependencies":[]
+  }
+}}
+"#,
+    )
+    .unwrap();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok    mcp/io.github.acme/cool"))
+        .stdout(predicate::str::contains("all entries ok"));
+}
+
+#[test]
+fn test_honors_manifest_override_flag() {
+    let project = TempDir::new().unwrap();
+    let alt = project.path().join("nested").join("agents-alt.yml");
+    std::fs::create_dir_all(alt.parent().unwrap()).unwrap();
+    std::fs::write(&alt, "name: alt\nversion: 0.2.0\n").unwrap();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "test",
+            "--offline",
+            "--manifest",
+            alt.strip_prefix(project.path()).unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("name=alt"));
+}
+
+#[tokio::test]
+async fn test_online_resolves_against_registry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                {
+                    "name": "io.github.acme/cool",
+                    "description": "hit",
+                    "version_detail": {"version": "1.0.0"}
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/cool\n",
+    );
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--mcp-base-url", &server.uri()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok    mcp/io.github.acme/cool"));
+}
+
+#[tokio::test]
+async fn test_online_fails_on_unknown_dep() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&server)
+        .await;
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/ghost\n",
+    );
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--mcp-base-url", &server.uri()])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "fail: mcp/io.github.acme/ghost not found",
+        ));
+}
+
+#[test]
+fn test_does_not_write_lockfile() {
+    let project = TempDir::new().unwrap();
+    write_manifest(project.path(), "name: example\nversion: 0.1.0\n");
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        .success();
+    assert!(
+        !project.path().join("agents.lock").exists(),
+        "pakx test must not write agents.lock"
+    );
+}

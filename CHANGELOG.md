@@ -19,6 +19,13 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
     string when upstream has no description) so `jq '.description'`
     never returns `null` — the field shape is invariant across hits.
     `--no-pakx` is honoured.
+- `pakx test` — read-only manifest validation for CI / pre-commit use.
+  Parses `agents.yml` and (unless `--offline`) resolves every MCP entry
+  against the configured registries. Prints a per-entry `ok` / `fail:
+  <reason>` line and exits non-zero on the first failure. Does not
+  write `agents.lock`, does not touch the install dir. `--offline`
+  checks deps against the existing lockfile only; `--manifest <path>`
+  overrides the default `agents.yml` location.
 
 ## [0.1.3] — 2026-05-21
 
