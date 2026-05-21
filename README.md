@@ -20,9 +20,9 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx init` | Interactive scaffolder for `agents.yml`. |
 | `pakx add <id>` | Append a dep to the manifest; best-effort validation against the registry. |
 | `pakx install` | Resolve every MCP dep via the federated registry, install into Claude Code's project-scoped `.mcp.json`, and write `agents.lock`. |
-| `pakx list` | Show pinned lockfile entries with `[ok]` / `[drift]` against on-disk reality. |
+| `pakx list` | Show pinned lockfile entries with `[ok]` / `[drift]` against on-disk reality. `--json` for pipelines. |
 | `pakx doctor` | 5-section health check (manifest, lockfile, drift, adapter detection, on-disk vs lockfile). |
-| `pakx search <query>` | Federated search across all sources. |
+| `pakx search <query>` | Federated search across all sources. `--json` for pipelines. |
 | `pakx info <owner>/<name>` | Read-only registry inspection — metadata + version list. `--json` for pipelines. |
 | `pakx login` | GitHub-backed login. Validates an API token against `registry.pakx.dev/api/v1/whoami` and writes `~/.pakx/credentials.json` (mode 0600). |
 | `pakx whoami` | Stored login, or live whoami (`--offline` skips the network). |

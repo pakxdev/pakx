@@ -1,12 +1,17 @@
 //! `pakx search <query>` — federated search across all registered sources.
+//!
+//! Default output is one row per hit. With `--json`, the same hits are
+//! emitted as a single-line JSON array on stdout (newline-terminated).
+//! Field names are stable for downstream pipelines.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 use pakx_registry_client::{
     CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use reqwest::Client;
+use serde::Serialize;
 
 #[derive(Debug, Clone, Args)]
 pub struct SearchArgs {
@@ -16,6 +21,11 @@ pub struct SearchArgs {
     /// Maximum results to display.
     #[arg(short = 'n', long, default_value_t = 20)]
     pub limit: usize,
+
+    /// Emit machine-readable JSON on stdout (single line, newline-terminated).
+    /// Field names are a stable contract for downstream pipelines.
+    #[arg(long)]
+    pub json: bool,
 
     /// Override the official MCP Registry base URL (testing).
     #[arg(long, hide = true)]
@@ -38,6 +48,18 @@ pub struct SearchArgs {
     pub no_pakx: bool,
 }
 
+/// Wire-format hit emitted by `--json`. Field names are a stable
+/// contract — only additive changes are backwards-compatible.
+#[derive(Debug, Serialize)]
+struct JsonHit<'a> {
+    id: &'a str,
+    name: &'a str,
+    version: &'a str,
+    source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+}
+
 pub async fn run(args: SearchArgs) -> Result<()> {
     let client = build_client(
         args.mcp_base_url.as_deref(),
@@ -49,12 +71,30 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     let query = args.query.unwrap_or_default();
     let results = client.search(&query).await;
 
+    let truncated: Vec<_> = results.iter().take(args.limit).collect();
+
+    if args.json {
+        let hits: Vec<JsonHit<'_>> = truncated
+            .iter()
+            .map(|pkg| JsonHit {
+                id: pkg.id.as_str(),
+                name: pkg.name.as_str(),
+                version: pkg.version.as_str(),
+                source: source_tag(pkg.source),
+                description: pkg.description.as_deref(),
+            })
+            .collect();
+        let line = serde_json::to_string(&hits).context("serialize search hits as json")?;
+        println!("{line}");
+        return Ok(());
+    }
+
     if results.is_empty() {
         eprintln!("no results for {query:?}");
         return Ok(());
     }
 
-    for pkg in results.iter().take(args.limit) {
+    for pkg in &truncated {
         let desc = pkg.description.as_deref().unwrap_or("");
         println!(
             "{source:14} {name:50} {version:10}  {desc}",

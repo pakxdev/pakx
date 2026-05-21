@@ -2,7 +2,7 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use serde_json::json;
+use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -119,4 +119,126 @@ async fn search_empty_results_prints_hint() {
         .assert()
         .success()
         .stderr(predicate::str::contains("no results"));
+}
+
+#[tokio::test]
+async fn search_json_emits_valid_array_with_expected_keys() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                {
+                    "name": "io.github.acme/one",
+                    "description": "first hit",
+                    "version_detail": {"version": "1.0.0"}
+                },
+                {
+                    "name": "io.github.acme/two",
+                    "description": "second hit",
+                    "version_detail": {"version": "2.0.0"}
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.ends_with('\n'), "stdout must end with newline");
+    let body = stdout.trim_end_matches('\n');
+    assert!(!body.contains('\n'), "json output must be single-line");
+
+    let parsed: Value = serde_json::from_str(body).expect("json parses");
+    let arr = parsed.as_array().expect("top level is an array");
+    assert_eq!(arr.len(), 2);
+    let first = &arr[0];
+    for key in ["id", "name", "version", "source"] {
+        assert!(first.get(key).is_some(), "missing key {key:?} in {first:?}");
+    }
+    assert_eq!(first["source"], "official-mcp");
+    assert!(arr
+        .iter()
+        .any(|h| h["name"] == "io.github.acme/one" && h["version"] == "1.0.0"));
+    assert!(arr
+        .iter()
+        .any(|h| h["name"] == "io.github.acme/two" && h["version"] == "2.0.0"));
+}
+
+#[tokio::test]
+async fn search_json_empty_results_emits_empty_array() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&server)
+        .await;
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "ghost",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert_eq!(stdout.trim_end(), "[]");
+}
+
+#[tokio::test]
+async fn search_json_respects_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.acme/a", "description": "a", "version_detail": {"version": "1.0.0"} },
+                { "name": "io.github.acme/b", "description": "b", "version_detail": {"version": "1.0.0"} },
+                { "name": "io.github.acme/c", "description": "c", "version_detail": {"version": "1.0.0"} }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx",
+            "--json",
+            "-n",
+            "2",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 2);
 }
