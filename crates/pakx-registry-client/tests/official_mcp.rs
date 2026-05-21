@@ -166,6 +166,79 @@ async fn second_search_is_served_from_cache() {
 }
 
 #[tokio::test]
+async fn search_decodes_wrapped_schema() {
+    // 2025-12-11 schema wraps each list entry as `{server, _meta}`.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                {
+                    "server": {
+                        "name": "io.github.modelcontextprotocol/server-filesystem",
+                        "description": "Local fs",
+                        "version": "1.2.3",
+                        "remotes": [{ "type": "streamable-http", "url": "https://x" }]
+                    },
+                    "_meta": {
+                        "io.modelcontextprotocol.registry/official": {
+                            "status": "active",
+                            "isLatest": true
+                        }
+                    }
+                },
+                {
+                    "server": { "name": "io.github.acme/playwright", "version": "0.5.0" },
+                    "_meta": {}
+                }
+            ],
+            "next": null
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    let source = source_with_mock(&server.uri(), temp.path());
+
+    let results = source.search("").await.unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].id,
+        "io.github.modelcontextprotocol/server-filesystem"
+    );
+    assert_eq!(results[0].version, "1.2.3");
+    assert_eq!(results[0].description.as_deref(), Some("Local fs"));
+    // `_meta` is preserved on `install_hints` so the resolver can inspect it.
+    assert!(results[0].install_hints.get("_meta").is_some());
+    // `remotes` from the inner `server` is also preserved on `install_hints`.
+    assert!(results[0].install_hints.get("remotes").is_some());
+    assert_eq!(results[1].id, "io.github.acme/playwright");
+}
+
+#[tokio::test]
+async fn fetch_decodes_wrapped_schema() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers/io.github.foo/bar"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "server": {
+                "name": "io.github.foo/bar",
+                "version_detail": { "version": "2.0.0" }
+            },
+            "_meta": { "io.modelcontextprotocol.registry/official": { "status": "active" } }
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    let source = source_with_mock(&server.uri(), temp.path());
+    let pkg = source.fetch("io.github.foo/bar").await.unwrap();
+    assert_eq!(pkg.id, "io.github.foo/bar");
+    assert_eq!(pkg.version, "2.0.0");
+    assert!(pkg.install_hints.get("_meta").is_some());
+}
+
+#[tokio::test]
 async fn cache_ttl_expiry_refetches() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
