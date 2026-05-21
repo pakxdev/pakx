@@ -7,6 +7,7 @@
 
 mod commands;
 mod install;
+mod pack;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -16,7 +17,12 @@ use commands::doctor::{self, DoctorArgs};
 use commands::init::{self, InitArgs};
 use commands::install::{self as install_cmd, InstallArgs};
 use commands::list::{self as list_cmd, ListArgs};
+use commands::login::{self as login_cmd, LoginArgs};
+use commands::pack::{self as pack_cmd, PackArgs};
+use commands::publish::{self as publish_cmd, PublishArgs};
 use commands::search::{self, SearchArgs};
+use commands::unpublish::{self as unpublish_cmd, UnpublishArgs};
+use commands::whoami::{self as whoami_cmd, WhoamiArgs};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -44,6 +50,16 @@ enum Command {
     Doctor(DoctorArgs),
     /// Search the federated registry for packages.
     Search(SearchArgs),
+    /// Log in to a pakx-registry deployment.
+    Login(LoginArgs),
+    /// Print the GitHub login pakx is authenticated as.
+    Whoami(WhoamiArgs),
+    /// Build a gzipped tarball from a local skill bundle.
+    Pack(PackArgs),
+    /// Pack + upload a skill bundle to the pakx-registry.
+    Publish(PublishArgs),
+    /// Soft-delete a published version.
+    Unpublish(UnpublishArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -56,5 +72,10 @@ async fn main() -> Result<()> {
         Command::List(args) => list_cmd::run(args).await,
         Command::Doctor(args) => doctor::run(args).await,
         Command::Search(args) => search::run(args).await,
+        Command::Login(args) => login_cmd::run(args).await,
+        Command::Whoami(args) => whoami_cmd::run(args).await,
+        Command::Pack(args) => pack_cmd::run(args).await,
+        Command::Publish(args) => publish_cmd::run(args).await,
+        Command::Unpublish(args) => unpublish_cmd::run(args).await,
     }
 }

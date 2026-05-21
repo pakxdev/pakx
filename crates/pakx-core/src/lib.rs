@@ -4,6 +4,7 @@
 //! Filesystem and network side effects live in `pakx-agents` and
 //! `pakx-registry-client`, respectively.
 
+pub mod credentials;
 pub mod errors;
 pub mod install;
 pub mod lockfile;
@@ -11,6 +12,9 @@ pub mod manifest;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub use credentials::{
+    Credentials, CredentialsError, Entry as CredentialEntry, DEFAULT_REGISTRY_URL,
+};
 pub use errors::{LockfileError, ManifestError};
 pub use install::{
     compute_integrity, Command, Hook, McpServer, McpTransport, Prompt, Skill, SkillFile, Subagent,
