@@ -5,12 +5,16 @@
 //! `pakx-registry-client`, respectively.
 
 pub mod errors;
+pub mod install;
 pub mod lockfile;
 pub mod manifest;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use errors::{LockfileError, ManifestError};
+pub use install::{
+    compute_integrity, Command, Hook, McpServer, Prompt, Skill, SkillFile, Subagent,
+};
 pub use lockfile::{
     parse_lockfile, write_lockfile, Integrity, LockEntry, Lockfile, RegistrySource,
     LOCKFILE_VERSION, REGISTRY_SOURCES,

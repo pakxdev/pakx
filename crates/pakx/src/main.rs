@@ -27,8 +27,9 @@ enum Command {
 
 // Subcommand stubs are infallible today, but the real `install` / `add`
 // flows return Result, so the signature is pre-committed.
+#[tokio::main(flavor = "current_thread")]
 #[allow(clippy::unnecessary_wraps)]
-fn main() -> Result<()> {
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init => {

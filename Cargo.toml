@@ -23,8 +23,16 @@ serde_json = "1.0"
 # serde_yaml is archived; serde_yml is an actively maintained drop-in fork.
 serde_yml = "0.0.12"
 # Async + HTTP (used later by registry-client)
-tokio = { version = "1.41", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+async-trait = "0.1"
+# Cross-platform home/config dir resolution
+dirs = "5"
+# Sha256 over file payloads (integrity verification)
+sha2 = "0.10"
+base64 = "0.22"
+# Temp dirs in tests, atomic writes in production
+tempfile = "3.13"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
