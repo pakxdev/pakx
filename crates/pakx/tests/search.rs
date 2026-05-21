@@ -24,7 +24,7 @@ async fn search_lists_packages_from_registry() {
 
     Command::cargo_bin(BIN)
         .unwrap()
-        .args(["search", "--mcp-base-url", &server.uri()])
+        .args(["search", "--mcp-base-url", &server.uri(), "--no-smithery"])
         .assert()
         .success()
         .stdout(predicate::str::contains("io.github.acme/one"))
@@ -46,10 +46,56 @@ async fn search_with_query_passes_through_to_registry() {
 
     Command::cargo_bin(BIN)
         .unwrap()
-        .args(["search", "acme", "--mcp-base-url", &server.uri()])
+        .args([
+            "search",
+            "acme",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("io.github.acme/match"));
+}
+
+#[tokio::test]
+async fn search_federates_across_official_mcp_and_smithery() {
+    // Two separate wiremock servers, one per source.
+    let mcp = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.acme/mcp-side", "description": "from mcp", "version_detail": {"version": "1.0.0"} }
+            ]
+        })))
+        .mount(&mcp)
+        .await;
+    let sm = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "qualifiedName": "@acme/smithery-side", "description": "from smithery" }
+            ]
+        })))
+        .mount(&sm)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &mcp.uri(),
+            "--smithery-base-url",
+            &sm.uri(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("io.github.acme/mcp-side"))
+        .stdout(predicate::str::contains("@acme/smithery-side"))
+        .stdout(predicate::str::contains("smithery"));
 }
 
 #[tokio::test]
@@ -63,7 +109,13 @@ async fn search_empty_results_prints_hint() {
 
     Command::cargo_bin(BIN)
         .unwrap()
-        .args(["search", "ghost", "--mcp-base-url", &server.uri()])
+        .args([
+            "search",
+            "ghost",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+        ])
         .assert()
         .success()
         .stderr(predicate::str::contains("no results"));

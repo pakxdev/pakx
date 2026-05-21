@@ -2,7 +2,10 @@
 
 use anyhow::Result;
 use clap::Args;
-use pakx_registry_client::{CacheDir, OfficialMcpSource, RegistryClient, OFFICIAL_MCP_BASE_URL};
+use pakx_registry_client::{
+    CacheDir, OfficialMcpSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
+    SMITHERY_BASE_URL,
+};
 use reqwest::Client;
 
 #[derive(Debug, Clone, Args)]
@@ -17,10 +20,22 @@ pub struct SearchArgs {
     /// Override the official MCP Registry base URL (testing).
     #[arg(long, hide = true)]
     pub mcp_base_url: Option<String>,
+
+    /// Override the Smithery registry base URL (testing).
+    #[arg(long, hide = true)]
+    pub smithery_base_url: Option<String>,
+
+    /// Skip Smithery search even if a base URL is available.
+    #[arg(long)]
+    pub no_smithery: bool,
 }
 
 pub async fn run(args: SearchArgs) -> Result<()> {
-    let client = build_client(args.mcp_base_url.as_deref());
+    let client = build_client(
+        args.mcp_base_url.as_deref(),
+        args.smithery_base_url.as_deref(),
+        args.no_smithery,
+    );
     let query = args.query.unwrap_or_default();
     let results = client.search(&query).await;
 
@@ -45,12 +60,26 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_client(mcp_base: Option<&str>) -> RegistryClient {
-    let base = mcp_base.unwrap_or(OFFICIAL_MCP_BASE_URL);
+fn build_client(
+    mcp_base: Option<&str>,
+    smithery_base: Option<&str>,
+    no_smithery: bool,
+) -> RegistryClient {
     let cache_root = std::env::temp_dir().join("pakx-search-cache");
-    let cache = CacheDir::with_root(&cache_root);
-    let source = OfficialMcpSource::with_parts(Client::new(), base, cache);
-    RegistryClient::new().with_source(Box::new(source))
+    let mcp_url = mcp_base.unwrap_or(OFFICIAL_MCP_BASE_URL);
+    let mcp =
+        OfficialMcpSource::with_parts(Client::new(), mcp_url, CacheDir::with_root(&cache_root));
+    let mut client = RegistryClient::new().with_source(Box::new(mcp));
+    if !no_smithery {
+        let smithery_url = smithery_base.unwrap_or(SMITHERY_BASE_URL);
+        let sm = SmitherySource::with_parts(
+            Client::new(),
+            smithery_url,
+            CacheDir::with_root(&cache_root),
+        );
+        client = client.with_source(Box::new(sm));
+    }
+    client
 }
 
 const fn source_tag(s: pakx_core::RegistrySource) -> &'static str {
