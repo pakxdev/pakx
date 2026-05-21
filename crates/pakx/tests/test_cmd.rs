@@ -166,6 +166,41 @@ async fn test_online_fails_on_unknown_dep() {
 }
 
 #[test]
+fn test_exits_non_zero_on_malformed_yaml() {
+    // README sells "exit non-zero on first failure" as the CI contract.
+    // Verify that a syntactically broken `agents.yml` triggers the same
+    // failure path as a registry resolution failure.
+    let project = TempDir::new().unwrap();
+    write_manifest(project.path(), "name: bad\nversion: [unterminated\n");
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("read manifest"));
+}
+
+#[test]
+fn test_exits_non_zero_on_unknown_manifest_field() {
+    // `Manifest` is `#[serde(deny_unknown_fields)]`. An unknown field
+    // (typo'd key) must be rejected — that's the whole point of the
+    // deny_unknown_fields contract.
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\nunknwn_field: oops\n",
+    );
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("read manifest"));
+}
+
+#[test]
 fn test_does_not_write_lockfile() {
     let project = TempDir::new().unwrap();
     write_manifest(project.path(), "name: example\nversion: 0.1.0\n");
