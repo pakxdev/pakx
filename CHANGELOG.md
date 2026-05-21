@@ -6,6 +6,37 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-21
+
+### Fixed
+
+- **`pakx install` against `io.github.bytedance/mcp-server-filesystem`
+  (and every other 2025-12-11-schema MCP Registry entry) — was failing
+  with `not found in official MCP registry` and `no installable
+  transport advertised` because the schema renamed every field we
+  decode from snake_case to camelCase and moved the transport hint
+  inside each package.**
+  - `OfficialMcpSource::fetch` now falls back from the per-server
+    detail endpoint (which 404s on the current schema) to
+    `?search=<id>` exact-name match. The old detail endpoint is still
+    tried first so legacy deployments keep working.
+  - `mcp_translate::PackageHint` accepts both `registry_name` /
+    `registryType`, `name` / `identifier`, `package_arguments` /
+    `packageArguments`, and `environment_variables` /
+    `environmentVariables` via serde aliases.
+  - `mcp_translate::pick_remote` now also walks `packages[].transport`
+    so hosted SSE / streamable-http servers resolve to
+    `McpTransport::Http` even when the response has no top-level
+    `remotes[]` array.
+  - Recognises `npm` / `npmjs` / `npmjs.org`, `pypi` / `pypi.org`,
+    and `docker` / `oci` / `ghcr` / `ghcr.io` as stdio-launchable
+    registry types.
+
+End-to-end verified on Windows-GNU: `pakx install` against
+`io.github.bytedance/mcp-server-filesystem` writes the right
+`.mcp.json` with `npx -y @agent-infra/mcp-server-filesystem`, and
+`pakx doctor` reports all checks passed.
+
 ## [0.1.2] — 2026-05-21
 
 ### Added

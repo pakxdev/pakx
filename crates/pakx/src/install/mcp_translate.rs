@@ -42,15 +42,27 @@ pub fn translate(pkg: &Package) -> Result<McpTransport, TranslateError> {
 
 fn pick_stdio(hints: &InstallHints, _id: &str) -> Option<McpTransport> {
     for pkg in &hints.packages {
+        // 2025-12-11 schema moved the transport hint inside each
+        // package; SSE / streamable-http packages should resolve to
+        // Http, not stdio. Skip those here so pick_remote picks them up.
+        if let Some(transport) = &pkg.transport {
+            let kind = transport.kind.as_deref().unwrap_or("").to_lowercase();
+            if kind == "sse" || kind == "streamable-http" || kind == "http" {
+                continue;
+            }
+        }
+
         let registry = pkg.registry_name.as_deref().unwrap_or("").to_lowercase();
         let name = pkg.name.as_deref()?;
         let env = collect_env(&pkg.environment_variables);
         let extra_args = collect_positional_args(&pkg.package_arguments);
 
         let (command, mut args) = match registry.as_str() {
-            "npm" => ("npx".to_owned(), vec!["-y".to_owned(), name.to_owned()]),
-            "pypi" => ("uvx".to_owned(), vec![name.to_owned()]),
-            "docker" | "oci" => (
+            "npm" | "npmjs" | "npmjs.org" => {
+                ("npx".to_owned(), vec!["-y".to_owned(), name.to_owned()])
+            }
+            "pypi" | "pypi.org" => ("uvx".to_owned(), vec![name.to_owned()]),
+            "docker" | "oci" | "ghcr" | "ghcr.io" => (
                 "docker".to_owned(),
                 vec![
                     "run".to_owned(),
@@ -68,12 +80,24 @@ fn pick_stdio(hints: &InstallHints, _id: &str) -> Option<McpTransport> {
 }
 
 fn pick_remote(hints: &InstallHints) -> Option<McpTransport> {
+    // Legacy `remotes` array — pre-2025-12-11 deployments.
     for r in &hints.remotes {
         if let Some(url) = &r.url {
             return Some(McpTransport::Http {
                 url: url.clone(),
                 headers: BTreeMap::new(),
             });
+        }
+    }
+    // 2025-12-11 schema embeds the transport inside each package.
+    for pkg in &hints.packages {
+        if let Some(transport) = &pkg.transport {
+            if let Some(url) = &transport.url {
+                return Some(McpTransport::Http {
+                    url: url.clone(),
+                    headers: BTreeMap::new(),
+                });
+            }
         }
     }
     None
@@ -112,14 +136,31 @@ struct InstallHints {
 
 #[derive(Debug, Deserialize)]
 struct PackageHint {
-    #[serde(default, rename = "registry_name")]
+    // Pre-2025-12-11 schema used `registry_name`; the new schema uses
+    // `registryType` (e.g. "npm"). Accept both.
+    #[serde(default, alias = "registry_name", alias = "registryType")]
     registry_name: Option<String>,
-    #[serde(default)]
+    // Pre-2025-12-11 used `name`; new schema uses `identifier`.
+    #[serde(default, alias = "name", alias = "identifier")]
     name: Option<String>,
-    #[serde(default, rename = "package_arguments")]
+    #[serde(default, alias = "package_arguments", alias = "packageArguments")]
     package_arguments: Vec<PackageArg>,
-    #[serde(default, rename = "environment_variables")]
+    #[serde(
+        default,
+        alias = "environment_variables",
+        alias = "environmentVariables"
+    )]
     environment_variables: Vec<EnvVar>,
+    #[serde(default)]
+    transport: Option<TransportHint>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransportHint {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,7 +181,7 @@ struct EnvVar {
 
 #[derive(Debug, Deserialize)]
 struct RemoteHint {
-    #[serde(default, rename = "transport_type")]
+    #[serde(default, alias = "transport_type", alias = "type")]
     #[allow(dead_code)]
     transport_type: Option<String>,
     #[serde(default)]
@@ -233,6 +274,51 @@ mod tests {
             translate(&p),
             Err(TranslateError::NoTransport { .. })
         ));
+    }
+
+    #[test]
+    fn new_schema_field_names_decode_via_serde_aliases() {
+        // 2025-12-11 MCP Registry schema: registryType / identifier /
+        // packageArguments / environmentVariables.
+        let p = pkg(json!({
+            "packages": [{
+                "registryType": "npm",
+                "identifier": "@acme/cool-mcp",
+                "packageArguments": [
+                    { "type": "positional", "value": "--port=3000" }
+                ],
+                "environmentVariables": [
+                    { "name": "API_KEY" }
+                ]
+            }]
+        }));
+        let McpTransport::Stdio { command, args, env } = translate(&p).unwrap() else {
+            panic!("expected stdio");
+        };
+        assert_eq!(command, "npx");
+        assert_eq!(args, vec!["-y", "@acme/cool-mcp", "--port=3000"]);
+        assert_eq!(env.get("API_KEY"), Some(&String::new()));
+    }
+
+    #[test]
+    fn embedded_transport_url_resolves_to_http() {
+        // 2025-12-11 schema can embed an SSE / streamable-http transport
+        // directly inside a package entry. pick_remote walks `packages[]`
+        // when `remotes[]` is absent.
+        let p = pkg(json!({
+            "packages": [{
+                "registryType": "npm",
+                "identifier": "@acme/hosted-mcp",
+                "transport": {
+                    "type": "streamable-http",
+                    "url": "https://hosted.example/mcp"
+                }
+            }]
+        }));
+        let McpTransport::Http { url, .. } = translate(&p).unwrap() else {
+            panic!("expected http transport");
+        };
+        assert_eq!(url, "https://hosted.example/mcp");
     }
 
     #[test]
