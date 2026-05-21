@@ -6,6 +6,30 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-21
+
+### Added
+
+- `pakx upgrade` — checks `github.com/repos/pakxdev/pakx/releases/latest`
+  and prints the channel-appropriate upgrade command (curl|sh,
+  irm|iex, `brew upgrade pakx`, `scoop update pakx`, or `cargo
+  install --tag`). Read-only by design — does not rewrite the
+  currently-installed binary because that path varies per channel
+  and trying to be clever ruins installs.
+- Governance: `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`,
+  `.github/FUNDING.yml`. Issue templates use structured forms with
+  version + platform + reproducer fields; PR template defaults the
+  test plan to the local `fmt`/`clippy`/`test` commands.
+- `examples/hello-world/SKILL.md` — minimal publishable skill, walks
+  through `pakx login`/`pakx pack`/`pakx publish`.
+
+### Distribution
+
+- Homebrew tap shipped: `brew install pakxdev/tap/pakx`.
+- Scoop bucket shipped: `scoop bucket add pakx ... && scoop install pakx`.
+- CycloneDX 1.3 SBOM (`pakx-v0.1.1-sbom.cdx.json`) attached to the
+  v0.1.1 GitHub Release for downstream vulnerability scanners.
+
 ## [0.1.1] — 2026-05-21
 
 Security + portability cleanup. No CLI behaviour change.

@@ -10,4 +10,5 @@ pub mod pack;
 pub mod publish;
 pub mod search;
 pub mod unpublish;
+pub mod upgrade;
 pub mod whoami;
