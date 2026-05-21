@@ -31,6 +31,7 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx unpublish <owner>/<name>@<version>` | `DELETE` (with grace-period tombstoning on the server side). |
 | `pakx upgrade` (alias `pakx update`) | Check GitHub Releases for a newer pakx and print the channel-appropriate install command. |
 | `pakx completion <shell>` | Emit shell-completion script for bash / zsh / fish / powershell / elvish. |
+| `pakx config` | Print resolved CLI configuration — credentials path, cache dir, federated registry URLs. `--json` for pipelines. |
 
 In the registry (live at [registry.pakx.dev](https://registry.pakx.dev)): public browse + signed-in user dashboard + API tokens. Stripe Connect for marketplace payouts is scaffolded but not enabled.
 
