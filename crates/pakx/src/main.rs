@@ -22,6 +22,7 @@ use commands::pack::{self as pack_cmd, PackArgs};
 use commands::publish::{self as publish_cmd, PublishArgs};
 use commands::search::{self, SearchArgs};
 use commands::unpublish::{self as unpublish_cmd, UnpublishArgs};
+use commands::upgrade::{self as upgrade_cmd, UpgradeArgs};
 use commands::whoami::{self as whoami_cmd, WhoamiArgs};
 
 #[derive(Debug, Parser)]
@@ -60,6 +61,8 @@ enum Command {
     Publish(PublishArgs),
     /// Soft-delete a published version.
     Unpublish(UnpublishArgs),
+    /// Check GitHub Releases for a newer pakx version.
+    Upgrade(UpgradeArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -77,5 +80,6 @@ async fn main() -> Result<()> {
         Command::Pack(args) => pack_cmd::run(args).await,
         Command::Publish(args) => publish_cmd::run(args).await,
         Command::Unpublish(args) => unpublish_cmd::run(args).await,
+        Command::Upgrade(args) => upgrade_cmd::run(args).await,
     }
 }
