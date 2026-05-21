@@ -1,6 +1,6 @@
 //! `pakx completion <shell>` — emit shell completion script.
 //!
-//! Generated via clap_complete from the same Cli struct that drives
+//! Generated via `clap_complete` from the same `Cli` struct that drives
 //! every other subcommand, so completions never drift out of sync
 //! with the actual flag surface.
 
