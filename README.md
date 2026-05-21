@@ -57,7 +57,7 @@ pakx list                     # show what's installed where
 
 ## Build from source
 
-Requires Rust 1.83+ (toolchain pinned to `stable` via `rust-toolchain.toml`).
+Requires Rust 1.87+ (toolchain pinned to `stable` via `rust-toolchain.toml`).
 
 ```sh
 cargo build --workspace
