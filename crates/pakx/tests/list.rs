@@ -100,6 +100,94 @@ fn list_json_emits_valid_array_with_expected_keys() {
     assert_eq!(entry["status"], "unknown");
 }
 
+// Skill-shaped lockfile fixture for status tests: the adapter only
+// reconciles entries it can see on disk under `skills/<owner>/<name>/`,
+// so the `ok` / `drift` JSON contract is exercised against this shape.
+const SKILLS_LOCKFILE: &str = r#"{"lockfileVersion":1,"manifestHash":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","entries":{
+  "skills/anthropic/pdf@1.4.0":{
+    "name":"anthropic/pdf",
+    "type":"skills",
+    "version":"1.4.0",
+    "resolvedFrom":"pakx:anthropic/pdf",
+    "registry":"pakx",
+    "integrity":"sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    "agents":["claude-code"],
+    "dependencies":[]
+  }
+}}
+"#;
+
+/// Write a minimal `SKILL.md` under `<home>/skills/<owner>/<name>/` so
+/// `ClaudeCodeAdapter::list` discovers it with the supplied version.
+fn write_installed_skill(home: &std::path::Path, owner: &str, name: &str, version: &str) {
+    let dir = home.join("skills").join(owner).join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = format!("---\nname: {name}\nversion: {version}\n---\n# {name}\nbody\n");
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
+#[test]
+fn list_json_status_is_ok_when_installed_skill_matches_lockfile() {
+    // Contract: `status` serializes as the exact string `"ok"` when the
+    // adapter sees a matching skill on disk. Downstream pipelines key on
+    // these strings — they are public contract, lock them in.
+    let project = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    std::fs::write(project.path().join("agents.lock"), SKILLS_LOCKFILE).unwrap();
+    write_installed_skill(home.path(), "anthropic", "pdf", "1.4.0");
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "list",
+            "--json",
+            "--claude-home",
+            home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["status"], "ok");
+}
+
+#[test]
+fn list_json_status_is_drift_when_lockfile_pins_uninstalled_skill() {
+    // Contract: `status` serializes as the exact string `"drift"` when
+    // the lockfile pins an entry the adapter cannot find on disk.
+    let project = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    std::fs::write(project.path().join("agents.lock"), SKILLS_LOCKFILE).unwrap();
+    // Intentionally NO `write_installed_skill` — drift expected.
+    // Touch `<home>/skills/` so the adapter walks an empty dir instead
+    // of bailing on a missing root.
+    std::fs::create_dir_all(home.path().join("skills")).unwrap();
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "list",
+            "--json",
+            "--claude-home",
+            home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["status"], "drift");
+}
+
 #[test]
 fn list_json_without_lockfile_emits_empty_array() {
     let project = TempDir::new().unwrap();
