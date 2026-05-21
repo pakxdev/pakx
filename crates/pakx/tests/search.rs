@@ -209,6 +209,82 @@ async fn search_json_empty_results_emits_empty_array() {
 }
 
 #[tokio::test]
+async fn search_json_description_always_present_even_when_upstream_omits_it() {
+    // Contract: `description` is always emitted as a string. When the
+    // upstream hit has no description (or an explicit `null`), pakx
+    // emits an empty string so `jq '.description'` never returns
+    // `null` and the field shape is invariant.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                {
+                    "name": "io.github.acme/no-desc",
+                    "version_detail": {"version": "1.0.0"}
+                },
+                {
+                    "name": "io.github.acme/null-desc",
+                    "description": null,
+                    "version_detail": {"version": "1.0.0"}
+                },
+                {
+                    "name": "io.github.acme/empty-desc",
+                    "description": "",
+                    "version_detail": {"version": "1.0.0"}
+                },
+                {
+                    "name": "io.github.acme/real-desc",
+                    "description": "hello",
+                    "version_detail": {"version": "1.0.0"}
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let arr = parsed.as_array().expect("top level is an array");
+    for hit in arr {
+        let desc = hit
+            .get("description")
+            .expect("description must always be present");
+        assert!(
+            desc.is_string(),
+            "description must be a string, got {desc:?}",
+        );
+    }
+    let by_name: std::collections::HashMap<&str, &str> = arr
+        .iter()
+        .map(|h| {
+            (
+                h["name"].as_str().unwrap(),
+                h["description"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(by_name.get("io.github.acme/no-desc"), Some(&""));
+    assert_eq!(by_name.get("io.github.acme/null-desc"), Some(&""));
+    assert_eq!(by_name.get("io.github.acme/empty-desc"), Some(&""));
+    assert_eq!(by_name.get("io.github.acme/real-desc"), Some(&"hello"));
+}
+
+#[tokio::test]
 async fn search_json_respects_limit() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

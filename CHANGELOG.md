@@ -14,8 +14,11 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   no second code path. Field names are a stable contract:
   - `list`: `key`, `id`, `version`, `type`, `registry`, `resolved_from`,
     `integrity`, `agents`, `status` (`ok` | `drift` | `unknown`).
-  - `search`: `id`, `name`, `version`, `source`, `description` (omitted
-    when absent). `--no-pakx` is honoured.
+  - `search`: `id`, `name`, `version`, `source`, `description`.
+    `description` is **always present** in the JSON output (empty
+    string when upstream has no description) so `jq '.description'`
+    never returns `null` — the field shape is invariant across hits.
+    `--no-pakx` is honoured.
 
 ## [0.1.3] — 2026-05-21
 

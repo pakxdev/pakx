@@ -50,14 +50,20 @@ pub struct SearchArgs {
 
 /// Wire-format hit emitted by `--json`. Field names are a stable
 /// contract — only additive changes are backwards-compatible.
+///
+/// `description` is **always present** in the JSON output, even when
+/// the upstream registry returned no description (emitted as `""`).
+/// Skipping the field on `None` while emitting `""` on `Some("")` made
+/// `jq '.description'` brittle for downstream pipelines; treat both
+/// cases as the empty string so the field shape is invariant.
 #[derive(Debug, Serialize)]
 struct JsonHit<'a> {
     id: &'a str,
     name: &'a str,
     version: &'a str,
     source: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
+    /// Empty string when upstream has no description.
+    description: &'a str,
 }
 
 pub async fn run(args: SearchArgs) -> Result<()> {
@@ -81,7 +87,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
                 name: pkg.name.as_str(),
                 version: pkg.version.as_str(),
                 source: pkg.source.as_tag(),
-                description: pkg.description.as_deref(),
+                description: pkg.description.as_deref().unwrap_or(""),
             })
             .collect();
         let line = serde_json::to_string(&hits).context("serialize search hits as json")?;
