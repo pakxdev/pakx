@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod completion;
+pub mod config;
 pub mod doctor;
 pub mod info;
 pub mod init;
