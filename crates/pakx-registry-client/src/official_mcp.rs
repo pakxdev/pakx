@@ -53,12 +53,12 @@ impl OfficialMcpSource {
         }
     }
 
-    fn cache_key_search(query: &str) -> String {
-        format!("{TAG}:search:{query}")
+    fn cache_key_search(&self, query: &str) -> String {
+        format!("{TAG}@{}:search:{query}", self.base_url)
     }
 
-    fn cache_key_fetch(id: &str) -> String {
-        format!("{TAG}:fetch:{id}")
+    fn cache_key_fetch(&self, id: &str) -> String {
+        format!("{TAG}@{}:fetch:{id}", self.base_url)
     }
 }
 
@@ -69,7 +69,7 @@ impl Source for OfficialMcpSource {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Package>, RegistryError> {
-        let key = Self::cache_key_search(query);
+        let key = self.cache_key_search(query);
         let http = self.http.clone();
         let base_url = self.base_url.clone();
         let q = query.to_owned();
@@ -107,7 +107,7 @@ impl Source for OfficialMcpSource {
     }
 
     async fn fetch(&self, id: &str) -> Result<Package, RegistryError> {
-        let key = Self::cache_key_fetch(id);
+        let key = self.cache_key_fetch(id);
         let http = self.http.clone();
         let base_url = self.base_url.clone();
         let id_owned = id.to_owned();
