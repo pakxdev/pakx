@@ -1,6 +1,7 @@
 //! Subcommand implementations for the `pakx` binary.
 
 pub mod add;
+pub mod completion;
 pub mod doctor;
 pub mod info;
 pub mod init;
