@@ -6,7 +6,11 @@
 
 pub mod adapter;
 pub mod claude_code;
+pub mod codex;
+pub mod copilot;
+pub mod cursor;
 pub mod error;
+pub mod windsurf;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -15,4 +19,8 @@ pub const SUPPORTED_CORE: &str = pakx_core::VERSION;
 
 pub use adapter::{Adapter, Installed};
 pub use claude_code::ClaudeCodeAdapter;
+pub use codex::CodexAdapter;
+pub use copilot::CopilotAdapter;
+pub use cursor::CursorAdapter;
 pub use error::AdapterError;
+pub use windsurf::WindsurfAdapter;

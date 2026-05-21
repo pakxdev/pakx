@@ -90,10 +90,17 @@ pub trait Adapter: Send + Sync {
     // ---- uninstall + list -----------------------------------------------
 
     /// Remove a previously installed package by its `<owner>/<name>` id.
-    /// Returns [`AdapterError::NotInstalled`] if absent.
-    async fn uninstall(&self, id: &str) -> Result<(), AdapterError>;
+    /// Default impl returns [`AdapterError::NotInstalled`] — honest for
+    /// adapters that have no `install_*` overrides and therefore never put
+    /// anything on disk. Override when a real impl lands.
+    async fn uninstall(&self, id: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::NotInstalled { id: id.to_owned() })
+    }
 
     /// List every primitive currently installed by this adapter, across
-    /// all package types it supports.
-    async fn list(&self) -> Result<Vec<Installed>, AdapterError>;
+    /// all package types it supports. Default impl returns an empty Vec
+    /// (honest for adapters with no `install_*` overrides).
+    async fn list(&self) -> Result<Vec<Installed>, AdapterError> {
+        Ok(Vec::new())
+    }
 }
