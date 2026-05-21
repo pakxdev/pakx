@@ -27,15 +27,19 @@ pub enum RegistrySource {
     Glama,
     Github,
     Git,
+    /// The pakx-registry backend (registry.pakx.dev) — first-party
+    /// federated source for packages published through the CLI.
+    Pakx,
 }
 
 /// All registry-source variants in canonical order.
-pub const REGISTRY_SOURCES: [RegistrySource; 5] = [
+pub const REGISTRY_SOURCES: [RegistrySource; 6] = [
     RegistrySource::OfficialMcp,
     RegistrySource::Smithery,
     RegistrySource::Glama,
     RegistrySource::Github,
     RegistrySource::Git,
+    RegistrySource::Pakx,
 ];
 
 // ---------------------------------------------------------------------------

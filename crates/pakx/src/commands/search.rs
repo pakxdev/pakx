@@ -3,8 +3,8 @@
 use anyhow::Result;
 use clap::Args;
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
-    SMITHERY_BASE_URL,
+    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource,
+    OFFICIAL_MCP_BASE_URL, PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use reqwest::Client;
 
@@ -25,16 +25,26 @@ pub struct SearchArgs {
     #[arg(long, hide = true)]
     pub smithery_base_url: Option<String>,
 
+    /// Override the pakx-registry base URL (testing).
+    #[arg(long, hide = true)]
+    pub pakx_base_url: Option<String>,
+
     /// Skip Smithery search even if a base URL is available.
     #[arg(long)]
     pub no_smithery: bool,
+
+    /// Skip the pakx-registry source.
+    #[arg(long)]
+    pub no_pakx: bool,
 }
 
 pub async fn run(args: SearchArgs) -> Result<()> {
     let client = build_client(
         args.mcp_base_url.as_deref(),
         args.smithery_base_url.as_deref(),
+        args.pakx_base_url.as_deref(),
         args.no_smithery,
+        args.no_pakx,
     );
     let query = args.query.unwrap_or_default();
     let results = client.search(&query).await;
@@ -63,7 +73,9 @@ pub async fn run(args: SearchArgs) -> Result<()> {
 fn build_client(
     mcp_base: Option<&str>,
     smithery_base: Option<&str>,
+    pakx_base: Option<&str>,
     no_smithery: bool,
+    no_pakx: bool,
 ) -> RegistryClient {
     let cache_root = std::env::temp_dir().join("pakx-search-cache");
     let mcp_url = mcp_base.unwrap_or(OFFICIAL_MCP_BASE_URL);
@@ -79,6 +91,15 @@ fn build_client(
         );
         client = client.with_source(Box::new(sm));
     }
+    if !no_pakx {
+        let pakx_url = pakx_base.unwrap_or(PAKX_BASE_URL);
+        let pakx = PakxSource::with_parts(
+            Client::new(),
+            pakx_url,
+            CacheDir::with_root(&cache_root),
+        );
+        client = client.with_source(Box::new(pakx));
+    }
     client
 }
 
@@ -89,6 +110,7 @@ const fn source_tag(s: pakx_core::RegistrySource) -> &'static str {
         pakx_core::RegistrySource::Glama => "glama",
         pakx_core::RegistrySource::Github => "github",
         pakx_core::RegistrySource::Git => "git",
+        pakx_core::RegistrySource::Pakx => "pakx",
     }
 }
 

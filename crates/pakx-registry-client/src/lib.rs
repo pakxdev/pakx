@@ -10,6 +10,7 @@ pub mod client;
 pub mod errors;
 pub mod official_mcp;
 pub mod pakx_backend;
+pub mod pakx_source;
 pub mod smithery;
 pub mod source;
 pub mod types;
@@ -27,6 +28,7 @@ pub use pakx_backend::{
     BackendError, CreatePackageRequest, CreatePackageResponse, PakxBackend, UploadVersionResponse,
     Whoami,
 };
+pub use pakx_source::{PakxSource, DEFAULT_BASE_URL as PAKX_BASE_URL};
 pub use smithery::{SmitherySource, DEFAULT_BASE_URL as SMITHERY_BASE_URL};
 pub use source::Source;
 pub use types::Package;
