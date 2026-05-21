@@ -30,7 +30,7 @@ See [`crates/pakx`](./crates/pakx), [`crates/pakx-core`](./crates/pakx-core), [`
 
 ## Install
 
-During early access the installer scripts build from source via `cargo install` (because cargo-dist prebuilt binaries land at v0.2). Either way the resulting binary is identical.
+Every channel resolves to the same signed binary from the [v0.1.1 GitHub Release](https://github.com/pakxdev/pakx/releases/tag/v0.1.1) and verifies a sha256 before installing.
 
 **macOS / Linux**
 
@@ -44,13 +44,26 @@ curl -fsSL https://pakx.dev/install.sh | sh
 irm https://pakx.dev/install.ps1 | iex
 ```
 
-**Directly via cargo**
+**Homebrew (macOS · Linux)**
 
 ```sh
-cargo install --git https://github.com/pakxdev/pakx --locked pakx
+brew install pakxdev/tap/pakx
 ```
 
-All three paths require [rustup](https://rustup.rs) at this stage. Homebrew tap, Scoop bucket, and Winget manifest ship at v0.2 alongside prebuilt binaries.
+**Scoop (Windows)**
+
+```powershell
+scoop bucket add pakx https://github.com/pakxdev/scoop-pakx
+scoop install pakx
+```
+
+**From source**
+
+```sh
+cargo install --git https://github.com/pakxdev/pakx --tag v0.1.1 --locked pakx
+```
+
+**Direct download** — prebuilt binaries for `darwin/linux/windows × arm64/x86_64` plus matching `.sha256` files are at <https://github.com/pakxdev/pakx/releases/latest>. Winget manifest lands once the Microsoft community repository PR is reviewed.
 
 ## Quick start
 
