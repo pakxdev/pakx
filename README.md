@@ -1,5 +1,10 @@
 # pakx
 
+[![release](https://img.shields.io/github/v/release/pakxdev/pakx?display_name=tag&sort=semver)](https://github.com/pakxdev/pakx/releases/latest)
+[![license](https://img.shields.io/github/license/pakxdev/pakx)](./LICENSE)
+[![docs](https://img.shields.io/badge/docs-pakx.dev%2Fdocs-blue)](https://pakx.dev/docs)
+[![api](https://img.shields.io/badge/api-pakx.dev%2Fdocs%2Fapi-blue)](https://pakx.dev/docs/api)
+
 > The universal package manager for AI agent context. **One binary. One manifest. Every agent.**
 
 `pakx` is a tiny native CLI that installs **skills, MCP servers, subagents, prompts, slash commands, and hooks** across every AI agent on your machine (Claude Code, Cursor, Codex, Copilot, Windsurf, and more) from a single manifest (`agents.yml`) and lockfile (`agents.lock`).
@@ -23,6 +28,7 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx pack` | Build a deterministic gzipped tarball from a `SKILL.md` directory. |
 | `pakx publish` | `pack` → `POST` package → `PUT` tarball. `--dry-run` skips the upload. |
 | `pakx unpublish <owner>/<name>@<version>` | `DELETE` (with grace-period tombstoning on the server side). |
+| `pakx upgrade` (alias `pakx update`) | Check GitHub Releases for a newer pakx and print the channel-appropriate install command. |
 
 In the registry (live at [registry.pakx.dev](https://registry.pakx.dev)): public browse + signed-in user dashboard + API tokens. Stripe Connect for marketplace payouts is scaffolded but not enabled.
 

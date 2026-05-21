@@ -62,6 +62,7 @@ enum Command {
     /// Soft-delete a published version.
     Unpublish(UnpublishArgs),
     /// Check GitHub Releases for a newer pakx version.
+    #[command(alias = "update")]
     Upgrade(UpgradeArgs),
 }
 
