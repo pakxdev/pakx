@@ -3,8 +3,8 @@
 use anyhow::Result;
 use clap::Args;
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource,
-    OFFICIAL_MCP_BASE_URL, PAKX_BASE_URL, SMITHERY_BASE_URL,
+    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
+    PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use reqwest::Client;
 
@@ -93,11 +93,8 @@ fn build_client(
     }
     if !no_pakx {
         let pakx_url = pakx_base.unwrap_or(PAKX_BASE_URL);
-        let pakx = PakxSource::with_parts(
-            Client::new(),
-            pakx_url,
-            CacheDir::with_root(&cache_root),
-        );
+        let pakx =
+            PakxSource::with_parts(Client::new(), pakx_url, CacheDir::with_root(&cache_root));
         client = client.with_source(Box::new(pakx));
     }
     client

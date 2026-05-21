@@ -79,10 +79,7 @@ impl Source for PakxSource {
                 let url = if q.is_empty() {
                     format!("{base_url}/api/v1/packages")
                 } else {
-                    format!(
-                        "{base_url}/api/v1/packages?q={}",
-                        urlencoding_minimal(&q)
-                    )
+                    format!("{base_url}/api/v1/packages?q={}", urlencoding_minimal(&q))
                 };
                 debug!(target: "pakx::registry", %url, "pakx search");
                 let body: ListResponse = http
@@ -116,12 +113,10 @@ impl Source for PakxSource {
         let id_owned = id.to_owned();
         self.cache
             .get_or_fetch::<Package, _, _>(&key, move || async move {
-                let (owner, name) = split_owner_name(&id_owned).ok_or(
-                    RegistryError::NotFound {
-                        source_tag: TAG,
-                        id: id_owned.clone(),
-                    },
-                )?;
+                let (owner, name) = split_owner_name(&id_owned).ok_or(RegistryError::NotFound {
+                    source_tag: TAG,
+                    id: id_owned.clone(),
+                })?;
                 let url = format!(
                     "{base_url}/api/v1/packages/{}/{}",
                     urlencoding_minimal(owner),
@@ -234,8 +229,7 @@ fn detail_into_package(raw: DetailResponse, fallback_id: String) -> Package {
     let version = raw
         .versions
         .first()
-        .map(|v| v.version.clone())
-        .unwrap_or_else(|| "0.0.0".to_string());
+        .map_or_else(|| "0.0.0".to_string(), |v| v.version.clone());
     let mut hints = raw.extra;
     if let Some(k) = raw.kind {
         hints.insert("kind".into(), Value::String(k));

@@ -22,9 +22,7 @@ async fn search_returns_empty_when_registry_empty() {
     let cache = TempDir::new().unwrap();
     Mock::given(method("GET"))
         .and(path("/api/v1/packages"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "packages": [] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "packages": [] })))
         .mount(&server)
         .await;
 
@@ -68,7 +66,10 @@ async fn search_maps_list_entries() {
     assert_eq!(results[0].version, "1.2.3");
     assert_eq!(results[0].description.as_deref(), Some("first"));
     assert_eq!(
-        results[0].install_hints.get("kind").and_then(|v| v.as_str()),
+        results[0]
+            .install_hints
+            .get("kind")
+            .and_then(|v| v.as_str()),
         Some("skill")
     );
 
@@ -163,7 +164,13 @@ async fn fetch_rejects_malformed_id() {
     for bad in ["", "no-slash", "/leading", "trailing/", "a/b/c"] {
         let err = src.fetch(bad).await.unwrap_err();
         assert!(
-            matches!(err, RegistryError::NotFound { source_tag: "pakx", .. }),
+            matches!(
+                err,
+                RegistryError::NotFound {
+                    source_tag: "pakx",
+                    ..
+                }
+            ),
             "id {bad:?} should be rejected as malformed"
         );
     }
