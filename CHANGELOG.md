@@ -19,6 +19,26 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
     string when upstream has no description) so `jq '.description'`
     never returns `null` — the field shape is invariant across hits.
     `--no-pakx` is honoured.
+- `pakx test` — read-only manifest validation for CI / pre-commit use.
+  Parses `agents.yml` and (unless `--offline`) resolves every `mcp:`
+  entry against the federated registries — official MCP Registry +
+  Smithery + pakx-registry by default; toggle with `--no-smithery` and
+  `--no-pakx-registry` (matches `pakx search`'s flag layout). Prints a
+  per-entry `ok` / `fail: <reason>` line and exits non-zero on the
+  first failure. **Scope-narrowed to `mcp:` deps for this version:**
+  other dep kinds (`skills:` / `subagents:` / `prompts:` / `commands:`
+  / `hooks:`) are reported as `skip (not yet validated: ...)` and a
+  single `note: skipped N entries (only mcp: validated in this
+  version)` line is written to stderr when any were skipped. They are
+  NOT counted as failures — that would break the CI contract for
+  manifests that already declare those dep kinds waiting for adapter
+  wiring. Does not write `agents.lock`, does not touch the install
+  dir. `--offline` checks deps against the existing lockfile only;
+  `--manifest <path>` overrides the default `agents.yml` location.
+  Hidden test-only base-URL overrides (`--mcp-base-url` /
+  `--smithery-base-url` / `--pakx-base-url`) require `https://` or
+  `http://localhost` / `http://127.0.0.1` — any other plaintext URL is
+  rejected to prevent silent exfiltration of manifest contents in CI.
 
 ## [0.1.3] — 2026-05-21
 

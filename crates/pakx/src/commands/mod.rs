@@ -12,6 +12,7 @@ pub mod login;
 pub mod pack;
 pub mod publish;
 pub mod search;
+pub mod test;
 pub mod unpublish;
 pub mod upgrade;
 pub mod whoami;

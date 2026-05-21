@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 dirs = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
