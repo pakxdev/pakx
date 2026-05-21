@@ -13,7 +13,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use errors::{LockfileError, ManifestError};
 pub use install::{
-    compute_integrity, Command, Hook, McpServer, Prompt, Skill, SkillFile, Subagent,
+    compute_integrity, Command, Hook, McpServer, McpTransport, Prompt, Skill, SkillFile, Subagent,
 };
 pub use lockfile::{
     parse_lockfile, write_lockfile, Integrity, LockEntry, Lockfile, RegistrySource,

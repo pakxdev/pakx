@@ -200,19 +200,14 @@ async fn uninstall_rejects_malformed_id() {
 }
 
 #[tokio::test]
-async fn install_returns_unsupported_for_other_primitives() {
-    use pakx_core::install::{Command, Hook, McpServer, Prompt, Subagent};
+async fn install_returns_unsupported_for_unimplemented_primitives() {
+    use pakx_core::install::{Command, Hook, Prompt, Subagent};
     let temp = TempDir::new().unwrap();
     let adapter = adapter_in(&temp);
-    let mcp = McpServer { id: "x/y".into() };
     let sa = Subagent { id: "x/y".into() };
     let pr = Prompt { id: "x/y".into() };
     let cm = Command { id: "x/y".into() };
     let hk = Hook { id: "x/y".into() };
-    assert!(matches!(
-        adapter.install_mcp(&mcp).await.unwrap_err(),
-        AdapterError::Unsupported { .. }
-    ));
     assert!(matches!(
         adapter.install_subagent(&sa).await.unwrap_err(),
         AdapterError::Unsupported { .. }
