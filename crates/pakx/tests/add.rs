@@ -5,7 +5,7 @@ use pakx_core::parse_manifest;
 use predicates::prelude::*;
 use serde_json::json;
 use tempfile::TempDir;
-use wiremock::matchers::{method, path_regex};
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const BIN: &str = "pakx";
@@ -25,9 +25,17 @@ async fn mock_mcp_server_ok(id: &str) -> MockServer {
 
 async fn mock_mcp_server_404() -> MockServer {
     let server = MockServer::start().await;
+    // Per-server detail endpoint: 404 to mimic the 2025-12-11 schema drop.
     Mock::given(method("GET"))
         .and(path_regex(r"^/v0/servers/.+"))
         .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    // Search fallback: empty hits so the client resolves cleanly to
+    // `NotFound` instead of bubbling up a real HTTP failure.
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
         .mount(&server)
         .await;
     server
