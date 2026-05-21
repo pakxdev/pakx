@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 
 use commands::add::{self, AddArgs};
 use commands::completion::{self as completion_cmd, CompletionArgs};
+use commands::config::{self as config_cmd, ConfigArgs};
 use commands::doctor::{self, DoctorArgs};
 use commands::info::{self as info_cmd, InfoArgs};
 use commands::init::{self, InitArgs};
@@ -70,6 +71,8 @@ enum Command {
     Upgrade(UpgradeArgs),
     /// Emit shell completion script for bash / zsh / fish / powershell / elvish.
     Completion(CompletionArgs),
+    /// Print resolved CLI configuration (paths + registry URLs).
+    Config(ConfigArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -90,5 +93,6 @@ async fn main() -> Result<()> {
         Command::Unpublish(args) => unpublish_cmd::run(args).await,
         Command::Upgrade(args) => upgrade_cmd::run(args).await,
         Command::Completion(args) => completion_cmd::run::<Cli>(args).await,
+        Command::Config(args) => config_cmd::run(args).await,
     }
 }
