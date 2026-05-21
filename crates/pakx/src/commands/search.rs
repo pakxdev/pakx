@@ -1,12 +1,17 @@
 //! `pakx search <query>` — federated search across all registered sources.
+//!
+//! Default output is one row per hit. With `--json`, the same hits are
+//! emitted as a single-line JSON array on stdout (newline-terminated).
+//! Field names are stable for downstream pipelines.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 use pakx_registry_client::{
     CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use reqwest::Client;
+use serde::Serialize;
 
 #[derive(Debug, Clone, Args)]
 pub struct SearchArgs {
@@ -16,6 +21,11 @@ pub struct SearchArgs {
     /// Maximum results to display.
     #[arg(short = 'n', long, default_value_t = 20)]
     pub limit: usize,
+
+    /// Emit machine-readable JSON on stdout (single line, newline-terminated).
+    /// Field names are a stable contract for downstream pipelines.
+    #[arg(long)]
+    pub json: bool,
 
     /// Override the official MCP Registry base URL (testing).
     #[arg(long, hide = true)]
@@ -38,6 +48,24 @@ pub struct SearchArgs {
     pub no_pakx: bool,
 }
 
+/// Wire-format hit emitted by `--json`. Field names are a stable
+/// contract — only additive changes are backwards-compatible.
+///
+/// `description` is **always present** in the JSON output, even when
+/// the upstream registry returned no description (emitted as `""`).
+/// Skipping the field on `None` while emitting `""` on `Some("")` made
+/// `jq '.description'` brittle for downstream pipelines; treat both
+/// cases as the empty string so the field shape is invariant.
+#[derive(Debug, Serialize)]
+struct JsonHit<'a> {
+    id: &'a str,
+    name: &'a str,
+    version: &'a str,
+    source: &'static str,
+    /// Empty string when upstream has no description.
+    description: &'a str,
+}
+
 pub async fn run(args: SearchArgs) -> Result<()> {
     let client = build_client(
         args.mcp_base_url.as_deref(),
@@ -49,16 +77,34 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     let query = args.query.unwrap_or_default();
     let results = client.search(&query).await;
 
+    let truncated: Vec<_> = results.iter().take(args.limit).collect();
+
+    if args.json {
+        let hits: Vec<JsonHit<'_>> = truncated
+            .iter()
+            .map(|pkg| JsonHit {
+                id: pkg.id.as_str(),
+                name: pkg.name.as_str(),
+                version: pkg.version.as_str(),
+                source: pkg.source.as_tag(),
+                description: pkg.description.as_deref().unwrap_or(""),
+            })
+            .collect();
+        let line = serde_json::to_string(&hits).context("serialize search hits as json")?;
+        println!("{line}");
+        return Ok(());
+    }
+
     if results.is_empty() {
         eprintln!("no results for {query:?}");
         return Ok(());
     }
 
-    for pkg in results.iter().take(args.limit) {
+    for pkg in &truncated {
         let desc = pkg.description.as_deref().unwrap_or("");
         println!(
             "{source:14} {name:50} {version:10}  {desc}",
-            source = source_tag(pkg.source),
+            source = pkg.source.as_tag(),
             name = truncate(&pkg.name, 50),
             version = pkg.version,
             desc = truncate(desc, 60),
@@ -98,17 +144,6 @@ fn build_client(
         client = client.with_source(Box::new(pakx));
     }
     client
-}
-
-const fn source_tag(s: pakx_core::RegistrySource) -> &'static str {
-    match s {
-        pakx_core::RegistrySource::OfficialMcp => "official-mcp",
-        pakx_core::RegistrySource::Smithery => "smithery",
-        pakx_core::RegistrySource::Glama => "glama",
-        pakx_core::RegistrySource::Github => "github",
-        pakx_core::RegistrySource::Git => "git",
-        pakx_core::RegistrySource::Pakx => "pakx",
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
