@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 
 use commands::add::{self, AddArgs};
 use commands::doctor::{self, DoctorArgs};
+use commands::info::{self as info_cmd, InfoArgs};
 use commands::init::{self, InitArgs};
 use commands::install::{self as install_cmd, InstallArgs};
 use commands::list::{self as list_cmd, ListArgs};
@@ -51,6 +52,8 @@ enum Command {
     Doctor(DoctorArgs),
     /// Search the federated registry for packages.
     Search(SearchArgs),
+    /// Print registry metadata + version list for a published package.
+    Info(InfoArgs),
     /// Log in to a pakx-registry deployment.
     Login(LoginArgs),
     /// Print the GitHub login pakx is authenticated as.
@@ -76,6 +79,7 @@ async fn main() -> Result<()> {
         Command::List(args) => list_cmd::run(args).await,
         Command::Doctor(args) => doctor::run(args).await,
         Command::Search(args) => search::run(args).await,
+        Command::Info(args) => info_cmd::run(args).await,
         Command::Login(args) => login_cmd::run(args).await,
         Command::Whoami(args) => whoami_cmd::run(args).await,
         Command::Pack(args) => pack_cmd::run(args).await,

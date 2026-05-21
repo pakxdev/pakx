@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod doctor;
+pub mod info;
 pub mod init;
 pub mod install;
 pub mod list;
