@@ -6,9 +6,40 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-21
+
+Security + portability cleanup. No CLI behaviour change.
+
+### Changed
+
+- **`reqwest` switched from `default-tls` to `rustls-tls`.** Drops the
+  OpenSSL runtime dependency, removes one large attack surface, and
+  makes cross-compilation portable (no system OpenSSL needed for
+  Linux / macOS / Windows builds).
+- **`serde_yml` → `serde_yaml_ng`.** Resolves
+  [RUSTSEC-2025-0067](https://rustsec.org/advisories/RUSTSEC-2025-0067)
+  (`libyml::string::yaml_string_extend` unsound) and
+  [RUSTSEC-2025-0068](https://rustsec.org/advisories/RUSTSEC-2025-0068)
+  (`serde_yml` unmaintained). `serde_yaml_ng` is the actively
+  maintained drop-in fork of the original `serde_yaml`.
+- **`inquire` 0.7 → 0.9.** Drops the transitive dependency on
+  unmaintained `fxhash` ([RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057)).
+
 ### Added
 
-- Governance: `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md` (this file).
+- Cross-platform prebuilt binaries: `aarch64-apple-darwin`,
+  `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`,
+  `x86_64-unknown-linux-gnu`, and `x86_64-pc-windows-gnu`. Built
+  locally with `cargo zigbuild` because GitHub Actions is
+  temporarily disabled to control CI billing.
+- Governance docs: `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`.
+
+### Verified
+
+- `cargo audit` — 0 vulnerabilities, 0 warnings across 288 deps.
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `cargo test --workspace --no-fail-fast` — 200+ tests, 0 failures.
 
 ## [0.1.0] — 2026-05-21
 

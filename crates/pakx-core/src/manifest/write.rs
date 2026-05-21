@@ -9,7 +9,7 @@ use super::schema::Manifest;
 /// agents → dependencies). Empty/`None` collections are skipped via
 /// `skip_serializing_if`. Output ends with a single trailing newline.
 pub fn write_manifest(manifest: &Manifest) -> String {
-    let mut out = serde_yml::to_string(manifest).expect("Manifest serializes infallibly");
+    let mut out = serde_yaml_ng::to_string(manifest).expect("Manifest serializes infallibly");
     if !out.ends_with('\n') {
         out.push('\n');
     }
