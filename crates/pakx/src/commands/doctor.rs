@@ -57,6 +57,11 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,
     };
+    println!(
+        "pakx:    {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+    );
     println!("project: {}", project_root.display());
 
     let mut t = Tally::default();
