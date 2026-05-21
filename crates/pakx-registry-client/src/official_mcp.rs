@@ -113,37 +113,79 @@ impl Source for OfficialMcpSource {
         let id_owned = id.to_owned();
         self.cache
             .get_or_fetch::<Package, _, _>(&key, move || async move {
-                let url = format!("{base_url}/v0/servers/{}", urlencoding_minimal(&id_owned));
-                debug!(target: "pakx::registry", %url, "official-mcp fetch");
+                // Try the per-server detail endpoint first. The 2025-12-11
+                // schema dropped it (404 for every id), but older
+                // deployments still expose it. If we get 200, decode and
+                // return. Otherwise fall through to search-and-filter.
+                let direct = format!("{base_url}/v0/servers/{}", urlencoding_minimal(&id_owned));
+                debug!(target: "pakx::registry", url=%direct, "official-mcp fetch");
                 let response =
-                    http.get(&url)
+                    http.get(&direct)
                         .send()
                         .await
                         .map_err(|source| RegistryError::Http {
                             source_tag: TAG,
                             source,
                         })?;
-
-                if response.status() == reqwest::StatusCode::NOT_FOUND {
-                    return Err(RegistryError::NotFound {
-                        source_tag: TAG,
-                        id: id_owned,
-                    });
+                if response.status().is_success() {
+                    let raw: ServerRaw = response.json::<ServerRaw>().await.map_err(|source| {
+                        RegistryError::Decode {
+                            source_tag: TAG,
+                            message: source.to_string(),
+                        }
+                    })?;
+                    return Ok(into_package(raw));
+                }
+                if response.status() != reqwest::StatusCode::NOT_FOUND
+                    && response.status() != reqwest::StatusCode::METHOD_NOT_ALLOWED
+                {
+                    let _ = response
+                        .error_for_status()
+                        .map_err(|source| RegistryError::Http {
+                            source_tag: TAG,
+                            source,
+                        })?;
                 }
 
-                let raw: ServerRaw = response
+                // Fallback: hit /v0/servers?search=<id> and pick the
+                // entry whose canonical name equals `id`. The search
+                // endpoint still works against the 2025-12-11 schema.
+                let search_url = format!(
+                    "{base_url}/v0/servers?search={}",
+                    urlencoding_minimal(&id_owned)
+                );
+                debug!(target: "pakx::registry", url=%search_url, "official-mcp fetch fallback");
+                let body: ServerListResponse = http
+                    .get(&search_url)
+                    .send()
+                    .await
+                    .map_err(|source| RegistryError::Http {
+                        source_tag: TAG,
+                        source,
+                    })?
                     .error_for_status()
                     .map_err(|source| RegistryError::Http {
                         source_tag: TAG,
                         source,
                     })?
-                    .json::<ServerRaw>()
+                    .json::<ServerListResponse>()
                     .await
                     .map_err(|source| RegistryError::Decode {
                         source_tag: TAG,
                         message: source.to_string(),
                     })?;
-                Ok(into_package(raw))
+                let mut match_pkg = None;
+                for raw in body.servers {
+                    let pkg = into_package(raw);
+                    if pkg.id == id_owned {
+                        match_pkg = Some(pkg);
+                        break;
+                    }
+                }
+                match_pkg.ok_or(RegistryError::NotFound {
+                    source_tag: TAG,
+                    id: id_owned,
+                })
             })
             .await
     }

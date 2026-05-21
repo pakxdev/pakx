@@ -116,9 +116,18 @@ async fn fetch_returns_single_package() {
 #[tokio::test]
 async fn fetch_404_returns_not_found_error() {
     let server = MockServer::start().await;
+    // Detail endpoint 404s (which is what the 2025-12-11 MCP Registry
+    // does for every id). Fall through to search-and-filter and return
+    // an empty `servers` list so the search fallback can't find a match
+    // either.
     Mock::given(method("GET"))
         .and(path("/v0/servers/ghost/server"))
         .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
         .mount(&server)
         .await;
 
@@ -126,6 +135,42 @@ async fn fetch_404_returns_not_found_error() {
     let source = source_with_mock(&server.uri(), temp.path());
     let err = source.fetch("ghost/server").await.unwrap_err();
     assert!(matches!(err, RegistryError::NotFound { .. }));
+}
+
+#[tokio::test]
+async fn fetch_falls_back_to_search_when_detail_endpoint_404s() {
+    // 2025-12-11 MCP Registry has no per-server detail endpoint, so we
+    // expect the search-and-filter fallback to find the entry and
+    // return it.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers/io.github.foo/bar"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .and(query_param("search", "io.github.foo/bar"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                {
+                    "name": "io.github.foo/quux",
+                    "version_detail": { "version": "0.1.0" }
+                },
+                {
+                    "name": "io.github.foo/bar",
+                    "version_detail": { "version": "1.2.3" }
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    let source = source_with_mock(&server.uri(), temp.path());
+    let pkg = source.fetch("io.github.foo/bar").await.unwrap();
+    assert_eq!(pkg.id, "io.github.foo/bar");
+    assert_eq!(pkg.version, "1.2.3");
 }
 
 #[tokio::test]
