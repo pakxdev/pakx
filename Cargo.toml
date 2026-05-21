@@ -27,6 +27,8 @@ tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "fs", "io-u
 reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json"] }
 async-trait = "0.1"
 futures = "0.3"
+# Interactive prompts
+inquire = { version = "0.7", default-features = false, features = ["crossterm"] }
 # Cross-platform home/config dir resolution
 dirs = "5"
 # Sha256 over file payloads (integrity verification)

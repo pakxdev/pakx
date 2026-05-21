@@ -30,13 +30,17 @@ fn help_flag_prints_usage() {
 }
 
 #[test]
-fn init_subcommand_runs() {
+fn init_help_runs() {
+    // Bare `init` without --yes would block on interactive prompts in CI,
+    // so smoke-coverage uses --help. End-to-end init flow lives in
+    // tests/init.rs.
     Command::cargo_bin(BIN)
         .unwrap()
-        .arg("init")
+        .args(["init", "--help"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("pakx v0.0.0"));
+        .stdout(predicate::str::contains("--yes"))
+        .stdout(predicate::str::contains("--force"));
 }
 
 #[test]

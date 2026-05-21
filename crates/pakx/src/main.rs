@@ -1,7 +1,16 @@
 //! `pakx` CLI entrypoint.
 
+// `unreachable_pub` is meaningful only for library crates with an external
+// API surface. In a binary crate every `pub` item is internal by
+// construction, so the workspace lint just produces noise.
+#![allow(unreachable_pub)]
+
+mod commands;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+
+use commands::init::{self, InitArgs};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -19,25 +28,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create an agents.yml manifest in the current directory.
-    Init,
-    /// Install everything in agents.yml to detected agents.
+    /// Create an `agents.yml` manifest in the current directory.
+    Init(InitArgs),
+    /// Install everything in `agents.yml` to detected agents.
     Install,
 }
 
-// Subcommand stubs are infallible today, but the real `install` / `add`
-// flows return Result, so the signature is pre-committed.
 #[tokio::main(flavor = "current_thread")]
-#[allow(clippy::unnecessary_wraps)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init => {
-            eprintln!("pakx v{VERSION} — scaffold only; init not yet implemented");
-        }
+        Command::Init(args) => init::run(args).await,
         Command::Install => {
             eprintln!("pakx v{VERSION} — scaffold only; install not yet implemented");
+            Ok(())
         }
     }
-    Ok(())
 }
