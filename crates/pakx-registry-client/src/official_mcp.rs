@@ -198,8 +198,8 @@ enum ServerRaw {
 impl ServerRaw {
     fn into_parts(self) -> (ServerCore, Option<Value>) {
         match self {
-            ServerRaw::Wrapped { server, meta } => (server, meta),
-            ServerRaw::Flat(core) => (core, None),
+            Self::Wrapped { server, meta } => (server, meta),
+            Self::Flat(core) => (core, None),
         }
     }
 }
