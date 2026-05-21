@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/pakxdev/pakx/security/advisories/new
+    about: Report a security issue privately. Please do NOT use public issues.
+  - name: Question / discussion
+    url: https://github.com/pakxdev/pakx/discussions
+    about: Anything that isn't a bug or a feature request.

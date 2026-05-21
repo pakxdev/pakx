@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a new pakx subcommand, manifest field, or registry behaviour.
+title: "[feat] "
+labels: ["kind/feat"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Explain the use case first; the proposed solution comes next. Real adopters with real workflows beat hypothetical "wouldn't it be cool if".
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Be specific. Command shape, manifest field name, API path — whatever it takes for someone else to start typing.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What did you try first? What does npm / Cargo / Homebrew do for the equivalent problem?
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which repo does this touch?
+      multiple: true
+      options:
+        - pakx (CLI)
+        - pakx-registry (backend)
+        - pakx-web (marketing + docs)
+        - homebrew-tap / scoop-pakx (distribution)
+        - new repo
+    validations:
+      required: true
