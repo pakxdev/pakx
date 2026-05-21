@@ -12,6 +12,13 @@ use thiserror::Error;
 /// Failures returned from parsing or validating `agents.yml`.
 #[derive(Debug, Error)]
 pub enum ManifestError {
+    /// Filesystem access failure (open, read, write, permission denied).
+    #[error("agents.yml io error{path}: {source}", path = fmt_path(.path.as_ref()))]
+    Io {
+        #[source]
+        source: std::io::Error,
+        path: Option<PathBuf>,
+    },
     /// The source text was not valid YAML.
     #[error("agents.yml is not valid YAML{path}: {source}", path = fmt_path(.path.as_ref()))]
     ParseYaml {
@@ -32,7 +39,7 @@ impl ManifestError {
     pub fn with_path(mut self, p: impl Into<PathBuf>) -> Self {
         let new_path = p.into();
         match &mut self {
-            Self::ParseYaml { path, .. } | Self::Schema { path, .. } => {
+            Self::Io { path, .. } | Self::ParseYaml { path, .. } | Self::Schema { path, .. } => {
                 *path = Some(new_path);
             }
         }
@@ -41,7 +48,9 @@ impl ManifestError {
 
     pub const fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::ParseYaml { path, .. } | Self::Schema { path, .. } => path.as_ref(),
+            Self::Io { path, .. } | Self::ParseYaml { path, .. } | Self::Schema { path, .. } => {
+                path.as_ref()
+            }
         }
     }
 }

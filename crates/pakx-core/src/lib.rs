@@ -20,6 +20,7 @@ pub use lockfile::{
     LOCKFILE_VERSION, REGISTRY_SOURCES,
 };
 pub use manifest::{
-    parse_manifest, write_manifest, AgentId, DepSpec, Dependencies, GitSpec, Manifest, PackageType,
-    RegistrySpec, StringSpec, KNOWN_AGENT_IDS, PACKAGE_TYPES,
+    add_dep, add_shorthand, parse_manifest, read_from as read_manifest_from, write_manifest,
+    write_to as write_manifest_to, AddOutcome, AgentId, DepSpec, Dependencies, GitSpec, Manifest,
+    PackageType, RegistrySpec, StringSpec, KNOWN_AGENT_IDS, PACKAGE_TYPES,
 };

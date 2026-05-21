@@ -1124,10 +1124,13 @@ dependencies = [
  "pakx-core",
  "pakx-registry-client",
  "predicates",
+ "reqwest",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

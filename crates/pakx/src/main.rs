@@ -10,6 +10,7 @@ mod commands;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use commands::add::{self, AddArgs};
 use commands::init::{self, InitArgs};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -30,6 +31,8 @@ struct Cli {
 enum Command {
     /// Create an `agents.yml` manifest in the current directory.
     Init(InitArgs),
+    /// Add a dependency to `agents.yml`.
+    Add(AddArgs),
     /// Install everything in `agents.yml` to detected agents.
     Install,
 }
@@ -39,6 +42,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init(args) => init::run(args).await,
+        Command::Add(args) => add::run(args).await,
         Command::Install => {
             eprintln!("pakx v{VERSION} — scaffold only; install not yet implemented");
             Ok(())
