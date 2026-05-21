@@ -44,13 +44,17 @@ fn init_help_runs() {
 }
 
 #[test]
-fn install_subcommand_runs() {
+fn install_help_runs() {
+    // Bare `install` without a manifest would fail trying to read agents.yml;
+    // smoke-coverage uses --help. End-to-end install flow lives in
+    // tests/install.rs.
     Command::cargo_bin(BIN)
         .unwrap()
-        .arg("install")
+        .args(["install", "--help"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("pakx v0.0.0"));
+        .stdout(predicate::str::contains("Install everything"))
+        .stdout(predicate::str::contains("--no-lockfile"));
 }
 
 #[test]
