@@ -6,14 +6,14 @@
 #![allow(unreachable_pub)]
 
 mod commands;
+mod install;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use commands::add::{self, AddArgs};
 use commands::init::{self, InitArgs};
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+use commands::install::{self as install_cmd, InstallArgs};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -34,7 +34,7 @@ enum Command {
     /// Add a dependency to `agents.yml`.
     Add(AddArgs),
     /// Install everything in `agents.yml` to detected agents.
-    Install,
+    Install(InstallArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -43,9 +43,6 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init(args) => init::run(args).await,
         Command::Add(args) => add::run(args).await,
-        Command::Install => {
-            eprintln!("pakx v{VERSION} — scaffold only; install not yet implemented");
-            Ok(())
-        }
+        Command::Install(args) => install_cmd::run_cmd(args).await,
     }
 }

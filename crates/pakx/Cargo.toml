@@ -19,11 +19,15 @@ pakx-agents = { workspace = true }
 pakx-registry-client = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 inquire = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

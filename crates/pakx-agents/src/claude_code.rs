@@ -1,16 +1,27 @@
-//! Claude Code adapter: skills install under `~/.claude/skills/<owner>/<name>/`.
+//! Claude Code adapter.
+//!
+//! - Skills install under `<config_dir>/skills/<owner>/<name>/` (default
+//!   `~/.claude/skills/...`).
+//! - MCP servers are written into `<project_root>/.mcp.json` — Claude
+//!   Code's project-scoped MCP convention. `project_root` defaults to the
+//!   process cwd, but tests and callers pass an explicit path.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use pakx_core::install::compute_integrity;
 use pakx_core::manifest::PackageType;
-use pakx_core::Skill;
+use pakx_core::{McpServer, McpTransport, Skill};
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::adapter::{Adapter, Installed};
 use crate::error::AdapterError;
+
+/// Filename of Claude Code's project-scoped MCP config.
+const MCP_FILENAME: &str = ".mcp.json";
 
 /// Adapter for Anthropic's Claude Code CLI.
 ///
@@ -19,27 +30,43 @@ use crate::error::AdapterError;
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeAdapter {
     config_dir: PathBuf,
+    project_root: PathBuf,
 }
 
 impl ClaudeCodeAdapter {
     pub const ID: &'static str = "claude-code";
 
-    /// Construct against `~/.claude`. Returns `None` if the platform has
-    /// no resolvable home directory.
-    #[must_use]
+    /// Construct against `~/.claude` + the process cwd as project root.
+    /// Returns `None` if either cannot be resolved.
     pub fn new() -> Option<Self> {
-        dirs::home_dir().map(|h| Self {
-            config_dir: h.join(".claude"),
+        let home = dirs::home_dir()?;
+        let cwd = std::env::current_dir().ok()?;
+        Some(Self {
+            config_dir: home.join(".claude"),
+            project_root: cwd,
         })
     }
 
-    /// Explicit config-dir constructor. Use for tests and for users with a
-    /// non-default Claude install path.
+    /// Explicit config-dir constructor. Project root defaults to `.`.
     #[must_use]
     pub fn with_config_dir(config_dir: impl Into<PathBuf>) -> Self {
         Self {
             config_dir: config_dir.into(),
+            project_root: PathBuf::from("."),
         }
+    }
+
+    /// Builder: override the project root used for project-scoped writes
+    /// (currently `.mcp.json`).
+    #[must_use]
+    pub fn with_project_root(mut self, project_root: impl Into<PathBuf>) -> Self {
+        self.project_root = project_root.into();
+        self
+    }
+
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
     fn skills_root(&self) -> PathBuf {
@@ -48,6 +75,10 @@ impl ClaudeCodeAdapter {
 
     fn skill_dir(&self, owner: &str, name: &str) -> PathBuf {
         self.skills_root().join(owner).join(name)
+    }
+
+    fn mcp_config_path(&self) -> PathBuf {
+        self.project_root.join(MCP_FILENAME)
     }
 }
 
@@ -108,24 +139,62 @@ impl Adapter for ClaudeCodeAdapter {
         })
     }
 
+    async fn install_mcp(&self, mcp: &McpServer) -> Result<Installed, AdapterError> {
+        let path = self.mcp_config_path();
+        let mut file = read_mcp_config(&path).await?;
+
+        let key = mcp.short_name();
+        let new_entry = McpEntry::from_transport(&mcp.transport);
+
+        if let Some(existing) = file.mcp_servers.get(&key) {
+            if existing == &new_entry {
+                return Err(AdapterError::AlreadyInstalled { id: mcp.id.clone() });
+            }
+        }
+
+        file.mcp_servers.insert(key, new_entry);
+        write_mcp_config(&path, &file).await?;
+
+        Ok(Installed {
+            id: mcp.id.clone(),
+            kind: PackageType::Mcp,
+            version: mcp.version.clone(),
+            path,
+        })
+    }
+
     async fn uninstall(&self, id: &str) -> Result<(), AdapterError> {
-        let Some((owner, name)) = id.split_once('/') else {
+        // Try skill removal first; fall through to MCP if no skill dir.
+        if let Some((owner, name)) = id.split_once('/') {
+            let target = self.skill_dir(owner, name);
+            if target.is_dir() {
+                fs::remove_dir_all(&target)
+                    .await
+                    .map_err(|e| AdapterError::Io {
+                        source: e,
+                        path: Some(target),
+                    })?;
+                return Ok(());
+            }
+        } else {
             return Err(AdapterError::Invalid {
                 id: id.to_owned(),
                 reason: "id must be `<owner>/<name>`".into(),
             });
-        };
-        let target = self.skill_dir(owner, name);
-        if !target.is_dir() {
-            return Err(AdapterError::NotInstalled { id: id.to_owned() });
         }
-        fs::remove_dir_all(&target)
-            .await
-            .map_err(|e| AdapterError::Io {
-                source: e,
-                path: Some(target),
-            })?;
-        Ok(())
+
+        // MCP fallback: strip from `.mcp.json` by short-name.
+        let key = id.rsplit('/').next().unwrap_or(id).to_lowercase();
+        let path = self.mcp_config_path();
+        if path.is_file() {
+            let mut file = read_mcp_config(&path).await?;
+            if file.mcp_servers.remove(&key).is_some() {
+                write_mcp_config(&path, &file).await?;
+                return Ok(());
+            }
+        }
+
+        Err(AdapterError::NotInstalled { id: id.to_owned() })
     }
 
     async fn list(&self) -> Result<Vec<Installed>, AdapterError> {
@@ -331,4 +400,81 @@ async fn read_skill_version(skill_dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// .mcp.json schema (Claude Code project-scoped MCP config)
+// ---------------------------------------------------------------------------
+
+/// On-disk shape of Claude Code's `.mcp.json`. We model just `mcpServers`
+/// and pass everything else through unchanged via [`serde_json::Value`] in
+/// [`McpConfigFile::extra`] so non-pakx fields survive round-trips.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct McpConfigFile {
+    #[serde(default, rename = "mcpServers")]
+    mcp_servers: BTreeMap<String, McpEntry>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum McpEntry {
+    Stdio {
+        command: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+    },
+    Http {
+        url: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+    },
+}
+
+impl McpEntry {
+    fn from_transport(t: &McpTransport) -> Self {
+        match t.clone() {
+            McpTransport::Stdio { command, args, env } => Self::Stdio { command, args, env },
+            McpTransport::Http { url, headers } => Self::Http { url, headers },
+        }
+    }
+}
+
+async fn read_mcp_config(path: &Path) -> Result<McpConfigFile, AdapterError> {
+    match fs::read(path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| AdapterError::Invalid {
+            id: path.display().to_string(),
+            reason: format!("malformed .mcp.json: {e}"),
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(McpConfigFile::default()),
+        Err(source) => Err(AdapterError::Io {
+            source,
+            path: Some(path.to_path_buf()),
+        }),
+    }
+}
+
+async fn write_mcp_config(path: &Path, file: &McpConfigFile) -> Result<(), AdapterError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AdapterError::Io {
+                    source: e,
+                    path: Some(parent.to_path_buf()),
+                })?;
+        }
+    }
+    let mut body = serde_json::to_string_pretty(file).map_err(|e| AdapterError::Io {
+        source: io::Error::other(e),
+        path: Some(path.to_path_buf()),
+    })?;
+    body.push('\n');
+    fs::write(path, body).await.map_err(|e| AdapterError::Io {
+        source: e,
+        path: Some(path.to_path_buf()),
+    })
 }
