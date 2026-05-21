@@ -27,23 +27,23 @@ irm https://pakx.dev/install.ps1 | iex
 **Homebrew (macOS + Linux)**
 
 ```sh
-brew install arwenizEr/tap/pakx
+brew install pakxdev/tap/pakx
 ```
 
 **Scoop (Windows)**
 
 ```powershell
-scoop bucket add pakx https://github.com/arwenizEr/scoop-pakx
+scoop bucket add pakx https://github.com/pakxdev/scoop-pakx
 scoop install pakx
 ```
 
 **Winget (Windows)**
 
 ```powershell
-winget install arwenizEr.pakx
+winget install pakxdev.pakx
 ```
 
-**Direct download:** prebuilt binaries for every supported OS / arch are on the [Releases](https://github.com/arwenizEr/pakx/releases) page.
+**Direct download:** prebuilt binaries for every supported OS / arch are on the [Releases](https://github.com/pakxdev/pakx/releases) page.
 
 ## Quick start (preview)
 
