@@ -164,7 +164,7 @@ struct ServerListResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ServerRaw {
+struct ServerCore {
     /// Canonical id. The MCP Registry sends this as `name` (e.g.
     /// `io.github.modelcontextprotocol/server-filesystem`); older or
     /// alternate deployments may send `id`.
@@ -181,6 +181,29 @@ struct ServerRaw {
     extra: serde_json::Map<String, Value>,
 }
 
+/// Wire format for a single server entry. The 2025-12-11 schema wraps
+/// every entry in `{ "server": <core>, "_meta": {...} }`; older
+/// deployments still send the flat core directly. Accept both.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ServerRaw {
+    Wrapped {
+        server: ServerCore,
+        #[serde(rename = "_meta", default)]
+        meta: Option<Value>,
+    },
+    Flat(ServerCore),
+}
+
+impl ServerRaw {
+    fn into_parts(self) -> (ServerCore, Option<Value>) {
+        match self {
+            Self::Wrapped { server, meta } => (server, meta),
+            Self::Flat(core) => (core, None),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct VersionDetail {
     #[serde(default)]
@@ -188,18 +211,22 @@ struct VersionDetail {
 }
 
 fn into_package(raw: ServerRaw) -> Package {
-    let version = raw
+    let (core, meta) = raw.into_parts();
+    let version = core
         .version
-        .or_else(|| raw.version_detail.and_then(|v| v.version))
+        .or_else(|| core.version_detail.and_then(|v| v.version))
         .unwrap_or_else(|| "0.0.0".to_string());
-    let install_hints = Value::Object(raw.extra);
+    let mut extra = core.extra;
+    if let Some(m) = meta {
+        extra.insert("_meta".to_owned(), m);
+    }
     Package {
-        id: raw.name.clone(),
+        id: core.name.clone(),
         source: RegistrySource::OfficialMcp,
-        name: raw.name,
+        name: core.name,
         version,
-        description: raw.description,
-        install_hints,
+        description: core.description,
+        install_hints: Value::Object(extra),
     }
 }
 
