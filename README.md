@@ -23,12 +23,14 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx list` | Show pinned lockfile entries with `[ok]` / `[drift]` against on-disk reality. |
 | `pakx doctor` | 5-section health check (manifest, lockfile, drift, adapter detection, on-disk vs lockfile). |
 | `pakx search <query>` | Federated search across all sources. |
+| `pakx info <owner>/<name>` | Read-only registry inspection — metadata + version list. `--json` for pipelines. |
 | `pakx login` | GitHub-backed login. Validates an API token against `registry.pakx.dev/api/v1/whoami` and writes `~/.pakx/credentials.json` (mode 0600). |
 | `pakx whoami` | Stored login, or live whoami (`--offline` skips the network). |
 | `pakx pack` | Build a deterministic gzipped tarball from a `SKILL.md` directory. |
 | `pakx publish` | `pack` → `POST` package → `PUT` tarball. `--dry-run` skips the upload. |
 | `pakx unpublish <owner>/<name>@<version>` | `DELETE` (with grace-period tombstoning on the server side). |
 | `pakx upgrade` (alias `pakx update`) | Check GitHub Releases for a newer pakx and print the channel-appropriate install command. |
+| `pakx completion <shell>` | Emit shell-completion script for bash / zsh / fish / powershell / elvish. |
 
 In the registry (live at [registry.pakx.dev](https://registry.pakx.dev)): public browse + signed-in user dashboard + API tokens. Stripe Connect for marketplace payouts is scaffolded but not enabled.
 
