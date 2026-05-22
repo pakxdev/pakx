@@ -4,6 +4,7 @@
 //! Filesystem and network side effects live in `pakx-agents` and
 //! `pakx-registry-client`, respectively.
 
+pub mod atomic_write;
 pub mod credentials;
 pub mod errors;
 pub mod install;
@@ -12,6 +13,7 @@ pub mod manifest;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub use atomic_write::atomic_write;
 pub use credentials::{
     Credentials, CredentialsError, Entry as CredentialEntry, DEFAULT_REGISTRY_URL,
 };

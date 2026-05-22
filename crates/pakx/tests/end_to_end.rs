@@ -481,3 +481,71 @@ fn install_rejects_no_pakx_registry_with_pakx_base_url() {
         .failure()
         .stderr(predicates::str::contains("cannot be used with"));
 }
+
+/// Regression: a failed install must NOT overwrite an existing
+/// `agents.lock`. Previously the runner wrote the lockfile
+/// unconditionally even when `report.failed` was non-empty, leaving a
+/// half-pinned lockfile on disk alongside a non-zero exit code. The
+/// next `pakx test` / `pakx list` / `pakx doctor` then saw an
+/// incomplete state and the user had to `rm agents.lock` to retry
+/// from a clean slate.
+///
+/// Reproducer: seed a sentinel `agents.lock`, add a dep that 404s,
+/// run install, and assert the lockfile bytes are byte-identical
+/// afterwards.
+#[tokio::test]
+async fn install_failure_does_not_overwrite_existing_lockfile() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+
+    // 404 on every detail + search hit so the dep can't resolve.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v0/servers.*"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["init", "--yes", "--name", "demo"])
+        .assert()
+        .success();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["add", "missing/server", "--type", "mcp", "--no-validate"])
+        .assert()
+        .success();
+
+    // Seed a sentinel lockfile. The body is intentionally malformed
+    // for the on-disk schema — the runner has no business reading it
+    // when its only job here is to not overwrite. Bytes must survive
+    // the failed run untouched.
+    let lock_path = project.path().join("agents.lock");
+    let sentinel = b"PRE-EXISTING SENTINEL CONTENT\n";
+    std::fs::write(&lock_path, sentinel).unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    let after =
+        std::fs::read(&lock_path).expect("lockfile should still exist after failed install");
+    assert_eq!(
+        after, sentinel,
+        "failed install must not rewrite agents.lock; got: {after:?}",
+    );
+}

@@ -17,8 +17,8 @@ use anyhow::{Context, Result};
 use pakx_agents::{Adapter, AdapterError, ClaudeCodeAdapter};
 use pakx_core::manifest::{DepSpec, PackageType};
 use pakx_core::{
-    compute_integrity, read_manifest_from, write_lockfile, AgentId, Integrity, LockEntry, Lockfile,
-    Manifest, McpServer, RegistrySource, SkillFile, LOCKFILE_VERSION,
+    compute_integrity, read_manifest_from, write_lockfile_to, AgentId, Integrity, LockEntry,
+    Lockfile, Manifest, McpServer, RegistrySource, SkillFile, LOCKFILE_VERSION,
 };
 use pakx_registry_client::{
     CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
@@ -156,15 +156,28 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         }
     }
 
-    if !opts.no_lockfile {
+    // Lockfile write gate: skip if any dep failed.
+    //
+    // The previous flow wrote `agents.lock` unconditionally even when
+    // `report.failed` was non-empty. That left a half-pinned lockfile
+    // on disk alongside a non-zero exit code — downstream tools
+    // (`pakx test`, `pakx list`, `pakx doctor`) then saw an incomplete
+    // state that conflicted with the manifest's declared deps, and the
+    // user had to manually `rm agents.lock` to retry from a clean
+    // slate. Gating on `report.failed.is_empty()` means a failed
+    // install leaves the prior `agents.lock` intact (or absent on a
+    // first install). The summary line still prints
+    // `installed N, skipped M, failed K` so the user sees what
+    // happened. `--no-lockfile` continues to skip the write
+    // regardless, mirroring v0.1.
+    if !opts.no_lockfile && report.failed.is_empty() {
         let lockfile_path = project_root.join(LOCKFILE_FILENAME);
         let lock = Lockfile {
             lockfile_version: LOCKFILE_VERSION,
             manifest_hash: hash_manifest(&manifest),
             entries,
         };
-        let body = write_lockfile(&lock);
-        std::fs::write(&lockfile_path, body).with_context(|| {
+        write_lockfile_to(&lockfile_path, &lock).with_context(|| {
             format!(
                 "write lockfile {}",
                 redact_path(&lockfile_path, &project_root)
