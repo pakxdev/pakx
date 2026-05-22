@@ -1,0 +1,36 @@
+# A consumer-side `agents.yml` starter — copy this into a fresh project,
+# tweak the dep lists to match what you actually want installed, and run
+# `pakx install` to materialise everything.
+#
+# Top-level: `name` + `version` describe *this* project's manifest, not
+# any one of its dependencies. `pakx init` will scaffold the same shape
+# interactively if you'd rather start blank.
+name: my-project
+version: 1.0.0
+
+# The agents this manifest installs into. Omit the key entirely (or set
+# it to `null`) to mean "install to every agent pakx detects on this
+# machine". Known ids: claude-code, cursor, codex, copilot, windsurf.
+agents:
+  - claude-code
+
+# Declared dependencies, grouped by kind. Every section is optional;
+# delete the ones you don't use. Each entry is either a shorthand
+# string (`<owner>/<name>@<version>`) or a fully-typed object (`git:`
+# or `registry:` form — see the project README for the long forms).
+dependencies:
+  # Skills are markdown packages from the pakx registry. The CLI fetches
+  # the tarball, sha256-verifies it, and hands the body to the target
+  # agent. `arwenizEr/hello-world` is the live demo package — safe to
+  # try; it's a no-op skill that prints "hello, world".
+  skills:
+    - arwenizEr/hello-world@0.1.2
+
+  # MCP servers are resolved through the federated index (official MCP
+  # Registry → Smithery → pakx-registry, in that order). On install,
+  # `pakx` writes the launch config into Claude Code's project-scoped
+  # `.mcp.json` (and the equivalent location for every other targeted
+  # agent). `@latest` pins to the newest non-deprecated version at
+  # install time; replace with a fixed semver string for reproducibility.
+  mcp:
+    - io.github.modelcontextprotocol/server-filesystem@latest
