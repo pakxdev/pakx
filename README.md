@@ -112,6 +112,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 GitHub Actions is temporarily disabled to control CI billing. Verification is local-first until a release tag is cut.
 
+## Testing
+
+The default `cargo test --workspace` covers the unit + per-command integration suites against `wiremock` and tempdirs.
+
+There is also an opt-in end-to-end suite that drives the **real built `pakx` binary** through a realistic manifest → install → list → test flow against a local wiremock server, locking in argument parsing, manifest IO, federated resolve fallback, lockfile write, `pakx list --json` field-name contract, `pakx test` exit-code semantics, registry-URL `userinfo`-bypass refusal, and the `pakx pack` symlink refusal (Unix-only). It lives in [`crates/pakx/tests/e2e_real_binary.rs`](./crates/pakx/tests/e2e_real_binary.rs). Run it explicitly:
+
+```sh
+cargo test --workspace -- --ignored e2e_real_binary
+```
+
+Each scenario is hermetic: its own `TempDir` and its own `MockServer`, no live network calls. Tagged `#[ignore]` so the default `cargo test` run stays fast.
+
 ## Crates
 
 | Crate | Description |
