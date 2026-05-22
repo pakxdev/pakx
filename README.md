@@ -22,6 +22,7 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx remove <id>` | Inverse of `pakx add` — drop a shorthand dep from `agents.yml`. `--kind` disambiguates if the id is in multiple sections; `--yes` skips the confirmation prompt. Does not touch `agents.lock` or installed adapter state — run `pakx install` after to reconcile. |
 | `pakx install` | Resolve every MCP dep via the federated registry, install into Claude Code's project-scoped `.mcp.json`, and write `agents.lock`. |
 | `pakx list` | Show pinned lockfile entries with `[ok]` / `[drift]` against on-disk reality. `--json` for pipelines. |
+| `pakx outdated` | Show lockfile entries whose source registry has a newer non-deprecated version. Exits non-zero when anything is outdated (CI-friendly). `--json` for pipelines; `--registry <tag>` filters to one source. |
 | `pakx doctor` | 5-section health check (manifest, lockfile, drift, adapter detection, on-disk vs lockfile). |
 | `pakx search <query>` | Federated search across all sources. `--json` for pipelines. |
 | `pakx test` | Validate `agents.yml` without installing — resolves every `mcp:` dep against the federated registries (official MCP Registry + Smithery + pakx-registry; toggle with `--no-smithery` / `--no-pakx-registry`) and exits non-zero on the first failure. Other dep kinds (`skills:` / `subagents:` / `prompts:` / `commands:` / `hooks:`) are reported as `skip` until per-kind resolvers land. `--offline` checks against the lockfile only. Intended for CI / pre-commit. |
