@@ -28,6 +28,7 @@ use reqwest::Client;
 use tracing::{debug, warn};
 
 use super::mcp_translate::{translate, TranslateError};
+use crate::registry_url::validate_base_url;
 use crate::resolve::{resolve_federated, Resolved};
 
 const MANIFEST_FILENAME: &str = "agents.yml";
@@ -71,14 +72,12 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         .with_context(|| format!("read manifest at {}", manifest_path.display()))?;
 
     let client = build_registry_client(
-        opts.mcp_base_url
-            .as_deref()
-            .unwrap_or(OFFICIAL_MCP_BASE_URL),
+        opts.mcp_base_url.as_deref(),
         opts.smithery_base_url.as_deref(),
         opts.pakx_base_url.as_deref(),
         opts.no_smithery,
         opts.no_pakx_registry,
-    );
+    )?;
 
     let claude = build_claude_adapter(&opts, &project_root);
 
@@ -129,33 +128,55 @@ const fn unhandled_deps(manifest: &Manifest) -> [(PackageType, &Option<Vec<DepSp
 }
 
 fn build_registry_client(
-    mcp_base_url: &str,
+    mcp_base_url: Option<&str>,
     smithery_base_url: Option<&str>,
     pakx_base_url: Option<&str>,
     no_smithery: bool,
     no_pakx_registry: bool,
-) -> RegistryClient {
+) -> Result<RegistryClient> {
+    // Validate every user-supplied override BEFORE any HTTP work.
+    // `pakx test` already did this; install must mirror it or the same
+    // `http://localhost:8080@evil.com/` userinfo-smuggle bypass that
+    // PR #29 closed for `test` is still reachable on `install`. Single
+    // source of truth: `crate::registry_url::validate_base_url`.
+    let mcp_url = match mcp_base_url {
+        Some(u) => {
+            validate_base_url(u)?;
+            u
+        }
+        None => OFFICIAL_MCP_BASE_URL,
+    };
+
     let cache_root = std::env::temp_dir().join("pakx-install-cache");
-    let mcp = OfficialMcpSource::with_parts(
-        Client::new(),
-        mcp_base_url,
-        CacheDir::with_root(&cache_root),
-    );
+    let mcp =
+        OfficialMcpSource::with_parts(Client::new(), mcp_url, CacheDir::with_root(&cache_root));
     let mut client = RegistryClient::new().with_source(Box::new(mcp));
 
     if !no_smithery {
-        let url = smithery_base_url.unwrap_or(SMITHERY_BASE_URL);
+        let url = match smithery_base_url {
+            Some(u) => {
+                validate_base_url(u)?;
+                u
+            }
+            None => SMITHERY_BASE_URL,
+        };
         let sm = SmitherySource::with_parts(Client::new(), url, CacheDir::with_root(&cache_root));
         client = client.with_source(Box::new(sm));
     }
 
     if !no_pakx_registry {
-        let url = pakx_base_url.unwrap_or(PAKX_BASE_URL);
+        let url = match pakx_base_url {
+            Some(u) => {
+                validate_base_url(u)?;
+                u
+            }
+            None => PAKX_BASE_URL,
+        };
         let pakx = PakxSource::with_parts(Client::new(), url, CacheDir::with_root(&cache_root));
         client = client.with_source(Box::new(pakx));
     }
 
-    client
+    Ok(client)
 }
 
 fn build_claude_adapter(opts: &InstallOpts, project_root: &Path) -> ClaudeCodeAdapter {

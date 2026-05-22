@@ -39,10 +39,31 @@ impl RegistryClient {
     /// merge results, and dedupe by `(source, id)`. Per-source failures
     /// are logged (`tracing::warn`) and dropped — partial results win.
     pub async fn search(&self, query: &str) -> Vec<Package> {
-        let futures = self.sources.iter().map(|s| async move {
-            let tag = s.tag();
-            (tag, s.search(query).await)
-        });
+        self.search_excluding(query, None).await
+    }
+
+    /// Same as [`Self::search`], but skip the source matching `exclude`.
+    ///
+    /// Used by the federated-resolution fallback in `pakx install` /
+    /// `pakx test`: when `OfficialMcp::fetch` already returned
+    /// `NotFound`, fanning the search to `OfficialMcp` is a wasted
+    /// round-trip — the resolver discards its hits anyway because the
+    /// canonical fetch route already disagreed. Passing
+    /// `Some(RegistrySource::OfficialMcp)` saves one HTTP request per
+    /// resolved dep.
+    pub async fn search_excluding(
+        &self,
+        query: &str,
+        exclude: Option<RegistrySource>,
+    ) -> Vec<Package> {
+        let futures = self
+            .sources
+            .iter()
+            .filter(|s| exclude.is_none_or(|tag| s.tag() != tag))
+            .map(|s| async move {
+                let tag = s.tag();
+                (tag, s.search(query).await)
+            });
         let results: Vec<(RegistrySource, Result<Vec<Package>, RegistryError>)> =
             join_all(futures).await;
 

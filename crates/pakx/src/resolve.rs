@@ -75,19 +75,22 @@ pub async fn resolve_federated(
     match client.fetch(RegistrySource::OfficialMcp, id).await {
         Ok(pkg) => Ok(Resolved::OfficialMcp(pkg)),
         Err(RegistryError::NotFound { .. }) => {
-            // Federated search across every registered source.
-            // `RegistryClient::search` already swallows per-source
+            // Federated search across every registered source **except**
+            // `OfficialMcp` — the direct fetch above already disagreed,
+            // and the search index can lag the canonical fetch route, so
+            // trusting a stale search hit would re-introduce the search-
+            // lag race. Filtering the fan-out also saves one HTTP
+            // round-trip per resolved dep, which adds up at install
+            // time on manifests with many entries.
+            //
+            // `RegistryClient::search_excluding` swallows per-source
             // failures and logs them, so partial results win — the
-            // caller still gets a non-None match if any source
+            // caller still gets a non-None match if any other source
             // surfaced the id.
-            let hits = client.search(id).await;
+            let hits = client
+                .search_excluding(id, Some(RegistrySource::OfficialMcp))
+                .await;
             for pkg in hits {
-                // Skip OfficialMcp hits here: we already tried `fetch`
-                // and it said NotFound. The search index can lag the
-                // canonical fetch route, so trust the fetch result.
-                if pkg.source == RegistrySource::OfficialMcp {
-                    continue;
-                }
                 if pkg.id == id || pkg.name == id {
                     return Ok(Resolved::Federated(pkg));
                 }
