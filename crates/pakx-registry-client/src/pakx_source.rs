@@ -8,13 +8,14 @@
 //! side.
 //!
 //! Endpoints used at v0.1:
-//!   GET /api/v1/packages?q=<query>          -> paginated list
-//!   GET /api/v1/packages/{owner}/{name}     -> detail (with versions)
+//!   GET /api/v1/packages?q=<query>                    -> paginated list
+//!   GET /api/v1/packages/{owner}/{name}               -> detail (with versions array, **no** tarballUrl)
+//!   GET /api/v1/packages/{owner}/{name}/{version}     -> per-version detail (includes signed tarballUrl)
 
 use async_trait::async_trait;
 use pakx_core::RegistrySource;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::debug;
 
@@ -61,6 +62,111 @@ impl PakxSource {
     fn cache_key_fetch(&self, id: &str) -> String {
         format!("{TAG}@{}:fetch:{id}", self.base_url)
     }
+
+    /// Per-version detail fetch.
+    ///
+    /// Calls `GET /api/v1/packages/{owner}/{name}/{version}` and returns
+    /// the response decoded into [`PackageVersion`]. The list/detail
+    /// endpoint used by [`Source::fetch`] omits `tarballUrl` (it would
+    /// be wasteful to mint signed URLs for every version on a list
+    /// page); the per-version endpoint is the source-of-truth for the
+    /// signed download URL the installer needs.
+    ///
+    /// **No caching.** The signed `tarballUrl` is short-TTL and caching
+    /// it would let stale signatures outlive the registry's grace
+    /// window, breaking subsequent installs with a 403 from the blob
+    /// storage. Every install fires a fresh request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::NotFound`] when the registry responds 404
+    /// (unknown package or unknown version), [`RegistryError::Http`] for
+    /// transport-level failures, and [`RegistryError::Decode`] when the
+    /// JSON body cannot be deserialized.
+    pub async fn fetch_version(
+        &self,
+        owner: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<PackageVersion, RegistryError> {
+        let url = format!(
+            "{}/api/v1/packages/{}/{}/{}",
+            self.base_url,
+            urlencoding_minimal(owner),
+            urlencoding_minimal(name),
+            urlencoding_minimal(version),
+        );
+        debug!(target: "pakx::registry", %url, "pakx fetch_version");
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|source| RegistryError::Http {
+                source_tag: TAG,
+                source,
+            })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(RegistryError::NotFound {
+                source_tag: TAG,
+                id: format!("{owner}/{name}@{version}"),
+            });
+        }
+        response
+            .error_for_status()
+            .map_err(|source| RegistryError::Http {
+                source_tag: TAG,
+                source,
+            })?
+            .json::<PackageVersion>()
+            .await
+            .map_err(|source| RegistryError::Decode {
+                source_tag: TAG,
+                message: source.to_string(),
+            })
+    }
+}
+
+/// Wire-format of `GET /api/v1/packages/{owner}/{name}/{version}`.
+///
+/// Mirrors the backend route in
+/// `app/api/v1/packages/[owner]/[name]/[version]/route.ts` (see lines
+/// 57-65 — `id`, `version`, `sha256`, `sizeBytes`, `publishedAt`,
+/// `deprecatedAt`, `tarballUrl`). Unknown fields are tolerated via the
+/// `extra` flatten so future additive backend fields don't break the
+/// CLI.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageVersion {
+    /// Canonical `<owner>/<name>` id (echoed from the backend so callers
+    /// can log it without re-stringifying).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Pinned version (echoed from the URL).
+    pub version: String,
+    /// Hex sha256 of the tarball bytes. The installer recomputes this
+    /// locally and compares before any extraction.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// Tarball size in bytes. Informational; the installer caps reads
+    /// independently.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    /// ISO-8601 publish timestamp.
+    #[serde(default)]
+    pub published_at: Option<String>,
+    /// ISO-8601 deprecation timestamp. When set, this version is in the
+    /// 30-day grace window of `pakx unpublish`.
+    #[serde(default)]
+    pub deprecated_at: Option<String>,
+    /// Signed (short-TTL) download URL. **This** is the field the install
+    /// resolver downloads from — the list/detail endpoint deliberately
+    /// omits it.
+    #[serde(default)]
+    pub tarball_url: Option<String>,
+    #[serde(flatten)]
+    #[serde(default)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[async_trait]

@@ -118,6 +118,9 @@ pub async fn run(args: TestArgs) -> Result<()> {
 
     if failures == 0 {
         println!("\n{}", ui::heading("all entries ok"));
+        // Single dimmed footer so the user sees the manifest-level
+        // outcome at a glance after the per-entry rows.
+        println!("{}", ui::dim("\u{2192} manifest validated"));
         Ok(())
     } else {
         anyhow::bail!("{failures} entry/entries failed validation")

@@ -33,5 +33,7 @@ pub async fn run(args: PackArgs) -> Result<()> {
         result.tarball_path.display(),
         result.bytes.len(),
     );
+    // Single dimmed next-step hint.
+    eprintln!("{}", ui::dim_err("\u{2192} next: pakx publish"));
     Ok(())
 }

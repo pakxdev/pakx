@@ -6,6 +6,56 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pakx install` against a published skill no longer fails with
+  `registry response for <id>@<version> omits tarballUrl`.** The PR #36
+  resolver wired the install step to `GET /api/v1/packages/{owner}/{name}`
+  — the list/detail endpoint, which deliberately omits the signed
+  `tarballUrl` (signed URLs are short-TTL; the backend doesn't mint one
+  per `versions[]` entry). Live install against the first published
+  package `arwenizEr/hello-world@0.1.1` therefore always failed. The
+  resolver now calls `GET /api/v1/packages/{owner}/{name}/{version}`
+  (per-version endpoint, see backend route
+  `app/api/v1/packages/[owner]/[name]/[version]/route.ts:57-65`) which
+  returns the fresh signed `tarballUrl` alongside the per-version
+  `sha256`, `sizeBytes`, `publishedAt`, and `deprecatedAt`. Pinned
+  deps skip the list call entirely and go straight to the per-version
+  endpoint; unpinned deps still hit the list endpoint to enumerate
+  `versions[]` and pick latest / highest-semver. The per-version
+  response is **never cached** — signed URLs would expire while the
+  cache TTL is still valid, breaking subsequent installs with a 403
+  from blob storage.
+
+### Added
+
+- **`PakxSource::fetch_version(owner, name, version)` →
+  `Result<PackageVersion, RegistryError>`** in `pakx-registry-client`.
+  Wire-format `PackageVersion` mirrors the backend response: `id`,
+  `version`, `sha256`, `sizeBytes`, `publishedAt`, `deprecatedAt`,
+  `tarballUrl`, plus an `extra` flatten capture so additive backend
+  fields don't break the CLI. Used by the install-skill resolver and
+  exposed for downstream consumers (e.g. `pakx doctor` will use it to
+  re-verify a lockfile's `resolvedFrom` against current registry
+  state once that wiring lands).
+- **Post-action next-step hints across every action subcommand.**
+  One dimmed line trailing the success line, prefixed with `→`
+  (U+2192), telling users what to run next or where to look:
+  - `pakx add <id>` → `→ next: pakx install`
+  - `pakx remove <id>` → `→ next: pakx install`
+  - `pakx install` (on success) → `→ lockfile: <absolute path>`
+  - `pakx test` (on success) → `→ manifest validated`
+  - `pakx pack` → `→ next: pakx publish`
+  - `pakx publish` → `→ view: https://pakx.dev/p/pakx/<owner>/<name>`
+  - `pakx unpublish` → `→ deprecated <owner>/<name>@<version>: 30-day
+    soft-delete grace; resolves to 404 after the window closes`
+  - `pakx login` → `→ credentials: <path> (mode 0600)` (the
+    `(mode 0600)` suffix is unix-only)
+  Read-only subcommands (`list`, `search`, `info`, `whoami`, `config`,
+  `doctor`, `upgrade`) deliberately stay hint-free. JSON output paths
+  remain unaffected — the `--json` contract surface emits exactly
+  the JSON line and nothing else.
+
 ### Security
 
 - `pakx pack` now **refuses** to follow symlinks under the source

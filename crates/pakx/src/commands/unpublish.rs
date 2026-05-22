@@ -37,10 +37,20 @@ pub async fn run(args: UnpublishArgs) -> Result<()> {
     backend
         .unpublish(&entry.token, owner, name, version)
         .await?;
+    // Keep the legacy `unpublished <owner>/<name>@<version>` substring
+    // so existing test asserts still match, but follow it with a
+    // dimmed `deprecated` hint that surfaces the real backend
+    // semantics — 30-day soft-delete grace, not a hard removal.
     eprintln!(
         "{} {}",
         ui::glyph_ok_err(),
         ui::success_err(&format!("unpublished {owner}/{name}@{version}"))
+    );
+    eprintln!(
+        "{}",
+        ui::dim_err(&format!(
+            "\u{2192} deprecated {owner}/{name}@{version}: 30-day soft-delete grace; resolves to 404 after the window closes"
+        ))
     );
     Ok(())
 }

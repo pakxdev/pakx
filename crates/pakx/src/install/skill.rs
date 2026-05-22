@@ -3,13 +3,19 @@
 //! Flow for one `skills:` dep:
 //!   1. Parse the manifest shorthand `<owner>/<name>[@<version>]` into
 //!      `(owner, name, requested_version?)`.
-//!   2. Call `PakxSource::fetch` (already a registered source on the
-//!      `RegistryClient`) to get the package detail. The response
-//!      includes the `versions[]` array with `sha256`, `sizeBytes`,
-//!      `tarballUrl`, etc. per version.
-//!   3. Pick the version: the requested one if specified, else
-//!      `latestVersion` if the API surfaced one, else the highest
-//!      non-deprecated semver in `versions[]`.
+//!   2. Decide which version to install:
+//!        - When pinned, skip straight to the per-version endpoint and
+//!          honour whatever the registry returns (errors with 404 if
+//!          the pin is unknown).
+//!        - When unpinned, call `PakxSource::fetch(<owner>/<name>)`
+//!          to enumerate `versions[]`, picking `latestVersion` (or the
+//!          highest non-deprecated semver as fallback).
+//!   3. Call `PakxSource::fetch_version(owner, name, picked)` —
+//!      `GET /api/v1/packages/{owner}/{name}/{version}` — to obtain
+//!      the **signed** `tarballUrl` plus the per-version `sha256`.
+//!      The list/detail endpoint deliberately omits `tarballUrl`
+//!      because signed URLs are short-TTL; the per-version endpoint
+//!      mints a fresh signature per call.
 //!   4. Download the signed `tarballUrl` via reqwest, streaming to a
 //!      `tempfile::NamedTempFile` with a 50 MiB hard cap.
 //!   5. Sha256-verify the bytes against the API-declared `sha256`;
@@ -34,7 +40,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use flate2::read::GzDecoder;
 use pakx_core::Integrity;
-use pakx_registry_client::{Package, PakxSource, Source};
+use pakx_registry_client::{Package, PackageVersion, PakxSource, Source};
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
@@ -105,34 +111,27 @@ pub fn parse_skill_shorthand(s: &str) -> Result<(String, String, Option<String>)
 /// One version row in `install_hints.versions[]`. Decoded lazily on
 /// demand because `PakxSource` is intentionally schema-loose so the
 /// CLI doesn't break on additive backend fields.
+///
+/// Only the **version** + **deprecated** flag are needed at this layer
+/// — sha256 / tarballUrl live on the per-version endpoint and never
+/// surface on the list/detail page (the latter omits `tarballUrl` to
+/// avoid minting signed URLs for every entry; mirrored in the e2e
+/// mock).
 #[derive(Debug, Clone)]
 struct VersionRow {
     version: String,
-    sha256: Option<String>,
-    tarball_url: Option<String>,
     deprecated: bool,
 }
 
 impl VersionRow {
     fn from_json(v: &serde_json::Value) -> Option<Self> {
         let version = v.get("version")?.as_str()?.to_owned();
-        let sha256 = v
-            .get("sha256")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        let tarball_url = v
-            .get("tarballUrl")
-            .or_else(|| v.get("tarball_url"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
         let deprecated = v
             .get("deprecated")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         Some(Self {
             version,
-            sha256,
-            tarball_url,
             deprecated,
         })
     }
@@ -227,31 +226,68 @@ fn extract_version_rows(pkg: &Package) -> (Vec<VersionRow>, Option<String>) {
 }
 
 /// Resolve the skill id against a `PakxSource` and return all of the
-/// data needed to download. Pure data-out; no FS or network side
-/// effects beyond the single fetch call.
+/// data needed to download.
+///
+/// Two-step against the registry:
+///   1. Pick the version. When `requested_version` is `Some`, skip the
+///      list/detail call entirely and trust the pin (the per-version
+///      endpoint 404s loudly if it doesn't exist). When `None`, fetch
+///      the list/detail body to enumerate `versions[]` and pick
+///      latest / highest semver.
+///   2. Call `fetch_version` (`GET /api/v1/packages/{owner}/{name}/{version}`)
+///      to obtain the signed `tarballUrl` and per-version `sha256`.
+///      This is the **source of truth** for the download URL — the
+///      list/detail endpoint deliberately omits `tarballUrl` because
+///      signed URLs are short-TTL.
+///
+/// Pure data-out; no FS side effects.
 pub async fn resolve(
     source: &PakxSource,
     id: &str,
     requested_version: Option<&str>,
 ) -> Result<SkillResolution> {
-    let pkg = source
-        .fetch(id)
+    let (owner, name, _) = parse_skill_shorthand(id)?;
+
+    // Pick the target version. Pinned → trust the pin (avoid the list
+    // round-trip). Unpinned → enumerate via the detail endpoint and
+    // pick latest / highest semver.
+    let target_version = if let Some(v) = requested_version {
+        v.to_owned()
+    } else {
+        let pkg = source
+            .fetch(id)
+            .await
+            .with_context(|| format!("fetch skill metadata for {id}"))?;
+        let (rows, latest) = extract_version_rows(&pkg);
+        pick_version(&rows, latest.as_deref(), None)?
+            .version
+            .clone()
+    };
+
+    let version_meta = source
+        .fetch_version(&owner, &name, &target_version)
         .await
-        .with_context(|| format!("fetch skill metadata for {id}"))?;
-    let (rows, latest) = extract_version_rows(&pkg);
-    let row = pick_version(&rows, latest.as_deref(), requested_version)?;
-    let sha = row
+        .with_context(|| format!("fetch {id}@{target_version} metadata"))?;
+    resolution_from_version_meta(id, &target_version, &version_meta)
+}
+
+/// Pull the `(sha256, tarballUrl)` pair from a per-version response,
+/// erroring with a precise message when either field is missing.
+fn resolution_from_version_meta(
+    id: &str,
+    version: &str,
+    meta: &PackageVersion,
+) -> Result<SkillResolution> {
+    let sha = meta
         .sha256
         .clone()
-        .ok_or_else(|| anyhow!("registry response for {id}@{} omits sha256", row.version))?;
-    let tarball_url = row.tarball_url.clone().ok_or_else(|| {
-        anyhow!(
-            "registry response for {id}@{} omits tarballUrl",
-            row.version
-        )
-    })?;
+        .ok_or_else(|| anyhow!("registry response for {id}@{version} omits sha256"))?;
+    let tarball_url = meta
+        .tarball_url
+        .clone()
+        .ok_or_else(|| anyhow!("registry response for {id}@{version} omits tarballUrl"))?;
     Ok(SkillResolution {
-        version: row.version.clone(),
+        version: meta.version.clone(),
         sha256_hex: sha,
         tarball_url,
     })
@@ -624,11 +660,9 @@ pub async fn install_skill_from_pakx(
 mod tests {
     use super::*;
 
-    fn row(version: &str, sha: &str, url: &str, deprecated: bool) -> VersionRow {
+    fn row(version: &str, deprecated: bool) -> VersionRow {
         VersionRow {
             version: version.into(),
-            sha256: Some(sha.into()),
-            tarball_url: Some(url.into()),
             deprecated,
         }
     }
@@ -661,20 +695,14 @@ mod tests {
 
     #[test]
     fn pick_version_honors_requested() {
-        let rows = vec![
-            row("1.0.0", "abc", "u1", false),
-            row("2.0.0", "def", "u2", false),
-        ];
+        let rows = vec![row("1.0.0", false), row("2.0.0", false)];
         let chosen = pick_version(&rows, Some("2.0.0"), Some("1.0.0")).unwrap();
         assert_eq!(chosen.version, "1.0.0");
     }
 
     #[test]
     fn pick_version_falls_back_to_latest_hint() {
-        let rows = vec![
-            row("0.1.0", "a", "u1", false),
-            row("0.1.1", "b", "u2", false),
-        ];
+        let rows = vec![row("0.1.0", false), row("0.1.1", false)];
         let chosen = pick_version(&rows, Some("0.1.1"), None).unwrap();
         assert_eq!(chosen.version, "0.1.1");
     }
@@ -682,9 +710,9 @@ mod tests {
     #[test]
     fn pick_version_falls_back_to_highest_when_latest_null() {
         let rows = vec![
-            row("0.1.0", "a", "u1", false),
-            row("0.2.3", "b", "u2", false),
-            row("0.1.5", "c", "u3", false),
+            row("0.1.0", false),
+            row("0.2.3", false),
+            row("0.1.5", false),
         ];
         let chosen = pick_version(&rows, None, None).unwrap();
         assert_eq!(chosen.version, "0.2.3");
@@ -692,17 +720,14 @@ mod tests {
 
     #[test]
     fn pick_version_skips_deprecated_in_semver_pick() {
-        let rows = vec![
-            row("9.9.9", "a", "u1", true),
-            row("1.0.0", "b", "u2", false),
-        ];
+        let rows = vec![row("9.9.9", true), row("1.0.0", false)];
         let chosen = pick_version(&rows, None, None).unwrap();
         assert_eq!(chosen.version, "1.0.0");
     }
 
     #[test]
     fn pick_version_errors_on_pinned_miss() {
-        let rows = vec![row("1.0.0", "a", "u", false)];
+        let rows = vec![row("1.0.0", false)];
         let err = pick_version(&rows, None, Some("2.0.0")).unwrap_err();
         assert!(err.to_string().contains("not in registry"));
     }

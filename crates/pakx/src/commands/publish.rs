@@ -116,6 +116,18 @@ pub async fn run(args: PublishArgs) -> Result<()> {
             pkg.owner, pkg.name, upload.version
         ))
     );
+    // Single dimmed next-step hint pointing at the public dashboard
+    // listing. The URL shape `https://pakx.dev/p/pakx/<owner>/<name>`
+    // matches the dashboard route — the trailing `pakx` segment is
+    // the source tag, mirroring the federated-source key used in
+    // `agents.lock`.
+    eprintln!(
+        "{}",
+        ui::dim_err(&format!(
+            "\u{2192} view: https://pakx.dev/p/pakx/{}/{}",
+            pkg.owner, pkg.name
+        ))
+    );
     Ok(())
 }
 

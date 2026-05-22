@@ -112,10 +112,9 @@ pub async fn run(args: RemoveArgs) -> Result<()> {
         ui::success(&args.id),
         kind.as_str(),
     );
-    eprintln!(
-        "{}",
-        ui::dim_err("       run `pakx install` to reconcile installed agents")
-    );
+    // Single dimmed next-step hint — mirrors `pakx add`. U+2192
+    // RIGHTWARDS ARROW written as an escape to keep source ASCII.
+    println!("{}", ui::dim("\u{2192} next: pakx install"));
     Ok(())
 }
 

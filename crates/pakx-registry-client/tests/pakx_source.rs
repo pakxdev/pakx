@@ -156,6 +156,85 @@ async fn fetch_404_returns_not_found_error() {
 }
 
 #[tokio::test]
+async fn fetch_version_returns_per_version_metadata_with_tarball_url() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello/0.1.1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "version": "0.1.1",
+            "sha256": "abc123",
+            "sizeBytes": 4321,
+            "publishedAt": "2026-05-22T00:00:00Z",
+            "deprecatedAt": null,
+            "tarballUrl": "https://blob.example/abc?sig=XYZ"
+        })))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let pv = src.fetch_version("alice", "hello", "0.1.1").await.unwrap();
+    assert_eq!(pv.version, "0.1.1");
+    assert_eq!(pv.sha256.as_deref(), Some("abc123"));
+    assert_eq!(pv.size_bytes, Some(4321));
+    assert_eq!(
+        pv.tarball_url.as_deref(),
+        Some("https://blob.example/abc?sig=XYZ")
+    );
+}
+
+#[tokio::test]
+async fn fetch_version_404_returns_not_found_error() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/ghost/server/9.9.9"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let err = src
+        .fetch_version("ghost", "server", "9.9.9")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        RegistryError::NotFound {
+            source_tag: "pakx",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn fetch_version_tolerates_missing_tarball_url() {
+    // The wire-format tolerates a missing `tarballUrl` (the field is
+    // `Option<String>`); the resolver enforces the "must be present"
+    // contract at a higher layer with a precise error message. This
+    // test pins that the per-version decode itself is permissive so
+    // the resolver — not the deserializer — owns the diagnostic.
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello/0.1.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "version": "0.1.0",
+            "sha256": "abc",
+            "sizeBytes": 100
+        })))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let pv = src.fetch_version("alice", "hello", "0.1.0").await.unwrap();
+    assert!(pv.tarball_url.is_none());
+    assert_eq!(pv.sha256.as_deref(), Some("abc"));
+}
+
+#[tokio::test]
 async fn fetch_rejects_malformed_id() {
     let server = MockServer::start().await;
     let cache = TempDir::new().unwrap();
