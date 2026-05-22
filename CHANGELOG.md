@@ -50,6 +50,15 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- `pakx add` now accepts the two-positional `<kind> <id>` form
+  (`pakx add mcp foo/bar`) alongside the existing `pakx add <id>
+  [-t <kind>]` shape. Users naturally try the kind-first form because
+  every other package manager works that way; previously clap
+  rejected the extra positional with `error: unexpected argument
+  'foo/bar'`. The two-positional form is mutually exclusive with
+  `-t/--type` (errors with `kind specified twice`), and an invalid
+  kind token in the first positional is rejected with a list of the
+  valid kinds rather than being silently treated as the id.
 - `LockfileError` now has a dedicated `Io` variant. The previous code
   wrapped every `std::io::Error` from `read_lockfile_from` /
   `write_lockfile_to` in `LockfileError::Schema { message: "io error:
