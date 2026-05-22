@@ -58,6 +58,17 @@ impl ManifestError {
 /// Failures returned from parsing or validating `agents.lock`.
 #[derive(Debug, Error)]
 pub enum LockfileError {
+    /// Filesystem access failure (open, read, write, permission denied).
+    /// Routed through a dedicated variant so a permission-denied on
+    /// `agents.lock` is not rendered to the user as "failed schema
+    /// validation" — the previous code wrapped every `std::io::Error`
+    /// in `Schema { message: "io error: ..." }`, which was misleading.
+    #[error("agents.lock io error{path}: {source}", path = fmt_path(.path.as_ref()))]
+    Io {
+        #[source]
+        source: std::io::Error,
+        path: Option<PathBuf>,
+    },
     /// The source text was not valid JSON.
     #[error("agents.lock is not valid JSON{path}: {source}", path = fmt_path(.path.as_ref()))]
     ParseJson {
@@ -78,7 +89,7 @@ impl LockfileError {
     pub fn with_path(mut self, p: impl Into<PathBuf>) -> Self {
         let new_path = p.into();
         match &mut self {
-            Self::ParseJson { path, .. } | Self::Schema { path, .. } => {
+            Self::Io { path, .. } | Self::ParseJson { path, .. } | Self::Schema { path, .. } => {
                 *path = Some(new_path);
             }
         }
@@ -87,7 +98,9 @@ impl LockfileError {
 
     pub const fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::ParseJson { path, .. } | Self::Schema { path, .. } => path.as_ref(),
+            Self::Io { path, .. } | Self::ParseJson { path, .. } | Self::Schema { path, .. } => {
+                path.as_ref()
+            }
         }
     }
 }

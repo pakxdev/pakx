@@ -48,3 +48,31 @@ fn remove_returns_previous() {
     assert_eq!(prev.token, "t");
     assert!(creds.get("https://x.test").is_none());
 }
+
+/// `Credentials::Entry` is `deny_unknown_fields`. A typo'd key (or a
+/// future field we don't know about) must surface as a parse error
+/// instead of being silently dropped — the token is the only field we
+/// cannot afford to lose on round-trip.
+#[test]
+fn entry_rejects_unknown_fields() {
+    use pakx_core::CredentialsError;
+
+    let body = r#"{
+        "registries": {
+            "https://example.com": {
+                "token": "pakx_v1_aaa",
+                "login": "alice",
+                "unexpected_field": "oops"
+            }
+        }
+    }"#;
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("c.json");
+    std::fs::write(&path, body).unwrap();
+
+    let err = Credentials::read_from(&path).unwrap_err();
+    assert!(
+        matches!(err, CredentialsError::Parse { .. }),
+        "expected Parse error, got {err:?}"
+    );
+}

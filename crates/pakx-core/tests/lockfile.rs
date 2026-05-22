@@ -211,3 +211,40 @@ fn writer_ends_with_single_trailing_newline() {
     assert!(out.ends_with('\n'));
     assert!(!out.ends_with("\n\n"));
 }
+
+/// `read_lockfile_from` (`io::read_from`) previously wrapped every
+/// `std::io::Error` in `LockfileError::Schema { message: "io error: ..." }`
+/// so a permission-denied on `agents.lock` was rendered to the user as
+/// "failed schema validation," which is misleading. The IO variant is
+/// now its own thing.
+///
+/// Cross-platform reproducer: create a *directory* at the target path
+/// and call `read_lockfile_from` on it. `std::fs::read_to_string`
+/// returns an `IsADirectory` / `Other` error (kind varies per OS) —
+/// the key point is it's NOT `NotFound`, so the "missing file" early
+/// return doesn't fire and the IO variant path is exercised.
+#[test]
+fn read_from_returns_io_error_when_target_is_a_directory() {
+    use pakx_core::{read_lockfile_from, LockfileError};
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let lock_path = temp.path().join("agents.lock");
+    std::fs::create_dir(&lock_path).expect("create dir at lockfile path");
+
+    let err = read_lockfile_from(&lock_path).unwrap_err();
+    assert!(
+        matches!(err, LockfileError::Io { .. }),
+        "expected LockfileError::Io, got {err:?}",
+    );
+    // The message must not mention "schema validation" — that was the
+    // misleading rendering this fix removes.
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("schema validation"),
+        "io errors must not surface as schema errors: {msg}",
+    );
+    assert!(
+        msg.contains("io error"),
+        "io errors should self-identify in the message: {msg}",
+    );
+}
