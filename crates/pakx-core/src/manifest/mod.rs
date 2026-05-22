@@ -7,7 +7,9 @@ pub mod schema;
 pub mod write;
 
 pub use io::{read_from, write_to};
-pub use mutate::{add_dep, add_shorthand, AddOutcome};
+pub use mutate::{
+    add_dep, add_shorthand, remove_shorthand, sections_containing, AddOutcome, RemoveOutcome,
+};
 pub use parse::parse_manifest;
 pub use schema::{
     AgentId, DepSpec, Dependencies, GitSpec, Manifest, PackageType, RegistrySpec, StringSpec,

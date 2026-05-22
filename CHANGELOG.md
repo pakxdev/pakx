@@ -98,6 +98,18 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- `pakx remove <id>` — inverse of `pakx add`. Strips a single shorthand
+  dep from `agents.yml` after a `[y/N]` confirmation (skip with `--yes`).
+  Kind is inferred when the id is unambiguous; supplying `--kind
+  <mcp|skills|subagents|prompts|commands|hooks>` is required when the
+  same id is declared under multiple sections (the resolver errors with
+  the list of conflicting sections instead of silently picking one).
+  `--directory` mirrors `pakx install` / `pakx list`. Does **not**
+  touch `agents.lock` or installed adapter state — matches the
+  `pakx add` symmetry, so the next `pakx install` is the single point
+  that reconciles both. Round-trips clean: `pakx add` followed by
+  `pakx remove` on the same id returns the parsed manifest to its
+  pre-`add` shape.
 - `pakx list --json` and `pakx search --json` — single-line JSON array on
   stdout (newline-terminated) so output pipes cleanly into `jq`. Both
   share the same upstream data structure as the human-readable view —
