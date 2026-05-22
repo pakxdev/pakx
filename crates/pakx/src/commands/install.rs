@@ -115,6 +115,18 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
     );
 
     if report.failed.is_empty() {
+        // Single dimmed hint pointing at the lockfile — users want
+        // to see which file landed without scanning the project tree.
+        // We show the absolute path here (not just the file name)
+        // because the user's next action is typically `git add` and
+        // they need to know the absolute location. Skipped when
+        // `--no-lockfile` was passed (no lockfile was written).
+        if let Some(p) = &report.lockfile_path {
+            eprintln!(
+                "{}",
+                ui::dim_err(&format!("\u{2192} lockfile: {}", p.display()))
+            );
+        }
         Ok(())
     } else {
         anyhow::bail!("{} dep(s) failed to install", report.failed.len())

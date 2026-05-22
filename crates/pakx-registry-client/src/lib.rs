@@ -28,7 +28,7 @@ pub use pakx_backend::{
     BackendError, CreatePackageRequest, CreatePackageResponse, PakxBackend, UploadVersionResponse,
     Whoami,
 };
-pub use pakx_source::{PakxSource, DEFAULT_BASE_URL as PAKX_BASE_URL};
+pub use pakx_source::{PackageVersion, PakxSource, DEFAULT_BASE_URL as PAKX_BASE_URL};
 pub use smithery::{SmitherySource, DEFAULT_BASE_URL as SMITHERY_BASE_URL};
 pub use source::Source;
 pub use types::Package;

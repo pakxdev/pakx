@@ -65,11 +65,23 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     creds.write_to(&path).context("write credentials")?;
 
     eprintln!(
-        "{} logged in to {} as {} (creds saved to {})",
+        "{} logged in to {} as {}",
         ui::glyph_ok_err(),
         args.registry,
         ui::success_err(&me.login),
-        path.display()
+    );
+    // Single dimmed hint pointing at the on-disk credentials path,
+    // surfacing the unix mode so users can `ls -l` to verify the
+    // 0600 contract (no value on Windows but the path is still
+    // useful for the manual `attrib` / GPO audit).
+    let mode_note = if cfg!(unix) { " (mode 0600)" } else { "" };
+    eprintln!(
+        "{}",
+        ui::dim_err(&format!(
+            "\u{2192} credentials: {}{}",
+            path.display(),
+            mode_note,
+        ))
     );
     Ok(())
 }

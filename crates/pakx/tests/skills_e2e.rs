@@ -155,11 +155,21 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 // Mock server helpers
 // ---------------------------------------------------------------------------
 
-/// Mount the package-detail endpoint + the blob download endpoint on a
-/// fresh wiremock. The blob URL the detail response points at is the
-/// same wiremock — we just give it a known path the test can mount the
-/// tarball response under. `?download=1` is appended so the test can
-/// strip-on-write assertion fires for the lockfile's canonical URL.
+/// Mount the package-detail endpoint, the per-version endpoint, and
+/// the blob download endpoint on a fresh wiremock.
+///
+/// The signed URL the **per-version** response points at is the same
+/// wiremock — we just give it a known path the test can mount the
+/// tarball response under. `?download=1&sig=ABC` is appended so the
+/// strip-on-write assertion (lockfile must record a canonical URL,
+/// not the signed one) has something to strip.
+///
+/// We register both the list/detail endpoint and the per-version
+/// endpoint. The list endpoint's `versions[]` entries deliberately do
+/// **not** carry `tarballUrl` — that mirrors production, where signed
+/// URLs are only minted by the per-version route. Including the
+/// `tarballUrl` here would mask the bug that PR #36 missed (the
+/// resolver was reading from the wrong endpoint).
 async fn mock_pakx_skill_registry(
     id: &str,
     version: &str,
@@ -168,8 +178,12 @@ async fn mock_pakx_skill_registry(
 ) -> MockServer {
     let server = MockServer::start().await;
     let blob_path = format!("/blob/{id}/{version}");
+    let signed_url = format!("{}{}?download=1&sig=ABC", server.uri(), blob_path);
 
-    // Detail endpoint.
+    let (owner, name) = id.split_once('/').expect("id has /");
+
+    // List/detail endpoint — versions[] WITHOUT tarballUrl (mirrors
+    // production; signed URLs are minted by the per-version route only).
     let detail_body = json!({
         "id": id,
         "kind": "skill",
@@ -179,15 +193,31 @@ async fn mock_pakx_skill_registry(
             {
                 "version": version,
                 "sha256": sha256_hex,
-                "sizeBytes": tarball_bytes.len(),
-                "tarballUrl": format!("{}{}?download=1&sig=ABC", server.uri(), blob_path)
+                "sizeBytes": tarball_bytes.len()
             }
         ]
     });
-    let (owner, name) = id.split_once('/').expect("id has /");
     Mock::given(method("GET"))
         .and(wm_path(format!("/api/v1/packages/{owner}/{name}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(detail_body))
+        .mount(&server)
+        .await;
+
+    // Per-version endpoint — this is what carries the signed tarballUrl.
+    let version_body = json!({
+        "id": id,
+        "version": version,
+        "sha256": sha256_hex,
+        "sizeBytes": tarball_bytes.len(),
+        "publishedAt": "2026-05-22T00:00:00Z",
+        "deprecatedAt": null,
+        "tarballUrl": signed_url,
+    });
+    Mock::given(method("GET"))
+        .and(wm_path(format!(
+            "/api/v1/packages/{owner}/{name}/{version}"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(version_body))
         .mount(&server)
         .await;
 
@@ -199,6 +229,67 @@ async fn mock_pakx_skill_registry(
                 .set_body_bytes(tarball_bytes)
                 .insert_header("content-type", "application/gzip"),
         )
+        .mount(&server)
+        .await;
+
+    server
+}
+
+/// Variant that mounts ONLY the list/detail endpoint with no
+/// `tarballUrl`. Used by the regression test for PR #36 — proves the
+/// resolver raises `omits tarballUrl` when the per-version endpoint
+/// would have been the right call but the (legacy / broken) code
+/// falls back to reading `versions[].tarballUrl` from the list page.
+///
+/// Even after the fix, this shape must error: the per-version endpoint
+/// 404s here (we never mount it), and the resolver must surface that
+/// as a missing-tarballUrl error rather than silently succeed.
+async fn mock_pakx_registry_without_tarball_url(
+    id: &str,
+    version: &str,
+    sha256_hex: &str,
+    tarball_len: usize,
+) -> MockServer {
+    let server = MockServer::start().await;
+    let (owner, name) = id.split_once('/').expect("id has /");
+
+    let detail_body = json!({
+        "id": id,
+        "kind": "skill",
+        "description": "test skill",
+        "latestVersion": version,
+        "versions": [
+            {
+                "version": version,
+                "sha256": sha256_hex,
+                "sizeBytes": tarball_len
+            }
+        ]
+    });
+    Mock::given(method("GET"))
+        .and(wm_path(format!("/api/v1/packages/{owner}/{name}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail_body))
+        .mount(&server)
+        .await;
+
+    // Per-version endpoint returns version metadata WITHOUT tarballUrl
+    // — the exact regression PR #36 introduced. The resolver must error
+    // with `omits tarballUrl` rather than panicking or silently
+    // succeeding.
+    let version_body = json!({
+        "id": id,
+        "version": version,
+        "sha256": sha256_hex,
+        "sizeBytes": tarball_len,
+        "publishedAt": "2026-05-22T00:00:00Z",
+        "deprecatedAt": null
+        // intentionally NO tarballUrl
+    });
+    Mock::given(method("GET"))
+        .and(wm_path(format!(
+            "/api/v1/packages/{owner}/{name}/{version}"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(version_body))
         .mount(&server)
         .await;
 
@@ -419,6 +510,50 @@ async fn install_skill_refuses_symlink_entry() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("symlink"));
+}
+
+// ---------------------------------------------------------------------------
+// Per-version endpoint regression (PR #36)
+// ---------------------------------------------------------------------------
+
+/// Regression: PR #36 wired the resolver to `GET /api/v1/packages/{owner}/{name}`
+/// (the list/detail endpoint) which returns `versions[]` WITHOUT
+/// `tarballUrl`. Live install against `arwenizEr/hello-world@0.1.1`
+/// failed with `omits tarballUrl`. The fix is to call the per-version
+/// endpoint, but the error message itself is still the correct
+/// surface when the registry response actually omits the field.
+///
+/// This test mounts a per-version response without `tarballUrl` to
+/// confirm the resolver still emits the precise diagnostic users will
+/// search for in their logs.
+#[tokio::test]
+async fn install_skill_errors_when_registry_omits_tarball_url() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let id = "alice/no-url";
+    let version = "0.1.0";
+
+    let (tarball, sha) = build_test_tarball(&[TarEntry::file("SKILL.md", b"hello")]);
+    let server = mock_pakx_registry_without_tarball_url(id, version, &sha, tarball.len()).await;
+
+    seed_skill_manifest(&project, id, version);
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--pakx-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--mcp-base-url",
+            &server.uri(),
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("omits tarballUrl"));
 }
 
 // ---------------------------------------------------------------------------

@@ -203,7 +203,15 @@ pub async fn run(args: AddArgs) -> Result<()> {
         ui::success_err(&id),
         kind.as_str(),
     );
-    eprintln!("       run `pakx install` to apply");
+    // Single next-step hint, dimmed so it sits visually behind the
+    // success line. Mirrored verbatim across action subcommands
+    // (`add` / `remove` / `install` / `pack` / `publish` / `unpublish`
+    // / `login` / `test`) so users learn the rhythm: every action
+    // command ends with exactly one `→ next: <command>` line.
+    // The leading character is U+2192 RIGHTWARDS ARROW, written as
+    // an escape so source files stay valid UTF-8 without an embedded
+    // glyph some Windows terminals re-encode.
+    eprintln!("{}", ui::dim_err("\u{2192} next: pakx install"));
     Ok(())
 }
 
