@@ -6,6 +6,21 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Fixed
+
+- `LockfileError` now has a dedicated `Io` variant. The previous code
+  wrapped every `std::io::Error` from `read_lockfile_from` /
+  `write_lockfile_to` in `LockfileError::Schema { message: "io error:
+  ..." }`, so a permission-denied or disk-full on `agents.lock`
+  surfaced to the user as "failed schema validation" — misleading and
+  hard to diagnose. IO errors now render as `"agents.lock io error
+  at <path>: <reason>"`.
+- `Credentials::Entry` is now `#[serde(deny_unknown_fields)]`. A typo
+  in `credentials.json` (or a future-version field we don't model
+  yet) surfaces as a parse error instead of being silently dropped on
+  round-trip — losing the `token` field would be catastrophic, and
+  this guards the contract.
+
 ### Added
 
 - `pakx list --json` and `pakx search --json` — single-line JSON array on

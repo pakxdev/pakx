@@ -35,7 +35,13 @@ pub enum CredentialsError {
     },
 }
 
+/// `deny_unknown_fields`: a typo in `credentials.json` surfaces.
+///
+/// Without it, a future-version field we don't model yet would be
+/// silently dropped on round-trip — and losing the `token` field is
+/// catastrophic, so we want strict parsing here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Entry {
     pub token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
