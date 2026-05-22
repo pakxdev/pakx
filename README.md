@@ -29,7 +29,7 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx test` | Validate `agents.yml` without installing — resolves every `mcp:` dep against the federated registries (official MCP Registry + Smithery + pakx-registry; toggle with `--no-smithery` / `--no-pakx-registry`) and exits non-zero on the first failure. Other dep kinds (`skills:` / `subagents:` / `prompts:` / `commands:` / `hooks:`) are reported as `skip` until per-kind resolvers land. `--offline` checks against the lockfile only. Intended for CI / pre-commit. |
 | `pakx info <owner>/<name>` | Read-only registry inspection — metadata + version list. `--version <ver>` fetches the per-version block (sha256, sizeBytes, publishedAt, signed `tarballUrl`) from the immutable per-version endpoint. `--json` for pipelines. |
 | `pakx login` | GitHub-backed login. Validates an API token against `registry.pakx.dev/api/v1/whoami` and writes `~/.pakx/credentials.json` (mode 0600). |
-| `pakx whoami` | Stored login, or live whoami (`--offline` skips the network). |
+| `pakx whoami` | Stored login, or live whoami (`--offline` skips the network). `--json` for pipelines — emits `{login, id, email, registry, source}` where `source` is `"online"`, `"cached"`, or `"none"`; exit code is 1 when not logged in. |
 | `pakx pack` | Build a deterministic gzipped tarball from a `SKILL.md` directory. |
 | `pakx publish` | `pack` → `POST` package → `PUT` tarball. `--dry-run` skips the upload. |
 | `pakx unpublish <owner>/<name>@<version>` | `DELETE` (with grace-period tombstoning on the server side). |
