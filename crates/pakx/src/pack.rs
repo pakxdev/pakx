@@ -118,6 +118,21 @@ struct Frontmatter {
 }
 
 fn extract_frontmatter(text: &str) -> Result<Frontmatter> {
+    // Normalise line endings before fence detection. A SKILL.md saved
+    // by Notepad / VSCode-on-Windows with the default LF→CRLF setting
+    // emits `---\r\n` for its fences; the previous LF-only matchers
+    // (`strip_prefix("---\n")` + `find("\n---")`) silently fell
+    // through, so `name:` / `version:` parsed as part of the body
+    // instead of the frontmatter and `read_manifest` errored with
+    // "missing `name:`". Collapsing CRLF → LF up front keeps the rest
+    // of the parser simple and platform-independent.
+    let normalised = if text.contains('\r') {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    let text = normalised.as_ref();
+
     // Locate the fenced YAML block (`---` … `---`). SKILL.md is
     // markdown-with-frontmatter, so the block ends at the first `---`
     // that begins a line. Missing fences → fall back to the whole

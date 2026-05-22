@@ -107,6 +107,16 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **`pakx pack` now accepts CRLF-encoded SKILL.md frontmatter.**
+  Notepad and VSCode-on-Windows (default LF→CRLF auto-fix) save
+  `SKILL.md` with `\r\n` line endings. The fence scanner previously
+  matched only `\n` (`strip_prefix("---\n")` + `find("\n---")`), so a
+  CRLF-saved file silently fell through and the YAML parser saw
+  `name: demo\r` / `version: 0.1.0\r` as part of the markdown body
+  instead of the frontmatter — surfacing as a confusing "missing
+  `name:`" error. The frontmatter extractor now normalises CRLF→LF
+  before fence detection.
+
 - **`pakx test` now rejects `--no-smithery --smithery-base-url …` and
   `--no-pakx-registry --pakx-base-url …` combinations** with a clap
   conflict error. The previous round wired the `conflicts_with` guard
