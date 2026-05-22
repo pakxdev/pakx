@@ -8,6 +8,18 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **Top-level `--color <auto|always|never>` flag.** Threaded through
+  every paint helper in `pakx::ui`, the new global flag joins the
+  pre-existing `NO_COLOR` env-var + `IsTerminal` auto-detection as a
+  third color-resolution input. `auto` (default) preserves v0.1
+  behaviour. `always` force-enables ANSI codes regardless of how the
+  process is invoked — useful for `pakx list --color always | less -R`
+  where the pipe defeats the TTY probe. `never` force-disables for
+  scripted output and CI logs that mis-render escape sequences. The
+  flag is `global = true` so it works after any subcommand
+  (`pakx list --color never` and `pakx --color never list` both
+  parse).
+
 - **`sponsors:` block in `SKILL.md` frontmatter (Phase X2b — see
   `pakx-registry/SPONSOR_LINKS_SPEC.md`).** Publishers can now declare
   up to 5 sponsor links per package and have them flow through `pakx

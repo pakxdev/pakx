@@ -206,6 +206,79 @@ fn list_json_without_lockfile_emits_empty_array() {
     assert_eq!(parsed, serde_json::json!([]));
 }
 
+/// ANSI Control Sequence Introducer (`ESC [`). Both 4-bit and 24-bit
+/// color codes start with this two-byte prefix, so checking for its
+/// presence is the simplest way to assert "did anything paint?"
+/// without coupling to a specific style.
+const ANSI_CSI: &[u8] = b"\x1b[";
+
+#[test]
+fn list_color_never_strips_ansi_even_on_tty() {
+    // `assert_cmd` already pipes stdout, so on Auto we'd get no
+    // color anyway. This pins the contract: `--color never` is an
+    // absolute override that must not emit ANSI sequences, full stop.
+    let project = TempDir::new().unwrap();
+    std::fs::write(project.path().join("agents.lock"), ONE_ENTRY_LOCKFILE).unwrap();
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["--color", "never", "list", "--no-check"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !output.windows(ANSI_CSI.len()).any(|w| w == ANSI_CSI),
+        "`--color never` must not emit ANSI escapes; got {output:?}",
+    );
+}
+
+#[test]
+fn list_color_always_emits_ansi_even_when_piped() {
+    // `assert_cmd` captures stdout (non-TTY), so without `--color
+    // always` the Auto path would suppress ANSI. Forcing `always`
+    // must override the TTY probe and inject color codes anyway so
+    // pipelines like `pakx list --color always | less -R` keep color.
+    let project = TempDir::new().unwrap();
+    std::fs::write(project.path().join("agents.lock"), ONE_ENTRY_LOCKFILE).unwrap();
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["--color", "always", "list", "--no-check"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        output.windows(ANSI_CSI.len()).any(|w| w == ANSI_CSI),
+        "`--color always` must emit ANSI escapes even when piped; got {output:?}",
+    );
+}
+
+#[test]
+fn list_color_auto_default_suppresses_ansi_when_piped() {
+    // Default (`Auto`) behaviour: a non-TTY stdout (`assert_cmd`
+    // always pipes) must not emit ANSI codes. Pins the v0.1
+    // behaviour against accidental drift.
+    let project = TempDir::new().unwrap();
+    std::fs::write(project.path().join("agents.lock"), ONE_ENTRY_LOCKFILE).unwrap();
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["list", "--no-check"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !output.windows(ANSI_CSI.len()).any(|w| w == ANSI_CSI),
+        "Auto on a piped stdout must not emit ANSI escapes; got {output:?}",
+    );
+}
+
 #[test]
 fn list_json_empty_lockfile_emits_empty_array() {
     let project = TempDir::new().unwrap();

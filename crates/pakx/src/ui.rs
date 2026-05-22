@@ -1,9 +1,16 @@
 //! User-facing output helpers — color, status glyphs, and table builders.
 //!
-//! Color is *only* applied when stdout (or stderr, depending on the helper)
-//! is an attached terminal **and** the `NO_COLOR` environment variable is
-//! unset. The JSON output paths bypass this module entirely so bytes
-//! emitted with `--json` are always plain ASCII / UTF-8 without escape
+//! Color resolution honours, in order:
+//!
+//! 1. The process-global [`ColorMode`] set by `main` from the top-level
+//!    `--color always|auto|never` flag. `Always` / `Never` are absolute
+//!    overrides; `Auto` (the default) falls through to (2).
+//! 2. The `NO_COLOR` environment variable
+//!    (<https://no-color.org/>) — present + non-empty disables color.
+//! 3. `IsTerminal` on the relevant stream (stdout / stderr).
+//!
+//! The JSON output paths bypass this module entirely so bytes emitted
+//! with `--json` are always plain ASCII / UTF-8 without escape
 //! sequences.
 //!
 //! The status glyph vocabulary mirrors the existing project copy:
@@ -13,20 +20,67 @@
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
+use clap::ValueEnum;
 use owo_colors::{OwoColorize, Style};
 
+/// User-facing color mode chosen via the top-level `--color` flag.
+///
+/// `Auto` is the default — matches v0.1 behaviour: respect `NO_COLOR`
+/// and `IsTerminal`. `Always` and `Never` are absolute overrides; they
+/// short-circuit both the env-var check and the TTY probe so users can
+/// force a known state regardless of how the process is invoked
+/// (CI logs, `| cat`, redirects, etc.).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum ColorMode {
+    /// Respect `NO_COLOR` + `IsTerminal` (v0.1 behaviour, default).
+    #[default]
+    Auto,
+    /// Force-enable color regardless of stream / env.
+    Always,
+    /// Force-disable color regardless of stream / env.
+    Never,
+}
+
+/// Process-global override set once by `main` from the `--color` flag.
+/// `None` means the flag was not specified, so callers fall back to
+/// `ColorMode::Auto`.
+static COLOR_MODE: OnceLock<ColorMode> = OnceLock::new();
+
+/// Initialise the process-global color mode. Called exactly once by
+/// `main`. A second call is a no-op (the first wins) — `OnceLock`
+/// semantics. Tests that need a specific mode set this before any
+/// paint helper runs.
+pub fn set_color_mode(mode: ColorMode) {
+    let _ = COLOR_MODE.set(mode);
+}
+
+fn color_mode() -> ColorMode {
+    COLOR_MODE.get().copied().unwrap_or_default()
+}
+
 /// Cached decision for `stdout`. `None` while uninitialised; on first
-/// access we resolve `NO_COLOR` + `IsTerminal` once and cache. Using
-/// `OnceLock` keeps it cheap on the hot per-line printing path.
+/// access we resolve `--color` + `NO_COLOR` + `IsTerminal` once and
+/// cache. Using `OnceLock` keeps it cheap on the hot per-line printing
+/// path.
 static STDOUT_COLOR: OnceLock<bool> = OnceLock::new();
 static STDERR_COLOR: OnceLock<bool> = OnceLock::new();
 
 fn stdout_color() -> bool {
-    *STDOUT_COLOR.get_or_init(|| !no_color() && std::io::stdout().is_terminal())
+    *STDOUT_COLOR.get_or_init(|| resolve_stream_color(std::io::stdout().is_terminal()))
 }
 
 fn stderr_color() -> bool {
-    *STDERR_COLOR.get_or_init(|| !no_color() && std::io::stderr().is_terminal())
+    *STDERR_COLOR.get_or_init(|| resolve_stream_color(std::io::stderr().is_terminal()))
+}
+
+/// Combine the explicit `--color` mode with the env + TTY fallbacks.
+fn resolve_stream_color(is_tty: bool) -> bool {
+    match color_mode() {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => !no_color() && is_tty,
+    }
 }
 
 fn no_color() -> bool {

@@ -15,6 +15,7 @@ mod ui;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::ui::ColorMode;
 use commands::add::{self, AddArgs};
 use commands::completion::{self as completion_cmd, CompletionArgs};
 use commands::config::{self as config_cmd, ConfigArgs};
@@ -41,6 +42,15 @@ use commands::whoami::{self as whoami_cmd, WhoamiArgs};
     propagate_version = true
 )]
 struct Cli {
+    /// When to emit ANSI color codes.
+    ///
+    /// `auto` (default) — color when stdout/stderr is a TTY and
+    /// `NO_COLOR` is unset. `always` — force-enable regardless of the
+    /// stream (e.g. for `pakx list --color always | less -R`). `never`
+    /// — force-disable regardless (CI logs, scripted tests).
+    #[arg(long, value_name = "MODE", value_enum, default_value_t = ColorMode::Auto, global = true)]
+    color: ColorMode,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -87,6 +97,10 @@ enum Command {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Resolve the process-global color mode from `--color` before any
+    // paint helper memoises a stream's color decision. `OnceLock` makes
+    // a second call inert, so a re-entry from tests is harmless.
+    ui::set_color_mode(cli.color);
     match cli.command {
         Command::Init(args) => init::run(args).await,
         Command::Add(args) => add::run(args).await,
