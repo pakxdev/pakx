@@ -6,6 +6,32 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Tests
+
+- **Regression coverage for federated `pakx search --json` surfacing
+  both pakx-registry and Smithery hits.** The 2026-05 incident report
+  flagged that `pakx search hello-world --json` against production
+  returned 10 Smithery hits and zero pakx-registry hits even though
+  `arwenizEr/hello-world@0.1.1` was live. Root cause turned out to
+  be upstream of the CLI — the registry list endpoint's
+  `latestVersion` subquery was returning `null`. With that fixed
+  server-side, the CLI now surfaces pakx-registry hits correctly,
+  but the federated-merge contract was previously only covered by
+  single-source unit tests. Two new tests pin it:
+  - `pakx-registry-client/tests/pakx_source.rs::search_surfaces_prod_list_shape_with_latest_version`
+    — wiremock-backed unit test asserting the prod list-endpoint
+    shape (`id`, `kind`, `description`, `visibility`,
+    `latestVersion`) decodes into a `Package` with the
+    registry-supplied version, not the `"0.0.0"` fallback. The
+    `visibility` field rides through `install_hints` via the
+    flatten capture.
+  - `pakx/tests/e2e_real_binary.rs::e2e_search_json_surfaces_pakx_registry_and_smithery`
+    — `#[ignore]`d real-binary e2e mocking `OfficialMcp` empty,
+    Smithery with one hit, and pakx-registry with one hit, then
+    asserting `pakx search hello-world --json` contains **both**
+    `source: "smithery"` and `source: "pakx"` entries with the
+    correct ids and version.
+
 ### Fixed
 
 - **`pakx install` against a published skill no longer fails with
