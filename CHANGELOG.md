@@ -107,6 +107,47 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **Atomic, crash-safe writes for `agents.lock`, `agents.yml`, and
+  every cached federated-registry response.** Each writer previously
+  used `std::fs::write(path, body)` directly — a process crash or
+  power-loss in the window between `open` and the final byte left a
+  corrupt file on disk. For the federated cache that meant the
+  next-fetch self-heals at the cost of one wasted network round-trip;
+  for `agents.lock` it meant the next `pakx install` / `pakx test`
+  failed hard against a half-pinned lockfile and the user had to `rm
+  agents.lock` by hand to recover. The fix introduces a shared
+  `pakx_core::atomic_write(path, bytes)` helper that writes to
+  `<path>.tmp` and renames into place — POSIX `rename(2)` is atomic
+  within a filesystem, and on Windows `std::fs::rename` lowers to
+  `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which is also atomic for
+  files. Either platform: the destination is either untouched or
+  fully written, never half. The orphan `.tmp` is unlinked
+  best-effort on rename failure so failed runs don't leak temp files.
+  The async `pakx-registry-client` cache reproduces the same
+  temp-then-rename shape inline against `tokio::fs` (it can't call
+  the sync helper from async code without `spawn_blocking`).
+  The `~/.pakx/credentials.json` writer was already atomic from the
+  PR #29 round and remains so — its `OpenOptions::mode(0o600)` flow
+  is preserved because the new helper deliberately doesn't set
+  permission bits (the lockfile + manifest + cache all want the
+  default umask, and mode-at-open is the only atomic way to land
+  sensitive bits on disk).
+
+- **`pakx install` no longer overwrites `agents.lock` when any dep
+  failed to install.** The previous flow wrote the lockfile
+  unconditionally even when `report.failed` was non-empty — leaving
+  a half-pinned lockfile on disk alongside a non-zero exit code.
+  Downstream tools (`pakx test`, `pakx list`, `pakx doctor`) then
+  saw an incomplete state that conflicted with the manifest's
+  declared deps, and the user had to manually `rm agents.lock` to
+  retry from a clean slate. The runner now gates the lockfile write
+  on `report.failed.is_empty()`: a failed install leaves the prior
+  `agents.lock` intact (or absent on a first install). The summary
+  line still emits `installed N, skipped M, failed K` so the user
+  sees exactly what happened. `--no-lockfile` continues to skip the
+  write regardless, mirroring v0.1 behaviour. Regression test:
+  `crates/pakx/tests/end_to_end.rs::install_failure_does_not_overwrite_existing_lockfile`.
+
 - **Action subcommands no longer leak absolute host paths into error
   messages.** Every CI log embedding a `pakx test` / `pakx install` /
   `pakx add` / `pakx remove` / `pakx init` / `pakx pack` / `pakx
