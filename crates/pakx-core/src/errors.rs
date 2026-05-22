@@ -105,6 +105,25 @@ impl LockfileError {
     }
 }
 
+/// Render the optional `path` annotation that appears in every error
+/// variant's `Display` form. The raw absolute path leaks the host's
+/// runner workspace into CI logs (and on self-hosted runners, the
+/// operator's username), so we redact it: relative to cwd when the
+/// path lives there, otherwise just the file name. The full absolute
+/// path stays available programmatically via `path()` for downstream
+/// consumers that need it.
 fn fmt_path(p: Option<&PathBuf>) -> String {
-    p.map_or_else(String::new, |path| format!(" at {}", path.display()))
+    p.map_or_else(String::new, |path| format!(" at {}", redact(path)))
+}
+
+fn redact(path: &std::path::Path) -> String {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(rel) = path.strip_prefix(&cwd) {
+            return rel.to_string_lossy().replace('\\', "/");
+        }
+    }
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }

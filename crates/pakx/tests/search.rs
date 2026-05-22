@@ -150,7 +150,10 @@ async fn search_json_emits_valid_array_with_expected_keys() {
             "--mcp-base-url",
             &server.uri(),
             "--no-smithery",
-            "--no-pakx",
+            // Canonical flag name (2026-05 rename from `--no-pakx`).
+            // The remaining `--no-pakx` references in this file
+            // intentionally exercise the deprecated alias path.
+            "--no-pakx-registry",
             "--json",
         ])
         .assert()
@@ -177,6 +180,53 @@ async fn search_json_emits_valid_array_with_expected_keys() {
     assert!(arr
         .iter()
         .any(|h| h["name"] == "io.github.acme/two" && h["version"] == "2.0.0"));
+}
+
+/// `--no-pakx` was renamed to `--no-pakx-registry` to match the flag on
+/// `pakx install` / `pakx test`. The old spelling is kept as a hidden
+/// alias for one release so scripts continue to work. This regression
+/// pins both spellings parsing identically — when the alias is removed
+/// in v0.2, this test will fail loudly and the removal is documented.
+#[tokio::test]
+async fn search_accepts_deprecated_no_pakx_alias() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.acme/x", "description": "x", "version_detail": {"version": "1.0.0"} }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    // Old alias path.
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    // Canonical path.
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--json",
+        ])
+        .assert()
+        .success();
 }
 
 #[tokio::test]

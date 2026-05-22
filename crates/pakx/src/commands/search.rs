@@ -47,8 +47,14 @@ pub struct SearchArgs {
     pub no_smithery: bool,
 
     /// Skip the pakx-registry source.
-    #[arg(long)]
-    pub no_pakx: bool,
+    ///
+    /// Renamed in 2026-05 from `--no-pakx` so the flag matches the
+    /// pre-existing `--no-pakx-registry` on `pakx install` and `pakx
+    /// test`. `--no-pakx` is kept as a hidden alias for one release
+    /// (slated for removal in v0.2) so scripts continue to work
+    /// while users migrate.
+    #[arg(long, alias = "no-pakx")]
+    pub no_pakx_registry: bool,
 }
 
 /// Wire-format hit emitted by `--json`. Field names are a stable
@@ -75,7 +81,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         args.smithery_base_url.as_deref(),
         args.pakx_base_url.as_deref(),
         args.no_smithery,
-        args.no_pakx,
+        args.no_pakx_registry,
     );
     let query = args.query.unwrap_or_default();
     let results = client.search(&query).await;
@@ -137,7 +143,7 @@ fn build_client(
     smithery_base: Option<&str>,
     pakx_base: Option<&str>,
     no_smithery: bool,
-    no_pakx: bool,
+    no_pakx_registry: bool,
 ) -> RegistryClient {
     let cache_root = std::env::temp_dir().join("pakx-search-cache");
     let mcp_url = mcp_base.unwrap_or(OFFICIAL_MCP_BASE_URL);
@@ -153,7 +159,7 @@ fn build_client(
         );
         client = client.with_source(Box::new(sm));
     }
-    if !no_pakx {
+    if !no_pakx_registry {
         let pakx_url = pakx_base.unwrap_or(PAKX_BASE_URL);
         let pakx =
             PakxSource::with_parts(Client::new(), pakx_url, CacheDir::with_root(&cache_root));

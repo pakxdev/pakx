@@ -93,6 +93,36 @@ fn pack_rejects_too_many_sponsors() {
         .stderr(predicate::str::contains("too many entries"));
 }
 
+/// Notepad (and VSCode-on-Windows with the default LF→CRLF auto-fix)
+/// saves SKILL.md with `\r\n` line endings. The frontmatter fence
+/// scanner previously matched only `\n`, so a CRLF-saved file fell
+/// through: `name:` / `version:` parsed as body, and `read_manifest`
+/// errored with "missing `name:`". Regression pin: a CRLF-encoded
+/// SKILL.md packs successfully.
+#[test]
+fn pack_accepts_crlf_frontmatter() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    // Hand-encode CRLF — `format!` with `\n` would interpolate LF and
+    // miss the regression. The fence open + close lines and the
+    // intermediate field lines all end with `\r\n` to match what a
+    // Windows editor produces.
+    let body = "---\r\nname: demo\r\nversion: 0.1.0\r\n---\r\n# Hi\r\n";
+    std::fs::write(src.path().join("SKILL.md"), body).unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(out.path().join("demo-0.1.0.tgz").is_file());
+}
+
 #[test]
 fn pack_succeeds_on_plain_directory() {
     let src = TempDir::new().unwrap();

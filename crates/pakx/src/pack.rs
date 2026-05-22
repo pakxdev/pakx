@@ -19,6 +19,8 @@ use flate2::Compression;
 use pakx_core::{validate_sponsors, Sponsor};
 use serde::Deserialize;
 
+use crate::redact::redact_path;
+
 const SKILL_MD: &str = "SKILL.md";
 const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -45,14 +47,20 @@ pub struct PackOutput {
 /// on-disk path and the in-memory bytes (for `pakx publish` which
 /// uploads without re-reading the file).
 pub fn pack_dir(src_dir: &Path, out_dir: &Path) -> Result<PackOutput> {
-    let manifest = read_manifest(src_dir)?;
+    // CI logs / pasted error output would otherwise embed the full
+    // host-absolute paths to `src_dir` / `out_dir` (typically a
+    // `C:\Users\<name>\…` or `/home/runner/…` tempdir). Render paths
+    // relative to the cwd when possible, and fall back to the basename
+    // when they live outside the project root.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let manifest = read_manifest(src_dir, &cwd)?;
     let tarball_name = format!("{}-{}.tgz", manifest.name, manifest.version);
     let tarball_path = out_dir.join(&tarball_name);
 
     std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("create output dir {}", out_dir.display()))?;
+        .with_context(|| format!("create output dir {}", redact_path(out_dir, &cwd)))?;
 
-    let bytes = build_tarball(src_dir)?;
+    let bytes = build_tarball(src_dir, &cwd)?;
     if bytes.len() as u64 > MAX_TARBALL_BYTES {
         bail!(
             "tarball {} bytes exceeds {} byte limit",
@@ -62,9 +70,9 @@ pub fn pack_dir(src_dir: &Path, out_dir: &Path) -> Result<PackOutput> {
     }
 
     let mut out = File::create(&tarball_path)
-        .with_context(|| format!("create {}", tarball_path.display()))?;
+        .with_context(|| format!("create {}", redact_path(&tarball_path, &cwd)))?;
     out.write_all(&bytes)
-        .with_context(|| format!("write {}", tarball_path.display()))?;
+        .with_context(|| format!("write {}", redact_path(&tarball_path, &cwd)))?;
 
     Ok(PackOutput {
         manifest,
@@ -73,10 +81,10 @@ pub fn pack_dir(src_dir: &Path, out_dir: &Path) -> Result<PackOutput> {
     })
 }
 
-fn read_manifest(src_dir: &Path) -> Result<Manifest> {
+fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<Manifest> {
     let skill_md = src_dir.join(SKILL_MD);
     let text = std::fs::read_to_string(&skill_md)
-        .with_context(|| format!("read {}", skill_md.display()))?;
+        .with_context(|| format!("read {}", redact_path(&skill_md, project_root)))?;
     let frontmatter = extract_frontmatter(&text)?;
     let name = frontmatter
         .name
@@ -118,6 +126,21 @@ struct Frontmatter {
 }
 
 fn extract_frontmatter(text: &str) -> Result<Frontmatter> {
+    // Normalise line endings before fence detection. A SKILL.md saved
+    // by Notepad / VSCode-on-Windows with the default LF→CRLF setting
+    // emits `---\r\n` for its fences; the previous LF-only matchers
+    // (`strip_prefix("---\n")` + `find("\n---")`) silently fell
+    // through, so `name:` / `version:` parsed as part of the body
+    // instead of the frontmatter and `read_manifest` errored with
+    // "missing `name:`". Collapsing CRLF → LF up front keeps the rest
+    // of the parser simple and platform-independent.
+    let normalised = if text.contains('\r') {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    let text = normalised.as_ref();
+
     // Locate the fenced YAML block (`---` … `---`). SKILL.md is
     // markdown-with-frontmatter, so the block ends at the first `---`
     // that begins a line. Missing fences → fall back to the whole
@@ -189,8 +212,8 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn build_tarball(src_dir: &Path) -> Result<Vec<u8>> {
-    let mut files = collect_files(src_dir)?;
+fn build_tarball(src_dir: &Path, project_root: &Path) -> Result<Vec<u8>> {
+    let mut files = collect_files(src_dir, project_root)?;
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
 
     let mut buf = Vec::new();
@@ -223,12 +246,12 @@ struct PackedFile {
     contents: Vec<u8>,
 }
 
-fn collect_files(src_dir: &Path) -> Result<Vec<PackedFile>> {
+fn collect_files(src_dir: &Path, project_root: &Path) -> Result<Vec<PackedFile>> {
     let mut out = Vec::new();
     let mut stack = vec![src_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        for entry in
-            std::fs::read_dir(&dir).with_context(|| format!("read_dir {}", dir.display()))?
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("read_dir {}", redact_path(&dir, project_root)))?
         {
             let entry = entry?;
             let path = entry.path();
@@ -240,10 +263,14 @@ fn collect_files(src_dir: &Path) -> Result<Vec<PackedFile>> {
             // tarball that `pakx publish` then uploads. Refusing (not
             // silently skipping) is the right UX: a publish-time error
             // makes the surprise visible to the author before upload.
+            //
+            // The path here is rendered in its `src_dir`-relative form
+            // so the author can locate the offending file without the
+            // error leaking their host-absolute tempdir / home path.
             if ft.is_symlink() {
                 bail!(
                     "symlinks under SKILL.md src/ are not allowed: {}",
-                    path.display()
+                    redact_path(&path, src_dir)
                 );
             }
             if ft.is_dir() {
@@ -262,15 +289,18 @@ fn collect_files(src_dir: &Path) -> Result<Vec<PackedFile>> {
                     .replace('\\', "/");
                 let mut contents = Vec::new();
                 File::open(&path)
-                    .with_context(|| format!("open {}", path.display()))?
+                    .with_context(|| format!("open {}", redact_path(&path, project_root)))?
                     .read_to_end(&mut contents)
-                    .with_context(|| format!("read {}", path.display()))?;
+                    .with_context(|| format!("read {}", redact_path(&path, project_root)))?;
                 out.push(PackedFile { relative, contents });
             }
         }
     }
     if out.is_empty() {
-        bail!("no files found under {}", src_dir.display());
+        bail!(
+            "no files found under {}",
+            redact_path(src_dir, project_root)
+        );
     }
     Ok(out)
 }

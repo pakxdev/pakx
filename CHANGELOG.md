@@ -6,7 +6,33 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Changed
+
+- **`pakx search --no-pakx` renamed to `--no-pakx-registry`** so the
+  flag matches the pre-existing `--no-pakx-registry` on `pakx install`
+  and `pakx test`. The three subcommands now share one flag name for
+  the same source toggle. `--no-pakx` is retained as a hidden alias
+  for one release; scripts continue to work without modification
+  during the migration window.
+
+### Deprecated
+
+- **`--no-pakx` on `pakx search`** — use `--no-pakx-registry`. The
+  alias will be removed in v0.2.
+
 ### Added
+
+- **Top-level `--color <auto|always|never>` flag.** Threaded through
+  every paint helper in `pakx::ui`, the new global flag joins the
+  pre-existing `NO_COLOR` env-var + `IsTerminal` auto-detection as a
+  third color-resolution input. `auto` (default) preserves v0.1
+  behaviour. `always` force-enables ANSI codes regardless of how the
+  process is invoked — useful for `pakx list --color always | less -R`
+  where the pipe defeats the TTY probe. `never` force-disables for
+  scripted output and CI logs that mis-render escape sequences. The
+  flag is `global = true` so it works after any subcommand
+  (`pakx list --color never` and `pakx --color never list` both
+  parse).
 
 - **`sponsors:` block in `SKILL.md` frontmatter (Phase X2b — see
   `pakx-registry/SPONSOR_LINKS_SPEC.md`).** Publishers can now declare
@@ -80,6 +106,42 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
     correct ids and version.
 
 ### Fixed
+
+- **Action subcommands no longer leak absolute host paths into error
+  messages.** Every CI log embedding a `pakx test` / `pakx install` /
+  `pakx add` / `pakx remove` / `pakx init` / `pakx pack` / `pakx
+  publish` error previously contained the runner workspace path
+  (e.g. `C:\Users\runneradmin\AppData\Local\Temp\…` or
+  `/home/runner/work/<org>/<repo>/…`) verbatim. On self-hosted
+  runners this also leaks the operator's username. Error messages
+  now render paths relative to the project root when the target lives
+  underneath it, and fall back to the basename when it doesn't.
+  Implemented in a shared `pakx::redact::redact_path` helper used by
+  every action subcommand's `with_context` call sites, plus a
+  matching redact step on `pakx-core`'s `ManifestError` /
+  `LockfileError` / `Credentials` Display impls so the underlying
+  cause chain stays redacted too. The post-action hint lines
+  (`→ lockfile: <abs path>`) are intentionally **not** redacted —
+  they go to stdout for user value, and the user's next action
+  (`git add`) needs the absolute form.
+
+- **`pakx pack` now accepts CRLF-encoded SKILL.md frontmatter.**
+  Notepad and VSCode-on-Windows (default LF→CRLF auto-fix) save
+  `SKILL.md` with `\r\n` line endings. The fence scanner previously
+  matched only `\n` (`strip_prefix("---\n")` + `find("\n---")`), so a
+  CRLF-saved file silently fell through and the YAML parser saw
+  `name: demo\r` / `version: 0.1.0\r` as part of the markdown body
+  instead of the frontmatter — surfacing as a confusing "missing
+  `name:`" error. The frontmatter extractor now normalises CRLF→LF
+  before fence detection.
+
+- **`pakx test` now rejects `--no-smithery --smithery-base-url …` and
+  `--no-pakx-registry --pakx-base-url …` combinations** with a clap
+  conflict error. The previous round wired the `conflicts_with` guard
+  on `pakx install` only — `pakx test` had the same flag pair but no
+  guard, so the override URL was silently dropped when the matching
+  `--no-*` flag was also passed. The two surfaces are now in
+  lockstep.
 
 - **`pakx install` against a published skill no longer fails with
   `registry response for <id>@<version> omits tarballUrl`.** The PR #36
