@@ -140,10 +140,11 @@ impl PakxBackend {
         version: &str,
         tarball: Vec<u8>,
     ) -> Result<UploadVersionResponse, BackendError> {
-        let url = format!(
-            "{}/api/v1/packages/{}/{}/{}",
-            self.base_url, owner, name, version
-        );
+        // Percent-encode every path segment. Without this, a package
+        // `name` containing `/` or `..` silently routes the PUT to the
+        // wrong endpoint — `PakxSource::fetch` already encodes these
+        // segments and we mirror the same shape here.
+        let url = self.package_version_url(owner, name, version);
         let res = self
             .http
             .put(url)
@@ -168,6 +169,20 @@ impl PakxBackend {
         }
     }
 
+    /// Build the `PUT` / `DELETE` package URL for a given
+    /// `(owner, name, version)` triple, with every segment
+    /// percent-encoded. Pulled out as a private helper so we can unit
+    /// test the encoding without standing up a mock HTTP server.
+    fn package_version_url(&self, owner: &str, name: &str, version: &str) -> String {
+        format!(
+            "{}/api/v1/packages/{}/{}/{}",
+            self.base_url,
+            urlencoding_minimal(owner),
+            urlencoding_minimal(name),
+            urlencoding_minimal(version),
+        )
+    }
+
     pub async fn unpublish(
         &self,
         token: &str,
@@ -175,10 +190,8 @@ impl PakxBackend {
         name: &str,
         version: &str,
     ) -> Result<(), BackendError> {
-        let url = format!(
-            "{}/api/v1/packages/{}/{}/{}",
-            self.base_url, owner, name, version
-        );
+        // Same percent-encoding contract as `upload_version`.
+        let url = self.package_version_url(owner, name, version);
         let res = self.http.delete(url).bearer_auth(token).send().await?;
         let status = res.status();
         match status {
@@ -191,5 +204,80 @@ impl PakxBackend {
                 body: res.text().await.unwrap_or_default(),
             }),
         }
+    }
+}
+
+/// Minimal percent-encoder for URL path segments. Encodes everything
+/// outside the unreserved set (RFC 3986 §2.3) — notably `/`, which is
+/// the byte that lets a hostile package name escape the routing.
+fn urlencoding_minimal(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PakxBackend;
+
+    #[test]
+    fn package_version_url_encodes_slash_in_name() {
+        // A hostile name `foo/bar` must NOT route to
+        // `/api/v1/packages/<owner>/foo/bar/<version>` — the embedded
+        // slash would silently re-route the PUT to a different
+        // endpoint. Verify the slash gets percent-encoded.
+        let b = PakxBackend::new("https://registry.pakx.dev");
+        let url = b.package_version_url("alice", "foo/bar", "1.0.0");
+        assert_eq!(
+            url,
+            "https://registry.pakx.dev/api/v1/packages/alice/foo%2Fbar/1.0.0",
+        );
+    }
+
+    #[test]
+    fn package_version_url_encodes_traversal() {
+        // `..` is unreserved (only dots) so it isn't percent-encoded,
+        // but the trailing `/` of `../something` is — which alone
+        // breaks the traversal. Document the behaviour with a test.
+        let b = PakxBackend::new("https://registry.pakx.dev");
+        let url = b.package_version_url("alice", "..", "1.0.0");
+        assert_eq!(
+            url,
+            "https://registry.pakx.dev/api/v1/packages/alice/../1.0.0",
+        );
+        let url2 = b.package_version_url("alice", "../escape", "1.0.0");
+        assert_eq!(
+            url2,
+            "https://registry.pakx.dev/api/v1/packages/alice/..%2Fescape/1.0.0",
+        );
+    }
+
+    #[test]
+    fn package_version_url_encodes_version_with_plus() {
+        // SemVer build metadata uses `+`, which means "space" in
+        // query strings — encode it for safety.
+        let b = PakxBackend::new("https://registry.pakx.dev");
+        let url = b.package_version_url("alice", "demo", "1.0.0+build");
+        assert_eq!(
+            url,
+            "https://registry.pakx.dev/api/v1/packages/alice/demo/1.0.0%2Bbuild",
+        );
+    }
+
+    #[test]
+    fn package_version_url_trims_trailing_base_slash() {
+        let b = PakxBackend::new("https://registry.pakx.dev/");
+        let url = b.package_version_url("a", "b", "1.0.0");
+        assert_eq!(url, "https://registry.pakx.dev/api/v1/packages/a/b/1.0.0");
     }
 }

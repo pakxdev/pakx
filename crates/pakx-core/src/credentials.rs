@@ -4,11 +4,21 @@
 //! struct per known registry — a single user can be logged in to
 //! multiple pakx-registry deployments at once, keyed by base URL.
 //!
-//! File permissions: on unix the file is created with 0600. On Windows
-//! we rely on the user-profile ACL — pakx does not mutate ACLs to keep
-//! the implementation portable.
+//! File permissions: on unix the file is created with mode `0600` at
+//! the `open` call (not as a post-write chmod) — the previous
+//! `std::fs::write` then `set_permissions` flow briefly exposed the
+//! token at the default umask (typically `0o644`), readable by any
+//! other local user on a multi-user box.
+//!
+//! Atomicity: the body is written to `credentials.json.tmp` and
+//! renamed into place so a crash mid-write does not leave a
+//! half-written file. On Windows we still rely on the user-profile
+//! ACL — pakx does not mutate ACLs to keep the implementation
+//! portable.
 
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -79,8 +89,15 @@ impl Credentials {
         }
     }
 
-    /// Write to disk. Creates the parent directory (and on unix, 0600s
-    /// the resulting file).
+    /// Write to disk. Creates the parent directory. On unix, the file
+    /// is created with mode `0600` directly via `OpenOptions::mode` —
+    /// not via a post-write `chmod` — so the token is never on disk at
+    /// the default umask.
+    ///
+    /// The write is atomic: the body lands in `<path>.tmp` first, then
+    /// `rename` swaps it into place. A crash mid-write leaves either
+    /// the old file untouched or the new file complete; never a
+    /// half-written `credentials.json`.
     pub fn write_to(&self, path: &Path) -> Result<(), CredentialsError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| CredentialsError::Io {
@@ -89,19 +106,48 @@ impl Credentials {
             })?;
         }
         let body = serde_json::to_vec_pretty(self).expect("BTreeMap<String, Entry> serializes");
-        std::fs::write(path, body).map_err(|source| CredentialsError::Io {
-            source,
-            path: Some(path.to_path_buf()),
-        })?;
+
+        let tmp_path = tmp_path_for(path);
+
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms).map_err(|source| CredentialsError::Io {
+            use std::os::unix::fs::OpenOptionsExt;
+            // 0600 = owner read/write, no group, no other. Setting the
+            // mode at `open` time is the atomicity guarantee — a
+            // subsequent `set_permissions` would leave a window where
+            // the file existed at the default umask.
+            opts.mode(0o600);
+        }
+
+        let mut file = opts
+            .open(&tmp_path)
+            .map_err(|source| CredentialsError::Io {
+                source,
+                path: Some(tmp_path.clone()),
+            })?;
+        file.write_all(&body)
+            .map_err(|source| CredentialsError::Io {
+                source,
+                path: Some(tmp_path.clone()),
+            })?;
+        file.sync_all().map_err(|source| CredentialsError::Io {
+            source,
+            path: Some(tmp_path.clone()),
+        })?;
+        drop(file);
+
+        std::fs::rename(&tmp_path, path).map_err(|source| {
+            // On rename failure clean up the tmp so we don't leak a
+            // stale tmp file. Ignore cleanup errors — surfacing the
+            // original failure is more useful.
+            let _ = std::fs::remove_file(&tmp_path);
+            CredentialsError::Io {
                 source,
                 path: Some(path.to_path_buf()),
-            })?;
-        }
+            }
+        })?;
         Ok(())
     }
 
@@ -132,6 +178,15 @@ impl Credentials {
 
 fn normalise(url: &str) -> String {
     url.trim_end_matches('/').to_lowercase()
+}
+
+/// Compute the temp path used by [`Credentials::write_to`]. Splitting
+/// this out lets us unit-test the rename target shape without going
+/// through the filesystem.
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".tmp");
+    PathBuf::from(s)
 }
 
 fn fmt_path(p: Option<&PathBuf>) -> String {

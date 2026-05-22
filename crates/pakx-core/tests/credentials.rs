@@ -76,3 +76,45 @@ fn entry_rejects_unknown_fields() {
         "expected Parse error, got {err:?}"
     );
 }
+
+/// Regression: the previous `std::fs::write` then `set_permissions`
+/// flow exposed the token at the default umask between the two calls.
+/// `OpenOptions::mode(0o600)` removes that window. Verify the file is
+/// `0o600` after write on unix.
+#[cfg(unix)]
+#[test]
+fn write_to_sets_mode_0600_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("c.json");
+    let mut creds = Credentials::default();
+    creds.set("https://example.com", entry("pakx_v1_aaa", "alice"));
+    creds.write_to(&path).unwrap();
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    // Mask the file-type bits — only the low 9 bits are perms.
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "credentials.json must be 0600 on unix, got {:o}",
+        mode & 0o777,
+    );
+}
+
+/// The tmp file written under `.tmp` must be cleaned up by `rename`.
+/// Verify that after a successful write the only artefact on disk is
+/// the final file — no stale `credentials.json.tmp` lying around.
+#[test]
+fn write_to_leaves_no_tmp_artifact_on_success() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("c.json");
+    let mut creds = Credentials::default();
+    creds.set("https://example.com", entry("t", "a"));
+    creds.write_to(&path).unwrap();
+    assert!(path.is_file());
+    assert!(
+        !temp.path().join("c.json.tmp").exists(),
+        "tmp must be renamed away on success"
+    );
+}
