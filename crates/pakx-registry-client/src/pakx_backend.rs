@@ -28,6 +28,8 @@ pub enum BackendError {
     NotFound,
     #[error("conflict: {message}")]
     Conflict { message: String },
+    #[error("invalid package name {name:?}: {reason}")]
+    InvalidName { name: String, reason: &'static str },
     #[error("registry error ({status}): {body}")]
     Other { status: u16, body: String },
 }
@@ -140,6 +142,14 @@ impl PakxBackend {
         version: &str,
         tarball: Vec<u8>,
     ) -> Result<UploadVersionResponse, BackendError> {
+        // Reject hostile shapes (`..`, leading `.`, embedded `..`, `/`,
+        // `\`, control chars, empty) **before** any encoding work.
+        // `urlencoding_minimal` deliberately leaves `.` unreserved per
+        // RFC 3986, so a name of literally `..` produces a URL with a
+        // literal `..` path segment that HTTP routers normalize away —
+        // silently re-routing the `PUT` to a different endpoint. The
+        // encoder is correct; we need a separate shape guard on top.
+        validate_package_name(name)?;
         // Percent-encode every path segment. Without this, a package
         // `name` containing `/` or `..` silently routes the PUT to the
         // wrong endpoint — `PakxSource::fetch` already encodes these
@@ -190,7 +200,9 @@ impl PakxBackend {
         name: &str,
         version: &str,
     ) -> Result<(), BackendError> {
-        // Same percent-encoding contract as `upload_version`.
+        // Same shape guard + percent-encoding contract as
+        // `upload_version`; see that method for the rationale.
+        validate_package_name(name)?;
         let url = self.package_version_url(owner, name, version);
         let res = self.http.delete(url).bearer_auth(token).send().await?;
         let status = res.status();
@@ -205,6 +217,49 @@ impl PakxBackend {
             }),
         }
     }
+}
+
+/// Reject hostile package names before they reach the URL builder.
+///
+/// `urlencoding_minimal` follows RFC 3986 §2.3 and leaves `.` in the
+/// unreserved set, so a name like `..` produces a URL segment with a
+/// literal `..` — which most HTTP routers (and any normalizing
+/// reverse-proxy in front of the registry) collapse, silently
+/// re-routing the request to an unintended endpoint. The encoder is
+/// doing the right thing for `.`; we need a shape guard on the input.
+///
+/// Rejection rules:
+/// - empty
+/// - exactly `.` or `..`
+/// - starts with `.` (hidden-file convention; nothing legit needs it)
+/// - contains the substring `..` anywhere
+/// - contains `/`, `\`, or any ASCII control char
+fn validate_package_name(name: &str) -> Result<(), BackendError> {
+    let reject = |reason: &'static str| BackendError::InvalidName {
+        name: name.to_owned(),
+        reason,
+    };
+    if name.is_empty() {
+        return Err(reject("name must not be empty"));
+    }
+    if name == "." || name == ".." {
+        return Err(reject("name must not be `.` or `..`"));
+    }
+    if name.starts_with('.') {
+        return Err(reject("name must not start with `.`"));
+    }
+    if name.contains("..") {
+        return Err(reject("name must not contain `..`"));
+    }
+    for c in name.chars() {
+        if c == '/' || c == '\\' {
+            return Err(reject("name must not contain `/` or `\\`"));
+        }
+        if c.is_control() {
+            return Err(reject("name must not contain control characters"));
+        }
+    }
+    Ok(())
 }
 
 /// Minimal percent-encoder for URL path segments. Encodes everything
@@ -228,7 +283,7 @@ fn urlencoding_minimal(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::PakxBackend;
+    use super::{validate_package_name, BackendError, PakxBackend};
 
     #[test]
     fn package_version_url_encodes_slash_in_name() {
@@ -246,9 +301,12 @@ mod tests {
 
     #[test]
     fn package_version_url_encodes_traversal() {
-        // `..` is unreserved (only dots) so it isn't percent-encoded,
-        // but the trailing `/` of `../something` is — which alone
-        // breaks the traversal. Document the behaviour with a test.
+        // The URL builder itself still emits `..` literally because
+        // `.` is unreserved per RFC 3986 — that's why we layer a
+        // separate `validate_package_name` shape guard in front of
+        // `upload_version` / `unpublish`. The builder is verified in
+        // isolation here; the guard is verified in the validator tests
+        // below. Embedded `/` is still encoded by the encoder itself.
         let b = PakxBackend::new("https://registry.pakx.dev");
         let url = b.package_version_url("alice", "..", "1.0.0");
         assert_eq!(
@@ -260,6 +318,76 @@ mod tests {
             url2,
             "https://registry.pakx.dev/api/v1/packages/alice/..%2Fescape/1.0.0",
         );
+    }
+
+    #[test]
+    fn validate_package_name_accepts_plain_name() {
+        assert!(validate_package_name("foo").is_ok());
+        assert!(validate_package_name("foo-bar").is_ok());
+        assert!(validate_package_name("foo_bar").is_ok());
+        assert!(validate_package_name("foo.bar").is_ok());
+        assert!(validate_package_name("a1b2").is_ok());
+    }
+
+    #[test]
+    fn validate_package_name_rejects_double_dot() {
+        let err = validate_package_name("..").unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidName { ref name, .. } if name == ".."),
+            "expected InvalidName for `..`, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_package_name_rejects_embedded_traversal() {
+        let err = validate_package_name("foo/../bar").unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidName { .. }),
+            "expected InvalidName for `foo/../bar`, got {err:?}",
+        );
+        // Even without slashes, a literal `..` substring is fatal —
+        // because the encoder leaves dots alone and HTTP routers
+        // normalize `..` segments.
+        let err = validate_package_name("foo..bar").unwrap_err();
+        assert!(matches!(err, BackendError::InvalidName { .. }));
+    }
+
+    #[test]
+    fn validate_package_name_rejects_leading_dot() {
+        let err = validate_package_name(".hidden").unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidName { ref name, .. } if name == ".hidden"),
+            "expected InvalidName for `.hidden`, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_package_name_rejects_backslash() {
+        let err = validate_package_name("foo\\bar").unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidName { .. }),
+            "expected InvalidName for `foo\\bar`, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_package_name_rejects_slash_and_control_and_empty() {
+        assert!(matches!(
+            validate_package_name("foo/bar").unwrap_err(),
+            BackendError::InvalidName { .. },
+        ));
+        assert!(matches!(
+            validate_package_name("foo\nbar").unwrap_err(),
+            BackendError::InvalidName { .. },
+        ));
+        assert!(matches!(
+            validate_package_name("").unwrap_err(),
+            BackendError::InvalidName { .. },
+        ));
+        assert!(matches!(
+            validate_package_name(".").unwrap_err(),
+            BackendError::InvalidName { .. },
+        ));
     }
 
     #[test]

@@ -110,7 +110,17 @@ impl Credentials {
         let tmp_path = tmp_path_for(path);
 
         let mut opts = OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        // `create_new(true)` instead of `create(true).truncate(true)`:
+        // `OpenOptions::mode(0o600)` is **ignored on existing files**, so
+        // a stale `<path>.tmp` from a prior crash — or one pre-planted by
+        // a co-process — would keep its prior permission bits (often
+        // `0o644` at the default umask) and the subsequent `rename` would
+        // install `credentials.json` at the wrong mode, defeating the
+        // security guarantee in exactly the crash-recovery scenario the
+        // atomic-write was meant to handle. `create_new` errors out on
+        // pre-existing `.tmp`; we unlink + retry once on `AlreadyExists`
+        // so an honest stale `.tmp` does not wedge the user.
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -121,12 +131,29 @@ impl Credentials {
             opts.mode(0o600);
         }
 
-        let mut file = opts
-            .open(&tmp_path)
-            .map_err(|source| CredentialsError::Io {
-                source,
-                path: Some(tmp_path.clone()),
-            })?;
+        let mut file = match opts.open(&tmp_path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Stale `.tmp` (prior crash, or a co-process). Unlink and
+                // retry exactly once — never loop, so an adversary
+                // racing us cannot cause an indefinite spin.
+                std::fs::remove_file(&tmp_path).map_err(|source| CredentialsError::Io {
+                    source,
+                    path: Some(tmp_path.clone()),
+                })?;
+                opts.open(&tmp_path)
+                    .map_err(|source| CredentialsError::Io {
+                        source,
+                        path: Some(tmp_path.clone()),
+                    })?
+            }
+            Err(source) => {
+                return Err(CredentialsError::Io {
+                    source,
+                    path: Some(tmp_path),
+                });
+            }
+        };
         file.write_all(&body)
             .map_err(|source| CredentialsError::Io {
                 source,
