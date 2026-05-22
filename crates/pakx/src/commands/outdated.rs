@@ -147,17 +147,59 @@ struct JsonRow<'a> {
     error: Option<&'a str>,
 }
 
-/// Internal report shape — used for both human + JSON rendering.
+/// Internal report shape — used for both human + JSON rendering, and
+/// re-exposed for `pakx update` which reuses the same registry-query
+/// pipeline to decide which entries to rewrite. The struct is `pub` so
+/// the `commands::update` module can read every field without
+/// per-field getters; the binary's private `commands` module keeps it
+/// from leaking outside the crate.
 #[derive(Debug, Clone)]
-struct Row {
-    id: String,
-    current: String,
-    latest: Option<String>,
-    registry: RegistrySource,
-    status: Status,
+pub struct Row {
+    pub id: String,
+    pub current: String,
+    pub latest: Option<String>,
+    pub registry: RegistrySource,
+    pub status: Status,
     /// Populated for `Status::Error` only. Routed to stderr; never
     /// painted into the table (would wrap and look ugly).
-    error: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Collect one `Row` per lockfile entry, honouring the optional
+/// `registry` filter the same way `pakx outdated` does. Built so
+/// `pakx update` can reuse the federated-query pipeline without going
+/// through the CLI surface.
+///
+/// The `CacheDir` + `Source` instances are built fresh for each call
+/// — `pakx update` and `pakx outdated` never run concurrently from
+/// the same process, so a per-call cache root is fine.
+pub async fn gather_outdated(
+    project_root: &std::path::Path,
+    pakx_base_url: Option<&str>,
+    mcp_base_url: Option<&str>,
+    smithery_base_url: Option<&str>,
+    registry_filter: Option<RegistryFilter>,
+) -> Result<Vec<Row>> {
+    let lockfile_path = project_root.join(LOCKFILE_FILENAME);
+    let lock = read_lockfile_from(&lockfile_path)
+        .with_context(|| format!("read lockfile {}", lockfile_path.display()))?;
+    let Some(lock) = lock else {
+        return Ok(Vec::new());
+    };
+    if lock.entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let clients = build_clients(pakx_base_url, mcp_base_url, smithery_base_url)?;
+    let mut rows = Vec::with_capacity(lock.entries.len());
+    for entry in lock.entries.values() {
+        if let Some(filter) = registry_filter {
+            if !filter.matches(entry.registry) {
+                continue;
+            }
+        }
+        rows.push(check_entry(entry, &clients).await);
+    }
+    Ok(rows)
 }
 
 pub async fn run(args: OutdatedArgs) -> Result<ExitCode> {
@@ -187,25 +229,14 @@ pub async fn run(args: OutdatedArgs) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    // Build per-source clients once. URLs are validated for the
-    // userinfo-smuggling guard before any HTTP fires — mirrors
-    // `pakx install` / `pakx test`.
-    let clients = build_clients(
+    let rows = gather_outdated(
+        &project_root,
         args.pakx_base_url.as_deref(),
         args.mcp_base_url.as_deref(),
         args.smithery_base_url.as_deref(),
-    )?;
-
-    let mut rows: Vec<Row> = Vec::with_capacity(lock.entries.len());
-    for entry in lock.entries.values() {
-        if let Some(filter) = args.registry {
-            if !filter.matches(entry.registry) {
-                continue;
-            }
-        }
-        let row = check_entry(entry, &clients).await;
-        rows.push(row);
-    }
+        args.registry,
+    )
+    .await?;
 
     render(&rows, args.json);
 

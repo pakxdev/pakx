@@ -15,12 +15,50 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   for one release; scripts continue to work without modification
   during the migration window.
 
+- **`pakx update` is now its own subcommand.** It previously existed
+  only as an alias for `pakx upgrade` (which upgrades the CLI binary
+  itself). The alias is removed; users who typed `pakx update`
+  expecting to upgrade the CLI must now type `pakx upgrade`. See the
+  **Added** section for the new `pakx update` semantics (rewrite
+  package pins in `agents.yml`).
+
 ### Deprecated
 
 - **`--no-pakx` on `pakx search`** — use `--no-pakx-registry`. The
   alias will be removed in v0.2.
 
 ### Added
+
+- **`pakx update` — rewrite `agents.yml` pins to a newer version,
+  then reconcile via `pakx install`.** Closes the loop opened by
+  `pakx outdated` (which only reports drift). Three input shapes:
+  - `pakx update` (no args) — interactive prompt per outdated dep.
+    `--yes` accepts every prompt without asking.
+  - `pakx update <id>` — query the registry for the latest non-
+    deprecated version of the matching dep and rewrite to that.
+    Acts as if `--yes` was supplied (explicit invocation = consent).
+  - `pakx update <id>@<version>` — pin verbatim, no registry round-
+    trip. Allows downgrades and works even when the registry is
+    unreachable.
+
+  Flags: `--yes` / `-y` (CI-friendly accept-all), `--dry-run`
+  (preview without writing), `--no-install` (rewrite manifest only,
+  skip the auto-`pakx install`), `--directory <path>` (workspace
+  override). The post-update install runs in-process — never spawns
+  a child — so failures map to a single exit-code surface.
+
+  Exit codes: `0` on success / nothing to do, `1` when the post-
+  update install reconciliation fails, `2` when the registry cannot
+  determine a target version (single-id form with no determinable
+  newer version because every candidate registry erred).
+
+  Alias `pakx up` for muscle memory. Note the (mismatched-but-
+  intentional) naming: `pakx upgrade` continues to upgrade the
+  **CLI binary itself** — `pakx update` updates **packages** in
+  `agents.yml`. The README distinguishes them in the command table.
+
+  Git and registry-object specs are out of scope at v0.1 and surface
+  a hard error pointing the user at the shorthand-string form.
 
 - **`pakx outdated` — show lockfile entries whose source registry has
   a newer non-deprecated version.** Reads `agents.lock` (canonical pin

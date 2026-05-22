@@ -886,3 +886,148 @@ async fn e2e_outdated_surfaces_pakx_upgrade_and_json_field_contract() {
     assert_eq!(row["registry"], "pakx");
     assert_eq!(row["status"], "upgrade");
 }
+
+/// Scenario 9 — `pakx update` end-to-end. Two-step exercise of the
+/// full loop:
+///   1. `pakx update --yes` rewrites `agents.yml` from
+///      `arwenizEr/hello-world@0.1.0` to `arwenizEr/hello-world@0.1.2`
+///      and reconciles via the in-process install runner.
+///   2. The lockfile after the update must reflect the new version.
+///
+/// Mocks the pakx-registry detail + per-version + tarball endpoints
+/// (the tarball is a real gzipped tar containing a tiny SKILL.md so
+/// extraction succeeds). The MCP registry is mounted empty so the
+/// install runner doesn't dial production.
+#[tokio::test]
+#[ignore = "e2e_real_binary — opt in via --ignored"]
+#[allow(clippy::too_many_lines)] // linear update-then-install story
+async fn e2e_update_rewrites_pin_and_reconciles_install() {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let pakx_registry = MockServer::start().await;
+    let mcp = MockServer::start().await;
+    fixture_official_mcp_empty(&mcp).await;
+
+    // Detail: two versions, 0.1.2 latest.
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/packages/arwenizEr/hello-world"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "arwenizEr/hello-world",
+            "kind": "skills",
+            "description": "update e2e",
+            "versions": [
+                { "version": "0.1.2", "sha256": "0".repeat(64), "sizeBytes": 64, "publishedAt": "2026-05-22T00:00:00Z", "deprecatedAt": null },
+                { "version": "0.1.0", "sha256": "0".repeat(64), "sizeBytes": 64, "publishedAt": "2026-05-20T00:00:00Z", "deprecatedAt": null }
+            ]
+        })))
+        .mount(&pakx_registry)
+        .await;
+
+    // Build a tiny gzipped tar containing a single SKILL.md so the
+    // install runner's extract step succeeds.
+    let mut tar_buf = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_buf);
+        let body = b"---\nname: hello-world\nversion: 0.1.2\n---\n# hi\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "SKILL.md", &body[..])
+            .unwrap();
+        builder.finish().unwrap();
+    }
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(&tar_buf).unwrap();
+    let tarball = gz.finish().unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(&tarball);
+    let sha_hex = hasher.finalize().iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+
+    let tarball_route = "/tarballs/hello-world-0.1.2.tgz";
+    let tarball_url = format!("{}{tarball_route}", pakx_registry.uri());
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/packages/arwenizEr/hello-world/0.1.2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "arwenizEr/hello-world",
+            "version": "0.1.2",
+            "sha256": sha_hex,
+            "sizeBytes": tarball.len(),
+            "tarballUrl": tarball_url,
+        })))
+        .mount(&pakx_registry)
+        .await;
+    Mock::given(method("GET"))
+        .and(wm_path(tarball_route))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(tarball))
+        .mount(&pakx_registry)
+        .await;
+
+    // Seed manifest + lockfile.
+    write_manifest(
+        project.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  skills:\n    - arwenizEr/hello-world@0.1.0\n",
+    );
+    std::fs::write(
+        project.path().join("agents.lock"),
+        r#"{"lockfileVersion":1,"manifestHash":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","entries":{
+  "skills/arwenizEr/hello-world@0.1.0":{
+    "name":"arwenizEr/hello-world",
+    "type":"skills",
+    "version":"0.1.0",
+    "resolvedFrom":"https://registry.pakx.dev/api/v1/packages/arwenizEr/hello-world/0.1.0",
+    "registry":"pakx",
+    "integrity":"sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    "agents":["claude-code"],
+    "dependencies":[]
+  }
+}}
+"#,
+    )
+    .unwrap();
+
+    pakx()
+        .current_dir(project.path())
+        .args([
+            "update",
+            "--yes",
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+            "--mcp-base-url",
+            &mcp.uri(),
+            "--no-smithery",
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let yml = std::fs::read_to_string(project.path().join("agents.yml")).unwrap();
+    assert!(
+        yml.contains("arwenizEr/hello-world@0.1.2"),
+        "agents.yml must be rewritten to the new pin; got:\n{yml}"
+    );
+    assert!(
+        !yml.contains("arwenizEr/hello-world@0.1.0"),
+        "agents.yml must no longer contain the old pin; got:\n{yml}"
+    );
+
+    let lock: Value =
+        serde_json::from_str(&std::fs::read_to_string(project.path().join("agents.lock")).unwrap())
+            .unwrap();
+    let entries = lock["entries"].as_object().expect("entries is an object");
+    assert!(
+        entries.contains_key("skills/arwenizEr/hello-world@0.1.2"),
+        "lockfile must reflect the new pin after install reconciliation; got: {entries:?}"
+    );
+}
