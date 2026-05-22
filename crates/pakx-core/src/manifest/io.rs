@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::atomic_write::atomic_write;
 use crate::errors::ManifestError;
 
 use super::parse::parse_manifest;
@@ -18,10 +19,14 @@ pub fn read_from(path: &Path) -> Result<Manifest, ManifestError> {
     parse_manifest(&source, Some(path))
 }
 
-/// Write a manifest to disk via [`write_manifest`].
+/// Write a manifest to disk via [`write_manifest`] + `atomic_write`.
+///
+/// The temp-then-rename flow keeps a crash mid-write from corrupting
+/// the on-disk `agents.yml` — either the prior contents stay intact or
+/// the new body is fully there, never partially.
 pub fn write_to(path: &Path, manifest: &Manifest) -> Result<(), ManifestError> {
     let body = write_manifest(manifest);
-    std::fs::write(path, body).map_err(|source| ManifestError::Io {
+    atomic_write(path, body.as_bytes()).map_err(|source| ManifestError::Io {
         source,
         path: Some(path.to_path_buf()),
     })
