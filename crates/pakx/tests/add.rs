@@ -192,3 +192,77 @@ fn add_rejects_invalid_id_shape() {
         .assert()
         .failure();
 }
+
+// ---------------------------------------------------------------------------
+// Dual positional form: `pakx add <kind> <id>`
+// ---------------------------------------------------------------------------
+
+/// Two-positional form `pakx add mcp foo/bar` must behave identically
+/// to `pakx add foo/bar -t mcp`. This is the path users naturally try
+/// because every other package manager works that way; pakx pre-#34
+/// errored with `unexpected argument 'foo/bar'`.
+#[tokio::test]
+async fn add_dual_positional_mcp_form() {
+    let temp = TempDir::new().unwrap();
+    let server = mock_mcp_server_ok("foo/bar").await;
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["add", "mcp", "foo/bar", "--mcp-base-url", &server.uri()])
+        .assert()
+        .success();
+
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    let m = parse_manifest(&body, None).unwrap();
+    let mcp = m.dependencies.mcp.expect("mcp list populated");
+    assert_eq!(mcp.len(), 1);
+    assert!(m.dependencies.skills.is_none());
+}
+
+/// Two-positional `pakx add skills <id>` must land in the skills
+/// section, not the MCP one — proving the leading `<kind>` token
+/// actually overrides the `infer_kind` heuristic.
+#[test]
+fn add_dual_positional_skills_form_routes_to_skills() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["add", "skills", "foo/bar", "--no-validate"])
+        .assert()
+        .success();
+
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    let m = parse_manifest(&body, None).unwrap();
+    assert!(m.dependencies.skills.is_some(), "should route to skills");
+    assert!(m.dependencies.mcp.is_none(), "should NOT route to mcp");
+}
+
+/// Mixing the two-positional form with `-t/--type` is ambiguous —
+/// reject with a specific error so the user understands which input
+/// to drop.
+#[test]
+fn add_dual_positional_with_type_flag_rejected() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["add", "mcp", "foo/bar", "--type", "skills", "--no-validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("kind specified twice"));
+}
+
+/// First positional must be a valid kind token in the two-positional
+/// form, otherwise we'd silently treat junk as the id.
+#[test]
+fn add_dual_positional_invalid_kind_rejected() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["add", "notakind", "foo/bar", "--no-validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not a valid kind"));
+}

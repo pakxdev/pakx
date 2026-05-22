@@ -49,12 +49,19 @@ impl AddType {
 
 #[derive(Debug, Clone, Args)]
 pub struct AddArgs {
-    /// Package id. Examples:
-    ///   `io.github.modelcontextprotocol/server-filesystem`
-    ///   `anthropics/skills/pdf`
-    pub id: String,
+    /// Either the package id, or — when a second positional follows —
+    /// the kind (`skills`, `mcp`, `subagents`, `prompts`, `commands`,
+    /// `hooks`). Two-positional form lets users type `pakx add mcp foo/bar`
+    /// the way every other package manager works; the single-positional
+    /// form is preserved unchanged.
+    pub id_or_kind: String,
 
-    /// Override package-type inference.
+    /// Optional second positional: the package id when the first
+    /// positional is a `<kind>` token.
+    pub id: Option<String>,
+
+    /// Override package-type inference. Accepts the same kinds as the
+    /// two-positional form.
     #[arg(short = 't', long = "type", value_enum)]
     pub kind: Option<AddType>,
 
@@ -71,6 +78,65 @@ pub struct AddArgs {
     pub mcp_base_url: Option<String>,
 }
 
+/// Resolved positional/flag combination after parsing the dual-form
+/// argument shape. Held as a struct to keep the run-time validation in
+/// one place and to make `run()` linear.
+struct ResolvedArgs {
+    id: String,
+    /// Kind explicitly chosen by the user, via either the
+    /// `<kind> <id>` two-positional form or the `-t` / `--type` flag.
+    /// `None` falls through to [`infer_kind`].
+    explicit_kind: Option<AddType>,
+}
+
+/// Resolve the dual-positional form into a single `(id, kind?)` pair.
+/// Returns an error if the user supplied a `<kind>` positional AND
+/// `-t`/`--type` (ambiguous), or if the first positional in two-
+/// positional form is not a valid kind token.
+fn resolve_positional_form(args: &AddArgs) -> Result<ResolvedArgs> {
+    match args.id.as_ref() {
+        // Two positionals: first must be a kind.
+        Some(id) => {
+            let kind = parse_kind_token(&args.id_or_kind).ok_or_else(|| {
+                anyhow!(
+                    "first positional '{}' is not a valid kind; expected one of \
+                     skills|mcp|subagents|prompts|commands|hooks, or use a single positional '<id>'",
+                    args.id_or_kind
+                )
+            })?;
+            if args.kind.is_some() {
+                bail!(
+                    "kind specified twice \u{2014} use either `<kind> <id>` positional or `-t/--type`, not both"
+                );
+            }
+            Ok(ResolvedArgs {
+                id: id.clone(),
+                explicit_kind: Some(kind),
+            })
+        }
+        // Single positional: treat as id, keep existing -t / infer path.
+        None => Ok(ResolvedArgs {
+            id: args.id_or_kind.clone(),
+            explicit_kind: args.kind,
+        }),
+    }
+}
+
+/// Parse a kind token (`skills`, `mcp`, ...) for the two-positional
+/// form. Case-sensitive lowercase to match the documented surface and
+/// the `AddType`/`PackageType` serde representation.
+fn parse_kind_token(s: &str) -> Option<AddType> {
+    match s {
+        "skills" => Some(AddType::Skills),
+        "mcp" => Some(AddType::Mcp),
+        "subagents" => Some(AddType::Subagents),
+        "prompts" => Some(AddType::Prompts),
+        "commands" => Some(AddType::Commands),
+        "hooks" => Some(AddType::Hooks),
+        _ => None,
+    }
+}
+
 pub async fn run(args: AddArgs) -> Result<()> {
     let target = match args.manifest.clone() {
         Some(p) => p,
@@ -79,31 +145,33 @@ pub async fn run(args: AddArgs) -> Result<()> {
             .join(MANIFEST_FILENAME),
     };
 
-    let kind = args
-        .kind
-        .map_or_else(|| infer_kind(&args.id), AddType::to_core);
+    let resolved = resolve_positional_form(&args)?;
+    let id = resolved.id;
+    let kind = resolved
+        .explicit_kind
+        .map_or_else(|| infer_kind(&id), AddType::to_core);
 
-    debug!(target: "pakx::add", id = %args.id, kind = ?kind, "resolved package kind");
+    debug!(target: "pakx::add", %id, ?kind, "resolved package kind");
 
     let mut manifest = load_or_init(&target)?;
 
     if !args.no_validate && kind == PackageType::Mcp {
-        match validate_mcp(&args.id, args.mcp_base_url.as_deref()).await {
+        match validate_mcp(&id, args.mcp_base_url.as_deref()).await {
             Ok(version) => {
                 eprintln!(
                     "{} {} v{} via official MCP Registry",
                     ui::glyph_ok_err(),
-                    args.id,
+                    id,
                     version
                 );
             }
             Err(e) => match e {
                 RegistryError::NotFound { .. } => {
-                    warn!(target: "pakx::add", id = %args.id, "not in official MCP Registry; adding anyway");
+                    warn!(target: "pakx::add", %id, "not in official MCP Registry; adding anyway");
                     eprintln!(
                         "{} {} not in the official MCP Registry; adding to manifest anyway (use --no-validate to silence)",
                         ui::glyph_warn_err(),
-                        args.id
+                        id
                     );
                 }
                 other => bail!("registry validation failed: {other}"),
@@ -111,15 +179,15 @@ pub async fn run(args: AddArgs) -> Result<()> {
         }
     }
 
-    let outcome = add_shorthand(&mut manifest, kind, args.id.clone())
-        .map_err(|e| anyhow!("invalid package id {:?}: {e}", args.id))?;
+    let outcome = add_shorthand(&mut manifest, kind, id.clone())
+        .map_err(|e| anyhow!("invalid package id {id:?}: {e}"))?;
 
     match outcome {
         AddOutcome::AlreadyPresent => {
             eprintln!(
                 "{} {} already declared under {}; manifest unchanged",
                 ui::glyph_warn_err(),
-                args.id,
+                id,
                 kind.as_str()
             );
             return Ok(());
@@ -132,7 +200,7 @@ pub async fn run(args: AddArgs) -> Result<()> {
     eprintln!(
         "{} added {} ({})",
         ui::glyph_ok_err(),
-        ui::success_err(&args.id),
+        ui::success_err(&id),
         kind.as_str(),
     );
     eprintln!("       run `pakx install` to apply");
