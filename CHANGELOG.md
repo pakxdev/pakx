@@ -29,6 +29,23 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **`pakx info <owner>/<name> --version <ver>` — per-version metadata
+  block.** Fetches the immutable per-version endpoint
+  (`GET /api/v1/packages/{owner}/{name}/{version}`) and renders the
+  sha256, gzipped tarball size, publish timestamp (with a relative
+  "N days ago" hint), and the **signed, short-TTL** download URL the
+  installer uses. The human render closes with a `→ install:` hint
+  showing the exact `pakx add <id>@<version>` invocation, and a
+  footer note that the tarball URL expires after one hour (the
+  registry's signed-URL TTL). `--json` emits the per-version API
+  shape verbatim (`id`, `version`, `sha256`, `sizeBytes`,
+  `publishedAt`, `deprecatedAt`, `tarballUrl`) for piping into `jq`.
+  Without `--version`, the existing package-level metadata + version
+  list render is unchanged. The `--version` form is pakx-source only
+  today — federated MCP / Smithery sources don't expose a
+  per-version block; the constraint matches the federated-info JSON
+  path added in the previous round.
+
 - **`pakx update` — rewrite `agents.yml` pins to a newer version,
   then reconcile via `pakx install`.** Closes the loop opened by
   `pakx outdated` (which only reports drift). Three input shapes:
