@@ -6,6 +6,48 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Security
+
+- `pakx pack` now **refuses** to follow symlinks under the source
+  tree. The previous walker used `file_type().is_file()`, which follows
+  symlinks transparently — a hostile skill template could include a
+  symlink to `~/.ssh/id_rsa` or `/etc/shadow` and the target's contents
+  would be packed into the tarball that `pakx publish` then uploads.
+  Symlinks now produce an explicit `symlinks under SKILL.md src/ are
+  not allowed: <path>` error so the author sees the surprise before
+  upload. Silently skipping was rejected as the wrong UX for a publish
+  flow.
+- `pakx test --mcp-base-url` / `--smithery-base-url` /
+  `--pakx-base-url` userinfo bypass. The old `starts_with` +
+  `split('/')` parser accepted `http://localhost:8080@evil.com/`
+  because the substring before the path looked loopback-like, even
+  though the real host is `evil.com`. The override is now validated
+  via `url::Url`: only `https://` everywhere or `http://` against
+  `localhost` / `127.0.0.1` / `[::1]` pass, and any URL carrying a
+  username or password is rejected outright.
+- `~/.pakx/credentials.json` is now created with mode `0600` at the
+  `open` call (via `OpenOptions::mode`) and written atomically through
+  a `.tmp` sibling that is `rename`d into place. The previous
+  `std::fs::write` then `set_permissions` flow briefly exposed the
+  token at the default umask between the two calls, readable by other
+  local users on a multi-user host. The on-disk path now never exists
+  at any mode other than `0600` (unix). Atomicity also means a crash
+  mid-write no longer leaves a half-written file. The `.tmp` sibling
+  is unlinked before each open so a stale `.tmp` left by a prior
+  crash (or pre-planted by a co-process) cannot bypass the mode bits
+  — `OpenOptions::mode(0o600)` is ignored on existing files, so the
+  only safe path is to ensure the file is created fresh every time.
+- `PakxBackend::upload_version` and `PakxBackend::unpublish` now
+  percent-encode every path segment (`owner` / `name` / `version`)
+  before building the URL, **and** validate `name` shape up-front
+  (rejecting `..`, leading `.`, embedded `..`, `/`, `\`, control
+  chars, or empty). Without this, a package name like `..` would
+  still produce a URL with literal `..` segments (the encoder
+  deliberately leaves `.` unreserved) that HTTP routers normalize
+  away, silently routing the `PUT` / `DELETE` to a different
+  endpoint. `PakxSource::fetch` already had the encoding; the
+  publish side now matches and adds the shape guard.
+
 ### Fixed
 
 - `LockfileError` now has a dedicated `Io` variant. The previous code

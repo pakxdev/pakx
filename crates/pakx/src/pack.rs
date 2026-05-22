@@ -169,6 +169,19 @@ fn collect_files(src_dir: &Path) -> Result<Vec<PackedFile>> {
             let entry = entry?;
             let path = entry.path();
             let ft = entry.file_type()?;
+            // Refuse symlinks explicitly. `file_type().is_file()` follows
+            // symlinks, so without this check a malicious skill template
+            // could include a symlink to `~/.ssh/id_rsa` or `/etc/shadow`
+            // and `pakx pack` would read the target and pack it into the
+            // tarball that `pakx publish` then uploads. Refusing (not
+            // silently skipping) is the right UX: a publish-time error
+            // makes the surprise visible to the author before upload.
+            if ft.is_symlink() {
+                bail!(
+                    "symlinks under SKILL.md src/ are not allowed: {}",
+                    path.display()
+                );
+            }
             if ft.is_dir() {
                 // Skip common noise dirs.
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {

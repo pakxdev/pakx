@@ -4,11 +4,21 @@
 //! struct per known registry — a single user can be logged in to
 //! multiple pakx-registry deployments at once, keyed by base URL.
 //!
-//! File permissions: on unix the file is created with 0600. On Windows
-//! we rely on the user-profile ACL — pakx does not mutate ACLs to keep
-//! the implementation portable.
+//! File permissions: on unix the file is created with mode `0600` at
+//! the `open` call (not as a post-write chmod) — the previous
+//! `std::fs::write` then `set_permissions` flow briefly exposed the
+//! token at the default umask (typically `0o644`), readable by any
+//! other local user on a multi-user box.
+//!
+//! Atomicity: the body is written to `credentials.json.tmp` and
+//! renamed into place so a crash mid-write does not leave a
+//! half-written file. On Windows we still rely on the user-profile
+//! ACL — pakx does not mutate ACLs to keep the implementation
+//! portable.
 
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -79,8 +89,15 @@ impl Credentials {
         }
     }
 
-    /// Write to disk. Creates the parent directory (and on unix, 0600s
-    /// the resulting file).
+    /// Write to disk. Creates the parent directory. On unix, the file
+    /// is created with mode `0600` directly via `OpenOptions::mode` —
+    /// not via a post-write `chmod` — so the token is never on disk at
+    /// the default umask.
+    ///
+    /// The write is atomic: the body lands in `<path>.tmp` first, then
+    /// `rename` swaps it into place. A crash mid-write leaves either
+    /// the old file untouched or the new file complete; never a
+    /// half-written `credentials.json`.
     pub fn write_to(&self, path: &Path) -> Result<(), CredentialsError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| CredentialsError::Io {
@@ -89,19 +106,75 @@ impl Credentials {
             })?;
         }
         let body = serde_json::to_vec_pretty(self).expect("BTreeMap<String, Entry> serializes");
-        std::fs::write(path, body).map_err(|source| CredentialsError::Io {
-            source,
-            path: Some(path.to_path_buf()),
-        })?;
+
+        let tmp_path = tmp_path_for(path);
+
+        let mut opts = OpenOptions::new();
+        // `create_new(true)` instead of `create(true).truncate(true)`:
+        // `OpenOptions::mode(0o600)` is **ignored on existing files**, so
+        // a stale `<path>.tmp` from a prior crash — or one pre-planted by
+        // a co-process — would keep its prior permission bits (often
+        // `0o644` at the default umask) and the subsequent `rename` would
+        // install `credentials.json` at the wrong mode, defeating the
+        // security guarantee in exactly the crash-recovery scenario the
+        // atomic-write was meant to handle. `create_new` errors out on
+        // pre-existing `.tmp`; we unlink + retry once on `AlreadyExists`
+        // so an honest stale `.tmp` does not wedge the user.
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms).map_err(|source| CredentialsError::Io {
+            use std::os::unix::fs::OpenOptionsExt;
+            // 0600 = owner read/write, no group, no other. Setting the
+            // mode at `open` time is the atomicity guarantee — a
+            // subsequent `set_permissions` would leave a window where
+            // the file existed at the default umask.
+            opts.mode(0o600);
+        }
+
+        let mut file = match opts.open(&tmp_path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Stale `.tmp` (prior crash, or a co-process). Unlink and
+                // retry exactly once — never loop, so an adversary
+                // racing us cannot cause an indefinite spin.
+                std::fs::remove_file(&tmp_path).map_err(|source| CredentialsError::Io {
+                    source,
+                    path: Some(tmp_path.clone()),
+                })?;
+                opts.open(&tmp_path)
+                    .map_err(|source| CredentialsError::Io {
+                        source,
+                        path: Some(tmp_path.clone()),
+                    })?
+            }
+            Err(source) => {
+                return Err(CredentialsError::Io {
+                    source,
+                    path: Some(tmp_path),
+                });
+            }
+        };
+        file.write_all(&body)
+            .map_err(|source| CredentialsError::Io {
+                source,
+                path: Some(tmp_path.clone()),
+            })?;
+        file.sync_all().map_err(|source| CredentialsError::Io {
+            source,
+            path: Some(tmp_path.clone()),
+        })?;
+        drop(file);
+
+        std::fs::rename(&tmp_path, path).map_err(|source| {
+            // On rename failure clean up the tmp so we don't leak a
+            // stale tmp file. Ignore cleanup errors — surfacing the
+            // original failure is more useful.
+            let _ = std::fs::remove_file(&tmp_path);
+            CredentialsError::Io {
                 source,
                 path: Some(path.to_path_buf()),
-            })?;
-        }
+            }
+        })?;
         Ok(())
     }
 
@@ -132,6 +205,15 @@ impl Credentials {
 
 fn normalise(url: &str) -> String {
     url.trim_end_matches('/').to_lowercase()
+}
+
+/// Compute the temp path used by [`Credentials::write_to`]. Splitting
+/// this out lets us unit-test the rename target shape without going
+/// through the filesystem.
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".tmp");
+    PathBuf::from(s)
 }
 
 fn fmt_path(p: Option<&PathBuf>) -> String {

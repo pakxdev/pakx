@@ -49,6 +49,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Validation
 regex = "1.11"
+# URL parsing — used to vet test-only registry base URL overrides
+# against userinfo / scheme / host smuggling.
+url = "2.5"
 # Internal crates
 pakx-core = { path = "crates/pakx-core" }
 pakx-agents = { path = "crates/pakx-agents" }
