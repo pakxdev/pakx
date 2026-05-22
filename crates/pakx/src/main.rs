@@ -8,6 +8,7 @@
 mod commands;
 mod install;
 mod pack;
+mod resolve;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

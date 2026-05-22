@@ -174,6 +174,73 @@ async fn fetch_falls_back_to_search_when_detail_endpoint_404s() {
 }
 
 #[tokio::test]
+async fn fetch_fallback_prefers_real_version_over_placeholder() {
+    // When the search fallback returns multiple entries with the same
+    // canonical id, prefer one with a non-placeholder version. The
+    // older behaviour kept whichever entry happened to appear first —
+    // re-fetches would lock to a `0.0.0` placeholder when a real
+    // version was also present somewhere in the result set.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers/io.github.foo/bar"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .and(query_param("search", "io.github.foo/bar"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                // Placeholder first — exercises that the picker doesn't
+                // just take whichever entry appears earliest.
+                { "name": "io.github.foo/bar" },
+                { "name": "io.github.foo/bar", "version_detail": { "version": "1.2.3" } }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    let source = source_with_mock(&server.uri(), temp.path());
+    let pkg = source.fetch("io.github.foo/bar").await.unwrap();
+    assert_eq!(pkg.id, "io.github.foo/bar");
+    assert_eq!(
+        pkg.version, "1.2.3",
+        "real version should win over 0.0.0 placeholder"
+    );
+}
+
+#[tokio::test]
+async fn fetch_fallback_picks_highest_version_on_tie() {
+    // When multiple matches all have real versions, tie-break on
+    // lexicographic version desc so the choice is deterministic across
+    // re-fetches.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers/io.github.foo/bar"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .and(query_param("search", "io.github.foo/bar"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.foo/bar", "version_detail": { "version": "1.0.0" } },
+                { "name": "io.github.foo/bar", "version_detail": { "version": "2.1.0" } },
+                { "name": "io.github.foo/bar", "version_detail": { "version": "1.9.0" } }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    let source = source_with_mock(&server.uri(), temp.path());
+    let pkg = source.fetch("io.github.foo/bar").await.unwrap();
+    assert_eq!(pkg.version, "2.1.0");
+}
+
+#[tokio::test]
 async fn search_malformed_body_returns_decode_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

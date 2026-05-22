@@ -10,13 +10,15 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 use pakx_core::manifest::{DepSpec, PackageType};
-use pakx_core::{read_lockfile_from, read_manifest_from, Lockfile, Manifest, RegistrySource};
+use pakx_core::{read_lockfile_from, read_manifest_from, Lockfile, Manifest};
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, RegistryError, SmitherySource,
-    OFFICIAL_MCP_BASE_URL, PAKX_BASE_URL, SMITHERY_BASE_URL,
+    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
+    PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use reqwest::Client;
 use tempfile::TempDir;
+
+use crate::resolve::{resolve_federated, Resolved};
 
 const MANIFEST_FILENAME: &str = "agents.yml";
 const LOCKFILE_FILENAME: &str = "agents.lock";
@@ -162,10 +164,22 @@ async fn check_online(manifest: &Manifest, client: &RegistryClient, failures: &m
             *failures += 1;
             continue;
         }
-        match client.fetch(RegistrySource::OfficialMcp, &id).await {
-            Ok(pkg) => println!("ok    mcp/{id} -> {}@{}", pkg.id, pkg.version),
-            Err(RegistryError::NotFound { .. }) => {
-                println!("fail: mcp/{id} not found in official MCP registry");
+        // Federated resolution: OfficialMcp.fetch first, then search
+        // every other registered source for an exact-name match.
+        // README + CHANGELOG sell this as a federated check; without
+        // the search fallback the `--no-smithery` / `--no-pakx-registry`
+        // toggles are dead flags.
+        match resolve_federated(client, &id).await {
+            Ok(Resolved::OfficialMcp(pkg) | Resolved::Federated(pkg)) => {
+                println!(
+                    "ok    mcp/{id} -> {source}:{pid}@{ver}",
+                    source = pkg.source.as_tag(),
+                    pid = pkg.id,
+                    ver = pkg.version,
+                );
+            }
+            Ok(Resolved::NotFound) => {
+                println!("fail: mcp/{id} not found in any federated registry");
                 *failures += 1;
             }
             Err(e) => {

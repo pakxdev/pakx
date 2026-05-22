@@ -21,12 +21,14 @@ use pakx_core::{
     Manifest, McpServer, RegistrySource, SkillFile, LOCKFILE_VERSION,
 };
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, RegistryClient, RegistryError, OFFICIAL_MCP_BASE_URL,
+    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
+    PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use reqwest::Client;
 use tracing::{debug, warn};
 
 use super::mcp_translate::{translate, TranslateError};
+use crate::resolve::{resolve_federated, Resolved};
 
 const MANIFEST_FILENAME: &str = "agents.yml";
 const LOCKFILE_FILENAME: &str = "agents.lock";
@@ -37,6 +39,14 @@ pub struct InstallOpts {
     pub project_root: Option<PathBuf>,
     /// Override MCP registry base URL (testing).
     pub mcp_base_url: Option<String>,
+    /// Override Smithery registry base URL (testing).
+    pub smithery_base_url: Option<String>,
+    /// Override pakx-registry base URL (testing).
+    pub pakx_base_url: Option<String>,
+    /// Skip Smithery resolution.
+    pub no_smithery: bool,
+    /// Skip pakx-registry resolution.
+    pub no_pakx_registry: bool,
     /// Override Claude Code home dir (testing).
     pub claude_home: Option<PathBuf>,
     /// Skip writing the lockfile (dry-run-ish).
@@ -64,6 +74,10 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         opts.mcp_base_url
             .as_deref()
             .unwrap_or(OFFICIAL_MCP_BASE_URL),
+        opts.smithery_base_url.as_deref(),
+        opts.pakx_base_url.as_deref(),
+        opts.no_smithery,
+        opts.no_pakx_registry,
     );
 
     let claude = build_claude_adapter(&opts, &project_root);
@@ -114,11 +128,34 @@ const fn unhandled_deps(manifest: &Manifest) -> [(PackageType, &Option<Vec<DepSp
     ]
 }
 
-fn build_registry_client(base_url: &str) -> RegistryClient {
+fn build_registry_client(
+    mcp_base_url: &str,
+    smithery_base_url: Option<&str>,
+    pakx_base_url: Option<&str>,
+    no_smithery: bool,
+    no_pakx_registry: bool,
+) -> RegistryClient {
     let cache_root = std::env::temp_dir().join("pakx-install-cache");
-    let cache = CacheDir::with_root(&cache_root);
-    let source = OfficialMcpSource::with_parts(Client::new(), base_url, cache);
-    RegistryClient::new().with_source(Box::new(source))
+    let mcp = OfficialMcpSource::with_parts(
+        Client::new(),
+        mcp_base_url,
+        CacheDir::with_root(&cache_root),
+    );
+    let mut client = RegistryClient::new().with_source(Box::new(mcp));
+
+    if !no_smithery {
+        let url = smithery_base_url.unwrap_or(SMITHERY_BASE_URL);
+        let sm = SmitherySource::with_parts(Client::new(), url, CacheDir::with_root(&cache_root));
+        client = client.with_source(Box::new(sm));
+    }
+
+    if !no_pakx_registry {
+        let url = pakx_base_url.unwrap_or(PAKX_BASE_URL);
+        let pakx = PakxSource::with_parts(Client::new(), url, CacheDir::with_root(&cache_root));
+        client = client.with_source(Box::new(pakx));
+    }
+
+    client
 }
 
 fn build_claude_adapter(opts: &InstallOpts, project_root: &Path) -> ClaudeCodeAdapter {
@@ -152,13 +189,18 @@ async fn install_mcp_dep(
     };
     debug!(target: "pakx::install", %id, "resolving mcp dep");
 
-    let pkg = match client.fetch(RegistrySource::OfficialMcp, &id).await {
-        Ok(p) => p,
-        Err(RegistryError::NotFound { .. }) => {
-            warn!(target: "pakx::install", %id, "not in official MCP registry");
+    let (pkg, source) = match resolve_federated(client, &id).await {
+        Ok(Resolved::OfficialMcp(p)) => (p, RegistrySource::OfficialMcp),
+        Ok(Resolved::Federated(p)) => {
+            let src = p.source;
+            debug!(target: "pakx::install", %id, source = ?src, "resolved via federated search");
+            (p, src)
+        }
+        Ok(Resolved::NotFound) => {
+            warn!(target: "pakx::install", %id, "not in any federated registry");
             report
                 .failed
-                .push((id.clone(), "not found in official MCP registry".into()));
+                .push((id.clone(), "not found in any federated registry".into()));
             return;
         }
         Err(e) => {
@@ -191,11 +233,11 @@ async fn install_mcp_dep(
     match claude.install_mcp(&mcp).await {
         Ok(_) => {
             report.installed.push(mcp.id.clone());
-            entries.insert(mcp.lockfile_key(), lock_entry_for(&mcp, integrity));
+            entries.insert(mcp.lockfile_key(), lock_entry_for(&mcp, integrity, source));
         }
         Err(AdapterError::AlreadyInstalled { id }) => {
             report.skipped.push(id);
-            entries.insert(mcp.lockfile_key(), lock_entry_for(&mcp, integrity));
+            entries.insert(mcp.lockfile_key(), lock_entry_for(&mcp, integrity, source));
         }
         Err(e) => {
             report.failed.push((mcp.id, e.to_string()));
@@ -203,13 +245,17 @@ async fn install_mcp_dep(
     }
 }
 
-fn lock_entry_for(mcp: &McpServer, integrity: Integrity) -> LockEntry {
+/// Build a lockfile entry, recording **which federated source** the
+/// dep was resolved through. Storing the source-of-truth per id in the
+/// lockfile lets `pakx doctor` reason about drift without re-running
+/// the federated search every time.
+fn lock_entry_for(mcp: &McpServer, integrity: Integrity, source: RegistrySource) -> LockEntry {
     LockEntry {
         name: mcp.id.clone(),
         kind: PackageType::Mcp,
         version: mcp.version.clone(),
-        resolved_from: format!("official-mcp:{}", mcp.id),
-        registry: RegistrySource::OfficialMcp,
+        resolved_from: format!("{}:{}", source.as_tag(), mcp.id),
+        registry: source,
         integrity,
         agents: vec![AgentId::new_unchecked(ClaudeCodeAdapter::ID)],
         dependencies: vec![],

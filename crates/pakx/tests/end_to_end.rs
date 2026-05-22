@@ -66,6 +66,8 @@ async fn install_resolves_mcp_dep_and_writes_lockfile_and_mcp_json() {
             "install",
             "--mcp-base-url",
             &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
             "--claude-home",
             claude_home.path().to_str().unwrap(),
         ])
@@ -174,6 +176,8 @@ async fn install_fails_when_registry_returns_404() {
             "install",
             "--mcp-base-url",
             &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
             "--claude-home",
             claude_home.path().to_str().unwrap(),
         ])
@@ -208,6 +212,8 @@ async fn install_with_no_lockfile_skips_lock_write() {
             "--no-lockfile",
             "--mcp-base-url",
             &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
             "--claude-home",
             claude_home.path().to_str().unwrap(),
         ])
@@ -217,6 +223,154 @@ async fn install_with_no_lockfile_skips_lock_write() {
         !project.path().join("agents.lock").exists(),
         "no lockfile written"
     );
+}
+
+/// Regression: README + CHANGELOG claim `pakx install` resolves
+/// against the federated registries (official MCP + Smithery +
+/// pakx-registry). Previously the install loop only called
+/// `OfficialMcpSource::fetch` — `--no-smithery` / `--no-pakx-registry`
+/// were dead flags. This test seeds an MCP id that exists ONLY on the
+/// pakx-registry mock and asserts the install succeeds, the lockfile
+/// entry records `registry: pakx`, and `--no-pakx-registry` re-breaks
+/// the resolution.
+#[tokio::test]
+async fn install_falls_back_to_pakx_registry_when_official_mcp_404s() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let id = "alice/cool";
+
+    // Official MCP: 404 for the per-server detail AND empty search.
+    let official = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v0/servers/.+"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&official)
+        .await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&official)
+        .await;
+
+    // pakx-registry: search hits with a real package containing the
+    // same npm-stdio shape as the MCP Registry uses.
+    let pakx = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [
+                {
+                    "id": id,
+                    "kind": "mcp",
+                    "latestVersion": "1.0.0",
+                    "packages": [
+                        {
+                            "registry_name": "npm",
+                            "name": "@alice/mcp-cool",
+                            "version": "1.0.0",
+                            "environment_variables": []
+                        }
+                    ]
+                }
+            ]
+        })))
+        .mount(&pakx)
+        .await;
+
+    // Seed project.
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["init", "--yes", "--name", "demo"])
+        .assert()
+        .success();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["add", id, "--type", "mcp", "--no-validate"])
+        .assert()
+        .success();
+
+    // Run install with Smithery disabled so only OfficialMcp + Pakx
+    // are queried. The fallback to pakx-registry should fire.
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--mcp-base-url",
+            &official.uri(),
+            "--pakx-base-url",
+            &pakx.uri(),
+            "--no-smithery",
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let lock_body = std::fs::read_to_string(project.path().join("agents.lock")).unwrap();
+    let lock: Value = serde_json::from_str(&lock_body).unwrap();
+    let key = format!("mcp/{id}@1.0.0");
+    let entry = &lock["entries"][&key];
+    assert_eq!(
+        entry["registry"], "pakx",
+        "lockfile must record the pakx-registry source on fallback"
+    );
+    assert_eq!(
+        entry["resolvedFrom"], "pakx:alice/cool",
+        "resolvedFrom must reflect the resolving source"
+    );
+}
+
+/// Companion to the test above: passing `--no-pakx-registry` (with
+/// Smithery also off) must re-introduce the failure mode. Documents
+/// that the flag is wired up end-to-end.
+#[tokio::test]
+async fn install_with_no_pakx_registry_does_not_fall_back() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let id = "alice/cool";
+
+    let official = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v0/servers/.+"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&official)
+        .await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&official)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["init", "--yes", "--name", "demo"])
+        .assert()
+        .success();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["add", id, "--type", "mcp", "--no-validate"])
+        .assert()
+        .success();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--mcp-base-url",
+            &official.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
 }
 
 #[tokio::test]

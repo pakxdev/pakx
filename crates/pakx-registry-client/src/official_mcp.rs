@@ -174,15 +174,29 @@ impl Source for OfficialMcpSource {
                         source_tag: TAG,
                         message: source.to_string(),
                     })?;
-                let mut match_pkg = None;
-                for raw in body.servers {
-                    let pkg = into_package(raw);
-                    if pkg.id == id_owned {
-                        match_pkg = Some(pkg);
-                        break;
-                    }
-                }
-                match_pkg.ok_or(RegistryError::NotFound {
+                // Collect every server whose canonical id matches.
+                // The 2025-12-11 schema can return multiple entries with
+                // the same name (different versions, different sub-pages
+                // of the result set). Previously we kept the first one,
+                // which made re-fetches non-deterministic and could pin
+                // a `0.0.0` placeholder when a real version was also
+                // available. Prefer entries with a non-placeholder
+                // version, tie-breaking on lexicographic version desc
+                // so a stable highest-version entry wins.
+                let mut matches: Vec<Package> = body
+                    .servers
+                    .into_iter()
+                    .map(into_package)
+                    .filter(|p| p.id == id_owned)
+                    .collect();
+                matches.sort_by(|a, b| {
+                    let a_placeholder = a.version == "0.0.0";
+                    let b_placeholder = b.version == "0.0.0";
+                    a_placeholder
+                        .cmp(&b_placeholder)
+                        .then_with(|| b.version.cmp(&a.version))
+                });
+                matches.into_iter().next().ok_or(RegistryError::NotFound {
                     source_tag: TAG,
                     id: id_owned,
                 })
