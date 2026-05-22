@@ -6,6 +6,20 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Changed
+
+- **`pakx search --no-pakx` renamed to `--no-pakx-registry`** so the
+  flag matches the pre-existing `--no-pakx-registry` on `pakx install`
+  and `pakx test`. The three subcommands now share one flag name for
+  the same source toggle. `--no-pakx` is retained as a hidden alias
+  for one release; scripts continue to work without modification
+  during the migration window.
+
+### Deprecated
+
+- **`--no-pakx` on `pakx search`** — use `--no-pakx-registry`. The
+  alias will be removed in v0.2.
+
 ### Added
 
 - **Top-level `--color <auto|always|never>` flag.** Threaded through
