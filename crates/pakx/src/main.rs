@@ -146,7 +146,7 @@ async fn dispatch(cmd: Command) -> Result<ExitCode> {
         Command::Test(args) => test_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Info(args) => info_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Login(args) => login_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
-        Command::Whoami(args) => whoami_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Whoami(args) => whoami_cmd::run(args).await,
         Command::Pack(args) => pack_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Publish(args) => publish_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Unpublish(args) => unpublish_cmd::run(args).await.map(|()| ExitCode::SUCCESS),

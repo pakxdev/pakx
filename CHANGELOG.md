@@ -29,6 +29,21 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **`pakx whoami --json` — machine-readable identity payload.** Emits
+  a single newline-terminated JSON object matching the `pakx list
+  --json` / `pakx info --json` style so pipelines can `jq` the
+  result. Shape: `{login, id, email, registry, source}` where
+  `source` is `"online"` (live whoami call succeeded), `"cached"`
+  (the `--offline` short-circuit, or a transient network failure
+  silently degraded the call — the cached entry never persisted
+  `id` / `email`, both fields are `null`), or `"none"` (no stored
+  entry for the targeted registry — `login` / `id` / `email` are
+  `null`). Exit code is `0` when logged in (online or cached) and
+  `1` when there is no stored entry, so a script can branch on the
+  exit code without parsing JSON. The human (non-`--json`) path is
+  unchanged — interactive users still see the coloured login line or
+  the verbatim network error.
+
 - **`pakx info <owner>/<name> --version <ver>` — per-version metadata
   block.** Fetches the immutable per-version endpoint
   (`GET /api/v1/packages/{owner}/{name}/{version}`) and renders the

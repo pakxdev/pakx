@@ -145,6 +145,225 @@ async fn whoami_prints_login() {
 }
 
 #[tokio::test]
+async fn whoami_json_online_emits_id_and_email() {
+    // The online JSON path round-trips the full backend payload — id,
+    // email, login — and tags the payload with `"source": "online"` so
+    // pipelines can distinguish a live whoami from a cached fallback.
+    // Backend fixture returns a non-null `email` here so we cover the
+    // happy-path serialisation (the offline / not-logged-in paths emit
+    // `email: null` and are exercised by the sibling tests below).
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/whoami"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "u_42",
+            "login": "alice",
+            "email": "alice@example.com",
+        })))
+        .mount(&server)
+        .await;
+
+    // Seed creds via login. Login itself hits whoami, so the same mock
+    // serves both calls.
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "whoami",
+            "--json",
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let line = String::from_utf8(output).unwrap();
+    // Single newline-terminated JSON line — match the `pakx list --json`
+    // style contract.
+    assert!(
+        line.ends_with('\n'),
+        "expected newline terminator: {line:?}"
+    );
+    assert_eq!(
+        line.lines().count(),
+        1,
+        "expected single-line JSON: {line:?}"
+    );
+    let v: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["login"], "alice");
+    assert_eq!(v["id"], "u_42");
+    assert_eq!(v["email"], "alice@example.com");
+    assert_eq!(v["source"], "online");
+    assert_eq!(v["registry"], server.uri());
+}
+
+#[tokio::test]
+async fn whoami_json_offline_uses_cached_login() {
+    // `--offline` short-circuits the network round-trip: emits the
+    // stored login + `"source": "cached"`, and id/email are absent
+    // because the cache never persisted them.
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = mock_registry("alice").await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "whoami",
+            "--json",
+            "--offline",
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let line = String::from_utf8(output).unwrap();
+    let v: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["login"], "alice");
+    assert!(v["id"].is_null(), "cached id should be null: {v}");
+    assert!(v["email"].is_null(), "cached email should be null: {v}");
+    assert_eq!(v["source"], "cached");
+    assert_eq!(v["registry"], server.uri());
+}
+
+#[tokio::test]
+async fn whoami_json_not_logged_in_emits_none_payload_and_exits_1() {
+    // No stored credentials for the targeted registry — the human path
+    // errors with "not logged in", but `--json` consumers want a
+    // structured payload. We emit `{login: null, source: "none"}` and
+    // still exit 1 so the exit code is a fast-path discriminator.
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json"); // never created
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "whoami",
+            "--json",
+            "--registry",
+            "https://registry.pakx.dev",
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let line = String::from_utf8(output).unwrap();
+    let v: Value = serde_json::from_str(line.trim()).unwrap();
+    assert!(v["login"].is_null());
+    assert!(v["id"].is_null());
+    assert!(v["email"].is_null());
+    assert_eq!(v["source"], "none");
+    assert_eq!(v["registry"], "https://registry.pakx.dev");
+}
+
+#[tokio::test]
+async fn whoami_json_network_failure_degrades_to_cached() {
+    // The JSON contract treats a transient network failure as
+    // equivalent to `--offline`: a pipeline shouldn't break on a
+    // DNS-blocked host. The cached payload is distinguishable from the
+    // online payload via `"source": "cached"`, so callers that care
+    // can detect the degradation. The human (non-JSON) path still
+    // surfaces the network error.
+    //
+    // To simulate a network failure deterministically we seed creds
+    // against a live mock, then run `whoami --json` against a
+    // separate URL that points at a closed port on loopback. We pick
+    // a high port that is statistically unlikely to be in use and
+    // that the OS will reject with ECONNREFUSED — fast and cross-
+    // platform (Windows + unix). Using port 1 / 0 is unreliable on
+    // Windows (port 0 means "auto-assign"); a high port works.
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = mock_registry("alice").await;
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    // Manually rewrite the credentials map so the entry's key matches
+    // the dead-port URL we will hit next. Skips wiring a second mock
+    // just to seed creds at the right key.
+    let dead_url = "http://127.0.0.1:1";
+    let body = std::fs::read_to_string(&creds_path).unwrap();
+    let mut v: Value = serde_json::from_str(&body).unwrap();
+    let live_key = server.uri().to_lowercase();
+    let entry = v["registries"][&live_key].clone();
+    let registries = v["registries"].as_object_mut().unwrap();
+    registries.insert(dead_url.to_string(), entry);
+    registries.remove(&live_key);
+    std::fs::write(&creds_path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "whoami",
+            "--json",
+            "--registry",
+            dead_url,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let line = String::from_utf8(output).unwrap();
+    let v: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["login"], "alice");
+    assert_eq!(v["source"], "cached");
+}
+
+#[tokio::test]
 async fn whoami_offline_uses_stored_login() {
     let temp = TempDir::new().unwrap();
     let creds_path = temp.path().join("c.json");
