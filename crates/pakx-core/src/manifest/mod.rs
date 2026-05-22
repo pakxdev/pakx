@@ -4,6 +4,7 @@ pub mod io;
 pub mod mutate;
 pub mod parse;
 pub mod schema;
+pub mod sponsors;
 pub mod write;
 
 pub use io::{read_from, write_to};
@@ -12,7 +13,8 @@ pub use mutate::{
 };
 pub use parse::parse_manifest;
 pub use schema::{
-    AgentId, DepSpec, Dependencies, GitSpec, Manifest, PackageType, RegistrySpec, StringSpec,
-    KNOWN_AGENT_IDS, PACKAGE_TYPES,
+    AgentId, DepSpec, Dependencies, GitSpec, Manifest, PackageType, RegistrySpec, Sponsor,
+    SponsorKind, StringSpec, KNOWN_AGENT_IDS, PACKAGE_TYPES,
 };
+pub use sponsors::{validate_sponsors, SponsorError, MAX_SPONSORS};
 pub use write::write_manifest;

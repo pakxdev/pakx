@@ -195,6 +195,54 @@ async fn fetch_returns_detail_with_latest_version() {
     );
 }
 
+/// `GET /api/v1/packages/{owner}/{name}` includes a `sponsors:` array
+/// in the body since Phase X2a. `PakxSource::fetch` doesn't model the
+/// field directly (it lives on `info.rs`'s decoder), but the
+/// `#[serde(flatten)] extra` capture means sponsors must ride through
+/// `install_hints` unchanged so downstream consumers (e.g. the
+/// `pakx-web` detail page in Phase 2c) can read them off the federated
+/// search hits without a second API roundtrip.
+#[tokio::test]
+async fn fetch_carries_sponsors_through_install_hints() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "kind": "skill",
+            "description": "hi",
+            "sponsors": [
+                { "kind": "github", "url": "https://github.com/sponsors/alice" },
+                { "kind": "url", "url": "https://opencollective.com/alice" }
+            ],
+            "versions": [ { "version": "0.1.0", "sha256": "abc", "sizeBytes": 100 } ]
+        })))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let pkg = src.fetch("alice/hello").await.unwrap();
+    let sponsors = pkg
+        .install_hints
+        .get("sponsors")
+        .and_then(|v| v.as_array())
+        .expect("sponsors array surfaces via extra flatten");
+    assert_eq!(sponsors.len(), 2);
+    assert_eq!(
+        sponsors[0].get("kind").and_then(|v| v.as_str()),
+        Some("github")
+    );
+    assert_eq!(
+        sponsors[0].get("url").and_then(|v| v.as_str()),
+        Some("https://github.com/sponsors/alice"),
+    );
+    assert_eq!(
+        sponsors[1].get("kind").and_then(|v| v.as_str()),
+        Some("url")
+    );
+}
+
 #[tokio::test]
 async fn fetch_404_returns_not_found_error() {
     let server = MockServer::start().await;

@@ -14,6 +14,85 @@ fn write_min_skill(dir: &std::path::Path, name: &str, version: &str) {
     .unwrap();
 }
 
+fn write_skill_with_frontmatter(dir: &std::path::Path, body: &str) {
+    std::fs::write(dir.join("SKILL.md"), format!("---\n{body}---\n# Hi\n")).unwrap();
+}
+
+#[test]
+fn pack_accepts_valid_sponsors_block() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: demo\nversion: 0.1.0\nsponsors:\n  - kind: github\n    url: https://github.com/sponsors/octocat\n  - kind: url\n    url: https://opencollective.com/octocat\n",
+    );
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(out.path().join("demo-0.1.0.tgz").is_file());
+}
+
+#[test]
+fn pack_rejects_malformed_github_sponsor_url() {
+    // Sponsor regex requires `github.com/sponsors/<login>` host-anchored;
+    // a `gitlab.com` URL under `kind: github` must trip pack-time
+    // validation with the offending index in the message.
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: demo\nversion: 0.1.0\nsponsors:\n  - kind: github\n    url: https://gitlab.com/sponsors/octocat\n",
+    );
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sponsors[0].url"));
+    assert!(
+        !out.path().join("demo-0.1.0.tgz").is_file(),
+        "tarball must not be written when sponsors validation fails"
+    );
+}
+
+#[test]
+fn pack_rejects_too_many_sponsors() {
+    use std::fmt::Write as _;
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    let mut body = String::from("name: demo\nversion: 0.1.0\nsponsors:\n");
+    for i in 0..6 {
+        let _ = write!(
+            body,
+            "  - kind: github\n    url: https://github.com/sponsors/octocat{i}\n"
+        );
+    }
+    write_skill_with_frontmatter(src.path(), &body);
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("too many entries"));
+}
+
 #[test]
 fn pack_succeeds_on_plain_directory() {
     let src = TempDir::new().unwrap();

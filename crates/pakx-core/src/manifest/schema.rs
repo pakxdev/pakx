@@ -215,6 +215,44 @@ pub struct Manifest {
     pub dependencies: Dependencies,
 }
 
+// ---------------------------------------------------------------------------
+// Sponsor links (Phase X2b — see pakx-registry/SPONSOR_LINKS_SPEC.md)
+// ---------------------------------------------------------------------------
+
+/// Sponsor-link kind whitelist. Locked at four variants per the cross-repo
+/// spec; adding a new kind is additive across CLI / registry / web.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SponsorKind {
+    Github,
+    Polar,
+    Kofi,
+    Url,
+}
+
+impl SponsorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Polar => "polar",
+            Self::Kofi => "kofi",
+            Self::Url => "url",
+        }
+    }
+}
+
+/// A single sponsor link from `SKILL.md` frontmatter.
+///
+/// The full validation pipeline (per-kind URL regex, max-count cap,
+/// https-only) lives in [`crate::manifest::sponsors::validate_sponsors`];
+/// this struct only guards the wire shape (`kind`, `url`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sponsor {
+    pub kind: SponsorKind,
+    pub url: String,
+}
+
 const fn is_empty_dependencies(d: &Dependencies) -> bool {
     d.skills.is_none()
         && d.mcp.is_none()

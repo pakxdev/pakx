@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use pakx_core::{validate_sponsors, Sponsor};
+use serde::Deserialize;
 
 const SKILL_MD: &str = "SKILL.md";
 const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
@@ -24,6 +26,12 @@ const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
 pub struct Manifest {
     pub name: String,
     pub version: String,
+    /// Sponsor links declared in the SKILL.md frontmatter, validated at
+    /// pack-time against the shape in
+    /// `pakx-registry/SPONSOR_LINKS_SPEC.md`. Empty when the field is
+    /// missing; never `None` so downstream callers don't need to branch
+    /// between "no field" and "empty list".
+    pub sponsors: Vec<Sponsor>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +77,7 @@ fn read_manifest(src_dir: &Path) -> Result<Manifest> {
     let skill_md = src_dir.join(SKILL_MD);
     let text = std::fs::read_to_string(&skill_md)
         .with_context(|| format!("read {}", skill_md.display()))?;
-    let frontmatter = extract_frontmatter(&text);
+    let frontmatter = extract_frontmatter(&text)?;
     let name = frontmatter
         .name
         .ok_or_else(|| anyhow!("{SKILL_MD} frontmatter missing `name:`"))?;
@@ -77,39 +85,95 @@ fn read_manifest(src_dir: &Path) -> Result<Manifest> {
         .version
         .ok_or_else(|| anyhow!("{SKILL_MD} frontmatter missing `version:`"))?;
     validate_name(&name)?;
-    Ok(Manifest { name, version })
+    let sponsors = frontmatter.sponsors.unwrap_or_default();
+    validate_sponsors(&sponsors)
+        .map_err(|e| anyhow!("{SKILL_MD} sponsor-link validation failed: {e}"))?;
+    Ok(Manifest {
+        name,
+        version,
+        sponsors,
+    })
+}
+
+/// Strongly-typed view of the SKILL.md YAML frontmatter we consume at
+/// pack time. We deliberately do **not** `deny_unknown_fields` here — a
+/// SKILL.md frontmatter is the author's surface and may carry arbitrary
+/// keys the CLI doesn't model (icon, tags, category, …). Only the
+/// fields the publish flow cares about are pulled out.
+#[derive(Debug, Default, Deserialize)]
+struct FrontmatterRaw {
+    #[serde(default)]
+    name: Option<serde_yaml_ng::Value>,
+    #[serde(default)]
+    version: Option<serde_yaml_ng::Value>,
+    #[serde(default)]
+    sponsors: Option<Vec<Sponsor>>,
 }
 
 #[derive(Default)]
 struct Frontmatter {
     name: Option<String>,
     version: Option<String>,
+    sponsors: Option<Vec<Sponsor>>,
 }
 
-fn extract_frontmatter(text: &str) -> Frontmatter {
-    // Permissive parse: only the `name:` and `version:` lines matter
-    // for pack/publish at v0.1. Future Phase C+ may grow this into a
-    // proper YAML loader.
+fn extract_frontmatter(text: &str) -> Result<Frontmatter> {
+    // Locate the fenced YAML block (`---` … `---`). SKILL.md is
+    // markdown-with-frontmatter, so the block ends at the first `---`
+    // that begins a line. Missing fences → fall back to the whole
+    // document (Phase A behaviour) so a frontmatter-less file still
+    // surfaces "missing name:" rather than a YAML parse error.
     let stripped = text.strip_prefix("---\n").unwrap_or(text);
-    let block_end = stripped.find("\n---").unwrap_or(stripped.len());
-    let block = &stripped[..block_end];
+    let block = stripped
+        .find("\n---")
+        .map_or(stripped, |end| &stripped[..end]);
 
-    let mut out = Frontmatter::default();
-    for line in block.lines() {
-        let line = line.trim_end();
-        if let Some(v) = line.strip_prefix("name:") {
-            out.name = Some(clean(v));
-        } else if let Some(v) = line.strip_prefix("version:") {
-            out.version = Some(clean(v));
-        }
+    // A frontmatter-less SKILL.md leaves `block` as the whole markdown
+    // body, which is not a YAML mapping. `serde_yaml_ng` would error
+    // out on the first non-mapping line; treat an empty / non-mapping
+    // block as "no fields" so the missing-`name:` error from
+    // `read_manifest` still fires with a clean message.
+    if block.trim().is_empty() {
+        return Ok(Frontmatter::default());
     }
-    out
+    // Walk via `Value` first so a frontmatter-less body that happens to
+    // be valid YAML (a markdown comment `# Hi` is a YAML comment, etc.)
+    // decodes to `Null` and surfaces as "missing name:" — not a parse
+    // error — unless the author explicitly opened a `---` fence.
+    let value: serde_yaml_ng::Value = match serde_yaml_ng::from_str(block) {
+        Ok(v) => v,
+        Err(e) => {
+            if text.starts_with("---\n") {
+                bail!("{SKILL_MD} frontmatter is not valid YAML: {e}");
+            }
+            return Ok(Frontmatter::default());
+        }
+    };
+    if !value.is_mapping() {
+        if text.starts_with("---\n") {
+            bail!("{SKILL_MD} frontmatter must be a YAML mapping");
+        }
+        return Ok(Frontmatter::default());
+    }
+    let raw: FrontmatterRaw = serde_yaml_ng::from_value(value)
+        .map_err(|e| anyhow!("{SKILL_MD} frontmatter failed to deserialize: {e}"))?;
+    Ok(Frontmatter {
+        name: raw.name.and_then(scalar_to_string),
+        version: raw.version.and_then(scalar_to_string),
+        sponsors: raw.sponsors,
+    })
 }
 
-fn clean(s: &str) -> String {
-    s.trim()
-        .trim_matches(|c: char| c == '"' || c == '\'')
-        .to_owned()
+/// Flatten a YAML scalar (`String`, `Number`, `Bool`) into the string
+/// form the registry expects. Returns `None` for sequences / mappings /
+/// null so `read_manifest` surfaces the missing-field error.
+fn scalar_to_string(v: serde_yaml_ng::Value) -> Option<String> {
+    match v {
+        serde_yaml_ng::Value::String(s) => Some(s),
+        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+        serde_yaml_ng::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 fn validate_name(name: &str) -> Result<()> {

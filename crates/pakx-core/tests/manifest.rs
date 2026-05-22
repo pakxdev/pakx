@@ -192,6 +192,29 @@ fn write_omits_empty_dep_types() {
 }
 
 #[test]
+fn sponsor_kind_lowercase_parses_and_pascal_does_not() {
+    // The `#[serde(rename_all = "lowercase")]` attribute is the only
+    // thing guarding the wire shape against case drift — pin it.
+    let ok: pakx_core::Sponsor =
+        serde_yaml_ng::from_str("kind: github\nurl: https://github.com/sponsors/octocat\n")
+            .expect("lowercase kind parses");
+    assert!(matches!(ok.kind, pakx_core::SponsorKind::Github));
+
+    let err = serde_yaml_ng::from_str::<pakx_core::Sponsor>(
+        "kind: GitHub\nurl: https://github.com/sponsors/octocat\n",
+    );
+    assert!(err.is_err(), "PascalCase kind must NOT parse, got: {err:?}");
+}
+
+#[test]
+fn sponsor_struct_denies_unknown_fields() {
+    let err = serde_yaml_ng::from_str::<pakx_core::Sponsor>(
+        "kind: github\nurl: https://github.com/sponsors/octocat\nextra: 1\n",
+    );
+    assert!(err.is_err(), "unknown field on Sponsor must be rejected");
+}
+
+#[test]
 fn dependencies_get_returns_correct_list() {
     let m = parse_manifest(FULL_MANIFEST_YAML, None).unwrap();
     assert!(m.dependencies.get(PackageType::Skills).is_some());

@@ -12,6 +12,7 @@
 //! query pakx-registry; that lands when we wire `pakx search` to
 //! aggregate public packages alongside MCP/Smithery.
 
+use pakx_core::Sponsor;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -48,6 +49,14 @@ pub struct CreatePackageRequest<'a> {
     pub kind: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<&'a str>,
+    /// Sponsor links emitted on publish. The registry omits this field
+    /// from the upsert payload entirely when the slice is empty
+    /// (`Option::None`) — the registry treats *absent* as "no change",
+    /// while `[]` would explicitly clear the sponsor list. Keep them
+    /// distinct so a `pakx publish` of a manifest without `sponsors:`
+    /// never wipes existing sponsors on a republish.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sponsors: Option<&'a [Sponsor]>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
