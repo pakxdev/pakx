@@ -6,6 +6,53 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Added
+
+- **`sponsors:` block in `SKILL.md` frontmatter (Phase X2b — see
+  `pakx-registry/SPONSOR_LINKS_SPEC.md`).** Publishers can now declare
+  up to 5 sponsor links per package and have them flow through `pakx
+  pack` → `pakx publish` → `pakx info`. Author surface (`SKILL.md`):
+  ```yaml
+  sponsors:
+    - kind: github
+      url: https://github.com/sponsors/octocat
+    - kind: kofi
+      url: https://ko-fi.com/octocat
+    - kind: url
+      url: https://opencollective.com/octocat/donate
+  ```
+  Locked kind whitelist: `github` | `polar` | `kofi` | `url`. Each kind
+  has an anchored per-host regex (CLI first line of defence; registry
+  re-validates server-side — defense in depth). The `url` escape hatch
+  parses through `url::Url`, requires `https://`, non-empty host, and
+  total length ≤ 256 chars.
+  - **`pakx-core`** gains the `Sponsor` / `SponsorKind` types, the
+    `validate_sponsors(&[Sponsor]) -> Result<(), SponsorError>` helper,
+    and a per-kind `LazyLock<Regex>` so regexes compile once per
+    process.
+  - **`pakx pack`** YAML-parses the SKILL.md frontmatter (the previous
+    v0.1 `name:` / `version:` line scanner was extended into a real
+    `serde_yaml_ng`-backed parse) and trips with `sponsors[0].url:
+    does not match the github URL shape: ...` on malformed entries,
+    `sponsors: too many entries (6); max 5` on overflow, before any
+    tarball bytes hit disk.
+  - **`pakx publish`** emits a `sponsors` JSON array in the POST body
+    to `/api/v1/packages` when the manifest declares any. The field
+    is **omitted** (not `null`, not `[]`) when the manifest has no
+    `sponsors:` block — the registry treats absent as "no change" but
+    an explicit `[]` as "clear", so omitting on empty avoids wiping
+    sponsors on a republish from an older manifest.
+  - **`pakx info`** decodes a `sponsors[]` field on the GET response
+    and renders it as a `sponsors:` block between the description /
+    `registry:` line and the versions table on the human surface (spec
+    §7 open-question #7 ordering). The `--json` contract surfaces a
+    stable `sponsors` field (always an array, empty when none) so
+    downstream `jq` consumers never need to null-check.
+  - **`pakx-registry-client`** continues to ride the `extra` flatten
+    capture on `DetailResponse`, so sponsors flow through
+    `Package.install_hints["sponsors"]` for downstream consumers (the
+    Phase 2c `pakx-web` package-detail page is the next user).
+
 ### Tests
 
 - **Regression coverage for federated `pakx search --json` surfacing

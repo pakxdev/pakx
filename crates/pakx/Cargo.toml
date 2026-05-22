@@ -28,6 +28,7 @@ tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
 dirs = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }

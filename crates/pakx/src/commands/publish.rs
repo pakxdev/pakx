@@ -69,6 +69,13 @@ pub async fn run(args: PublishArgs) -> Result<()> {
 
     let backend = PakxBackend::new(&args.registry);
     let pb = ui::spinner("creating package row");
+    // Spec §2 / parent prompt §Publish-emit: omit `sponsors` from the
+    // POST body when the manifest declares none. The registry treats an
+    // absent field as "no change" but an explicit `[]` as "clear", so
+    // omitting on empty avoids wiping sponsors on a republish from an
+    // older manifest that hasn't been re-edited.
+    let sponsors_payload =
+        (!pack.manifest.sponsors.is_empty()).then_some(pack.manifest.sponsors.as_slice());
     let pkg = backend
         .create_package(
             &entry.token,
@@ -76,6 +83,7 @@ pub async fn run(args: PublishArgs) -> Result<()> {
                 name: &pack.manifest.name,
                 kind: &args.kind,
                 description: args.description.as_deref(),
+                sponsors: sponsors_payload,
             },
         )
         .await

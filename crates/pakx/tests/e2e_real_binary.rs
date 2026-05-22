@@ -506,6 +506,152 @@ async fn e2e_list_json_field_contract() {
     }
 }
 
+/// Scenario — full sponsors round-trip (Phase X2b). A SKILL.md
+/// declaring two sponsor links must:
+///   1. Survive `pakx pack` without validation error.
+///   2. Publish via `POST /api/v1/packages` with a `sponsors` JSON
+///      array in the body.
+///   3. Surface as a `sponsors[]` field on `pakx info <id> --json`.
+///
+/// Wiremock fronts the registry — same shape as `login_publish.rs`'s
+/// `mock_registry`, plus a GET-detail handler that echoes the sponsor
+/// list. Deferred to `#[ignore]` so the default `cargo test` run stays
+/// fast; opt in via `--ignored`.
+#[tokio::test]
+#[ignore = "e2e_real_binary — opt in via --ignored"]
+#[allow(clippy::too_many_lines)] // linear end-to-end story; helpers would obscure it
+async fn e2e_publish_emits_sponsors_and_info_json_round_trips() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = MockServer::start().await;
+
+    // SKILL.md with three sponsors covering github / kofi / url.
+    std::fs::write(
+        src.path().join("SKILL.md"),
+        "---\nname: pdf\nversion: 1.0.0\nsponsors:\n  - kind: github\n    url: https://github.com/sponsors/alice\n  - kind: kofi\n    url: https://ko-fi.com/alice\n  - kind: url\n    url: https://opencollective.com/alice\n---\n# pdf\n",
+    )
+    .unwrap();
+
+    // Auth + publish endpoints — POST records the body, GET detail
+    // echoes the sponsor list so the round-trip can be asserted on
+    // `pakx info --json`.
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/whoami"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": "u_1", "login": "alice", "email": null })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(wm_path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "pkg_1",
+            "owner": "alice",
+            "name": "pdf",
+            "kind": "skills",
+            "created": true
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/v1/packages/.+/.+/.+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/pdf",
+            "version": "1.0.0",
+            "sha256": "0".repeat(64),
+            "sizeBytes": 123,
+            "tarballUrl": "https://example.com/tarball.tgz"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/packages/alice/pdf"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/pdf",
+            "kind": "skills",
+            "description": "pdf skill",
+            "sponsors": [
+                { "kind": "github", "url": "https://github.com/sponsors/alice" },
+                { "kind": "kofi",   "url": "https://ko-fi.com/alice" },
+                { "kind": "url",    "url": "https://opencollective.com/alice" }
+            ],
+            "versions": [
+                {
+                    "version": "1.0.0",
+                    "sha256": "0".repeat(64),
+                    "sizeBytes": 123,
+                    "publishedAt": "2026-05-22T00:00:00Z",
+                    "deprecatedAt": null
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    // login → publish → info --json.
+    pakx()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            "pakx_v1_TEST_TOKEN",
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    pakx()
+        .args([
+            "publish",
+            src.path().to_str().unwrap(),
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Inspect the recorded POST body — sponsors array must be present.
+    let posts: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method == wiremock::http::Method::POST && r.url.path() == "/api/v1/packages")
+        .collect();
+    assert_eq!(posts.len(), 1, "exactly one POST /api/v1/packages");
+    let body: Value = serde_json::from_slice(&posts[0].body).unwrap();
+    let sponsors = body
+        .get("sponsors")
+        .and_then(Value::as_array)
+        .expect("publish must emit sponsors");
+    assert_eq!(sponsors.len(), 3);
+
+    // `pakx info alice/pdf --json` must surface the same array.
+    let out = pakx()
+        .args(["info", "alice/pdf", "--json", "--registry", &server.uri()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let line = String::from_utf8_lossy(&out.stdout);
+    let info: Value = serde_json::from_str(line.trim()).expect("info --json valid json");
+    let sponsors = info
+        .get("sponsors")
+        .and_then(Value::as_array)
+        .expect("info --json must include sponsors field");
+    assert_eq!(sponsors.len(), 3);
+    assert_eq!(sponsors[0]["kind"], "github");
+    assert_eq!(sponsors[0]["url"], "https://github.com/sponsors/alice");
+    assert_eq!(sponsors[1]["kind"], "kofi");
+    assert_eq!(sponsors[2]["kind"], "url");
+}
+
 /// Scenario 7 — `pakx search --json` must surface hits from *both*
 /// the pakx-registry source and Smithery in the same federated merge.
 ///

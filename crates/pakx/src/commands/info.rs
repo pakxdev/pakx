@@ -4,6 +4,7 @@
 use anyhow::{anyhow, Result};
 use clap::Args;
 use comfy_table::{Cell, CellAlignment};
+use pakx_core::Sponsor;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -32,6 +33,8 @@ struct PackageDetail {
     kind: Option<String>,
     description: Option<String>,
     created_at: Option<String>,
+    #[serde(default)]
+    sponsors: Vec<Sponsor>,
     #[serde(default)]
     versions: Vec<VersionEntry>,
 }
@@ -77,11 +80,18 @@ pub async fn run(args: InfoArgs) -> Result<()> {
         .map_err(|e| anyhow!("registry response was not valid JSON: {e}"))?;
 
     if args.json {
+        // `sponsors` is a **stable** field on the `--json` contract per
+        // spec §2 — always emit the array (empty when none) so callers
+        // can rely on `.sponsors | length` without null-checking.
         let raw = serde_json::to_string_pretty(&serde_json::json!({
             "id": detail.id,
             "kind": detail.kind,
             "description": detail.description,
             "createdAt": detail.created_at,
+            "sponsors": detail.sponsors.iter().map(|s| serde_json::json!({
+                "kind": s.kind.as_str(),
+                "url": s.url,
+            })).collect::<Vec<_>>(),
             "versions": detail.versions.iter().map(|v| serde_json::json!({
                 "version": v.version,
                 "sha256": v.sha256,
@@ -105,6 +115,23 @@ pub async fn run(args: InfoArgs) -> Result<()> {
         println!("  {} {}", ui::dim("created:    "), c);
     }
     println!("  {} {}", ui::dim("registry:   "), args.registry);
+    // Sponsors render between the description block and the versions
+    // table per spec §7 open-question #7. Heading-less when empty so a
+    // sponsor-less package looks the same as before this feature.
+    if !detail.sponsors.is_empty() {
+        println!();
+        println!("{}", ui::heading("sponsors:"));
+        for s in &detail.sponsors {
+            // Pad the kind to a fixed width so the URLs line up
+            // visually across rows. Matches the dim/label cadence used
+            // by the `kind:` / `description:` / `created:` lines above.
+            println!(
+                "  {} {}",
+                ui::dim(&format!("{:<8}", s.kind.as_str())),
+                s.url
+            );
+        }
+    }
     println!();
     if detail.versions.is_empty() {
         println!("  {}", ui::dim("no versions published yet."));
