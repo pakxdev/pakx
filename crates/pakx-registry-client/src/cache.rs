@@ -136,6 +136,19 @@ impl CacheDir {
         Ok(None)
     }
 
+    /// Write `value` to `path` atomically: body lands in `<path>.tmp`
+    /// and renames into place. A crash mid-write therefore can't leave
+    /// a half-written cache entry on disk — the prior version stays
+    /// intact and the next fetch returns it (or refetches on TTL
+    /// expiry), instead of triggering the corrupt-cache self-heal path
+    /// that wastes one network round-trip.
+    ///
+    /// The sync `pakx_core::atomic_write` helper covers the lockfile +
+    /// manifest writers. We can't call it from async code without
+    /// `spawn_blocking`, so the same temp-then-rename shape is
+    /// reproduced inline against `tokio::fs`. On rename failure the
+    /// orphan `<path>.tmp` is unlinked best-effort to match the sync
+    /// helper's behaviour.
     async fn write<T: Serialize + Sync>(
         &self,
         path: &Path,
@@ -153,11 +166,35 @@ impl CacheDir {
             source: std::io::Error::other(e),
             path: Some(path.to_path_buf()),
         })?;
-        fs::write(path, bytes)
+
+        let tmp = tmp_path_for(path);
+        fs::write(&tmp, bytes)
             .await
             .map_err(|source| RegistryError::Cache {
                 source,
+                path: Some(tmp.clone()),
+            })?;
+        if let Err(source) = fs::rename(&tmp, path).await {
+            // Best-effort cleanup of the orphan tmp so failed runs
+            // don't leak `.tmp` files in `~/.pakx/cache/`. Surface the
+            // original rename error regardless.
+            let _ = fs::remove_file(&tmp).await;
+            return Err(RegistryError::Cache {
+                source,
                 path: Some(path.to_path_buf()),
-            })
+            });
+        }
+        Ok(())
     }
+}
+
+/// Mirror of `pakx_core::atomic_write::tmp_path_for`: append `.tmp` to
+/// the full filename so `<cache>/abc.json` becomes `<cache>/abc.json.tmp`,
+/// never `<cache>/abc.tmp` (which would collide with hypothetical
+/// `<cache>/abc.bin` peers). Internal to this module — the public API
+/// is `pakx_core::atomic_write::tmp_path_for` for sync callers.
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".tmp");
+    PathBuf::from(s)
 }
