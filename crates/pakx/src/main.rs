@@ -13,6 +13,8 @@ mod registry_url;
 mod resolve;
 mod ui;
 
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -26,6 +28,7 @@ use commands::init::{self, InitArgs};
 use commands::install::{self as install_cmd, InstallArgs};
 use commands::list::{self as list_cmd, ListArgs};
 use commands::login::{self as login_cmd, LoginArgs};
+use commands::outdated::{self as outdated_cmd, OutdatedArgs};
 use commands::pack::{self as pack_cmd, PackArgs};
 use commands::publish::{self as publish_cmd, PublishArgs};
 use commands::remove::{self as remove_cmd, RemoveArgs};
@@ -68,6 +71,8 @@ enum Command {
     Install(InstallArgs),
     /// List pinned dependencies (reads `agents.lock`).
     List(ListArgs),
+    /// Show lockfile entries whose source registry has a newer version.
+    Outdated(OutdatedArgs),
     /// Health-check the project + agent install state.
     Doctor(DoctorArgs),
     /// Search the federated registry for packages.
@@ -96,29 +101,50 @@ enum Command {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
     // Resolve the process-global color mode from `--color` before any
     // paint helper memoises a stream's color decision. `OnceLock` makes
     // a second call inert, so a re-entry from tests is harmless.
     ui::set_color_mode(cli.color);
-    match cli.command {
-        Command::Init(args) => init::run(args).await,
-        Command::Add(args) => add::run(args).await,
-        Command::Remove(args) => remove_cmd::run(args).await,
-        Command::Install(args) => install_cmd::run_cmd(args).await,
-        Command::List(args) => list_cmd::run(args).await,
-        Command::Doctor(args) => doctor::run(args).await,
-        Command::Search(args) => search::run(args).await,
-        Command::Test(args) => test_cmd::run(args).await,
-        Command::Info(args) => info_cmd::run(args).await,
-        Command::Login(args) => login_cmd::run(args).await,
-        Command::Whoami(args) => whoami_cmd::run(args).await,
-        Command::Pack(args) => pack_cmd::run(args).await,
-        Command::Publish(args) => publish_cmd::run(args).await,
-        Command::Unpublish(args) => unpublish_cmd::run(args).await,
-        Command::Upgrade(args) => upgrade_cmd::run(args).await,
-        Command::Completion(args) => completion_cmd::run::<Cli>(args).await,
-        Command::Config(args) => config_cmd::run(args).await,
+    match dispatch(cli.command).await {
+        Ok(code) => code,
+        Err(e) => {
+            // Match the previous `anyhow::main` shape: print the full
+            // error chain (`{:#}` shows `with_context` wrapping) then
+            // exit 1. anyhow's default Debug impl would also print a
+            // backtrace, which we do NOT want on a user-facing CLI.
+            eprintln!("Error: {e:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Subcommand dispatcher. Pulled out of `main` so error rendering +
+/// exit-code mapping live in one place. Most commands return `()` on
+/// success — `outdated` is the exception (it propagates a non-zero
+/// exit code when any dep has drifted, CI-friendly).
+async fn dispatch(cmd: Command) -> Result<ExitCode> {
+    match cmd {
+        Command::Init(args) => init::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Add(args) => add::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Remove(args) => remove_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Install(args) => install_cmd::run_cmd(args).await.map(|()| ExitCode::SUCCESS),
+        Command::List(args) => list_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Outdated(args) => outdated_cmd::run(args).await,
+        Command::Doctor(args) => doctor::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Search(args) => search::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Test(args) => test_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Info(args) => info_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Login(args) => login_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Whoami(args) => whoami_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Pack(args) => pack_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Publish(args) => publish_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Unpublish(args) => unpublish_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Upgrade(args) => upgrade_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Completion(args) => completion_cmd::run::<Cli>(args)
+            .await
+            .map(|()| ExitCode::SUCCESS),
+        Command::Config(args) => config_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
     }
 }

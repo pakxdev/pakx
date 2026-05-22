@@ -22,6 +22,41 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **`pakx outdated` — show lockfile entries whose source registry has
+  a newer non-deprecated version.** Reads `agents.lock` (canonical pin
+  source) and queries each entry's recorded `registry` source:
+  - `pakx` entries → `GET /api/v1/packages/{owner}/{name}` on
+    `registry.pakx.dev`. Latest = first non-deprecated entry in the
+    server-sorted `versions[]` array.
+  - `official-mcp` entries → `OfficialMcpSource::fetch` and pick the
+    `version` field.
+  - `smithery` entries → `SmitherySource::fetch` similarly. Smithery's
+    `"latest"` placeholder is surfaced as `status: unknown` because
+    semver comparison is meaningless against a non-version literal.
+  - `glama` / `github` / `git` entries are reported as `status: skip`
+    until their resolvers land.
+
+  Comparison is `semver`-aware: `latest > current` → `upgrade`,
+  `latest < current` → `drift` (downgrade — usually means the pinned
+  version was unpublished and rolled back), equal → up-to-date and
+  excluded from the table. Registry unreachable → `status: error` on
+  the row plus a `[warn]` line to stderr; the command does **not**
+  fail (a transient network blip shouldn't break a CI gate that only
+  cares about real drift). Exit code is `1` when anything is outdated
+  (CI-friendly: `pakx outdated || echo "deps drift"`), `0` otherwise.
+  Flags:
+  - `--json` — single-line JSON array on stdout with stable field
+    names (`id`, `current`, `latest`, `registry`, `status`, plus an
+    optional `error` field on error rows). Up-to-date entries are
+    excluded so `jq 'length'` produces the outdated count directly.
+  - `--registry <pakx|official-mcp|smithery>` — restrict the check
+    to one source. Useful in CI when only first-party drift matters.
+  - `--directory <path>` — override the project root (mirrors `pakx
+    list` / `pakx install`).
+  - Hidden test-only overrides `--pakx-base-url` / `--mcp-base-url` /
+    `--smithery-base-url`, validated against the same userinfo-
+    smuggling guard `pakx install` and `pakx test` already enforce.
+
 - **Top-level `--color <auto|always|never>` flag.** Threaded through
   every paint helper in `pakx::ui`, the new global flag joins the
   pre-existing `NO_COLOR` env-var + `IsTerminal` auto-detection as a

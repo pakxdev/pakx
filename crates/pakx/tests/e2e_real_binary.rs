@@ -743,3 +743,146 @@ async fn e2e_search_json_surfaces_pakx_registry_and_smithery() {
         });
     assert_eq!(smithery_hit["id"], "kapilthakare-cyberpunk/hello-server");
 }
+
+/// Scenario 8 — `pakx outdated` end-to-end. Two-entry lockfile (one
+/// pakx-skill outdated, one official-mcp up-to-date) drives the
+/// federated outdated checker against wiremock'd sources. Asserts:
+///   - human table surfaces the outdated row + summary line.
+///   - `--json` mirror surfaces a single object with the documented
+///     field names (`id`, `current`, `latest`, `registry`, `status`).
+///   - exit code is 1 because at least one row is `upgrade`.
+#[tokio::test]
+#[ignore = "e2e_real_binary — opt in via --ignored"]
+#[allow(clippy::too_many_lines)] // linear two-source story; helpers would obscure it
+async fn e2e_outdated_surfaces_pakx_upgrade_and_json_field_contract() {
+    let project = TempDir::new().unwrap();
+    let pakx_registry = MockServer::start().await;
+    let mcp = MockServer::start().await;
+
+    // pakx side: lockfile pins 0.1.0, registry knows 0.1.0 + 0.1.2
+    // (highest non-deprecated). Expect `upgrade` row.
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/packages/arwenizEr/hello-world"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "arwenizEr/hello-world",
+            "kind": "skills",
+            "description": "outdated e2e",
+            "versions": [
+                {
+                    "version": "0.1.2",
+                    "sha256": "0".repeat(64),
+                    "sizeBytes": 1024,
+                    "publishedAt": "2026-05-22T00:00:00Z",
+                    "deprecatedAt": null
+                },
+                {
+                    "version": "0.1.0",
+                    "sha256": "0".repeat(64),
+                    "sizeBytes": 1024,
+                    "publishedAt": "2026-05-21T00:00:00Z",
+                    "deprecatedAt": null
+                }
+            ]
+        })))
+        .mount(&pakx_registry)
+        .await;
+
+    // mcp side: lockfile pins 1.2.0, registry latest is 1.2.0. No row.
+    let mcp_id = "io.github.acme/cool";
+    fixture_official_mcp_package(&mcp, mcp_id, "1.2.0").await;
+
+    let lockfile = format!(
+        r#"{{"lockfileVersion":1,"manifestHash":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","entries":{{
+  "skills/arwenizEr/hello-world@0.1.0":{{
+    "name":"arwenizEr/hello-world",
+    "type":"skills",
+    "version":"0.1.0",
+    "resolvedFrom":"https://registry.pakx.dev/api/v1/packages/arwenizEr/hello-world/0.1.0",
+    "registry":"pakx",
+    "integrity":"sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    "agents":["claude-code"],
+    "dependencies":[]
+  }},
+  "mcp/{mcp_id}@1.2.0":{{
+    "name":"{mcp_id}",
+    "type":"mcp",
+    "version":"1.2.0",
+    "resolvedFrom":"official-mcp:{mcp_id}",
+    "registry":"official-mcp",
+    "integrity":"sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    "agents":["claude-code"],
+    "dependencies":[]
+  }}
+}}}}
+"#
+    );
+    std::fs::write(project.path().join("agents.lock"), lockfile).unwrap();
+
+    // Human surface — outdated row + summary line.
+    let human = pakx()
+        .current_dir(project.path())
+        .args([
+            "outdated",
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+            "--mcp-base-url",
+            &mcp.uri(),
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        stdout.contains("arwenizEr/hello-world"),
+        "human table must list outdated id; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("0.1.0") && stdout.contains("0.1.2"),
+        "human table must show current + latest; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("upgrade"),
+        "human table must mark status=upgrade; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("summary:"),
+        "human table must end with summary line; got:\n{stdout}"
+    );
+
+    // JSON surface — single row, documented field names.
+    let machine = pakx()
+        .current_dir(project.path())
+        .args([
+            "outdated",
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+            "--mcp-base-url",
+            &mcp.uri(),
+            "--json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let line = String::from_utf8_lossy(&machine.stdout);
+    let arr: Value = serde_json::from_str(line.trim()).expect("outdated --json valid json");
+    let rows = arr.as_array().expect("outdated --json is an array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one outdated row (pakx upgrade); got: {rows:?}"
+    );
+    let row = rows[0].as_object().expect("row is an object");
+    for field in ["id", "current", "latest", "registry", "status"] {
+        assert!(
+            row.contains_key(field),
+            "outdated --json row missing field {field}; got: {row:?}"
+        );
+    }
+    assert_eq!(row["id"], "arwenizEr/hello-world");
+    assert_eq!(row["current"], "0.1.0");
+    assert_eq!(row["latest"], "0.1.2");
+    assert_eq!(row["registry"], "pakx");
+    assert_eq!(row["status"], "upgrade");
+}
