@@ -62,6 +62,39 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   yet) surfaces as a parse error instead of being silently dropped on
   round-trip — losing the `token` field would be catastrophic, and
   this guards the contract.
+- **`pakx install` and `pakx test` now actually resolve through all
+  federated registries** (official MCP Registry + Smithery +
+  pakx-registry), matching the README + CHANGELOG claims and the
+  `--no-smithery` / `--no-pakx-registry` flag layout. The previous
+  implementation only called `OfficialMcpSource::fetch`; if a dep
+  wasn't in the MCP Registry, the resolver gave up — even though
+  `pakx search` was already returning hits from Smithery and
+  pakx-registry. The dead flags are now live. Resolution strategy:
+  - Try `OfficialMcp.fetch` first (preserves the canonical-source
+    pin for upstream MCP servers).
+  - On `NotFound`, run `client.search(&id)` across the remaining
+    registered sources (the `OfficialMcp` source is filtered out of
+    this fallback fan-out because its hit was already discarded one
+    line up — saves one round-trip per resolved dep) and pick the
+    first exact-name match.
+  - `agents.lock` now records **which source** resolved the dep
+    (`registry: "smithery"`, `"pakx"`, etc.) so `pakx doctor`
+    can reason about drift without re-running the federated search.
+  - Test-only base-URL overrides (`--smithery-base-url`,
+    `--pakx-base-url`) added to `pakx install` to match `pakx test`,
+    **and** the same userinfo-bypass guard that protects `pakx test`
+    (`validate_base_url`) is now applied to `pakx install` so the
+    two surfaces stay in lockstep.
+  - `pakx install`'s `--no-smithery` / `--no-pakx-registry` flags
+    now conflict with their matching `--*-base-url` overrides —
+    `--no-smithery --smithery-base-url …` is a contradiction and
+    clap errors immediately instead of silently ignoring the URL.
+- `OfficialMcpSource::fetch` search fallback now picks deterministically
+  when the registry returns multiple entries with the same canonical
+  name. Previously the first match in the result set won, so re-fetches
+  could pin a `0.0.0` placeholder when a real version was also
+  available. The picker now prefers entries with a non-placeholder
+  version, tie-breaking on lexicographic version desc.
 
 ### Added
 

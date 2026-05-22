@@ -135,7 +135,13 @@ async fn test_online_resolves_against_registry() {
     Command::cargo_bin(BIN)
         .unwrap()
         .current_dir(project.path())
-        .args(["test", "--mcp-base-url", &server.uri()])
+        .args([
+            "test",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("ok    mcp/io.github.acme/cool"));
@@ -157,12 +163,108 @@ async fn test_online_fails_on_unknown_dep() {
     Command::cargo_bin(BIN)
         .unwrap()
         .current_dir(project.path())
-        .args(["test", "--mcp-base-url", &server.uri()])
+        .args([
+            "test",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
         .assert()
         .failure()
         .stdout(predicate::str::contains(
             "fail: mcp/io.github.acme/ghost not found",
         ));
+}
+
+/// Federated fallback: when the official MCP Registry has no match,
+/// `pakx test` must consult Smithery and pakx-registry — and a hit
+/// on either should resolve the dep as `ok`.
+#[tokio::test]
+async fn test_online_falls_back_to_pakx_registry() {
+    let official = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/v0/servers/.+"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&official)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&official)
+        .await;
+
+    let pakx = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [
+                { "id": "alice/cool", "kind": "mcp", "latestVersion": "1.0.0" }
+            ]
+        })))
+        .mount(&pakx)
+        .await;
+
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    - alice/cool\n",
+    );
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "test",
+            "--mcp-base-url",
+            &official.uri(),
+            "--pakx-base-url",
+            &pakx.uri(),
+            "--no-smithery",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok    mcp/alice/cool"))
+        // The status line must surface which source resolved the dep
+        // so users see federated resolution actually happened.
+        .stdout(predicate::str::contains("pakx:"));
+}
+
+/// Companion: `--no-pakx-registry` (with Smithery also off) re-breaks
+/// the resolution. Documents that the flag is wired through.
+#[tokio::test]
+async fn test_online_with_no_pakx_registry_does_not_fall_back() {
+    let official = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/v0/servers/.+"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&official)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&official)
+        .await;
+
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    - alice/cool\n",
+    );
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "test",
+            "--mcp-base-url",
+            &official.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("fail: mcp/alice/cool"));
 }
 
 #[test]

@@ -8,6 +8,8 @@
 mod commands;
 mod install;
 mod pack;
+mod registry_url;
+mod resolve;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

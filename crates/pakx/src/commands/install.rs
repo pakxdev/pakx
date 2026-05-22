@@ -21,6 +21,30 @@ pub struct InstallArgs {
     #[arg(long, hide = true)]
     pub mcp_base_url: Option<String>,
 
+    /// Override the Smithery registry base URL (testing).
+    ///
+    /// Mutually exclusive with `--no-smithery`: opting out of a source
+    /// while supplying a base URL for it is a contradiction. Clap
+    /// errors on the contradiction so the user sees the mistake instead
+    /// of silently dropping the override.
+    #[arg(long, hide = true, conflicts_with = "no_smithery")]
+    pub smithery_base_url: Option<String>,
+
+    /// Override the pakx-registry base URL (testing).
+    ///
+    /// Mutually exclusive with `--no-pakx-registry` for the same reason
+    /// as `--smithery-base-url` / `--no-smithery`.
+    #[arg(long, hide = true, conflicts_with = "no_pakx_registry")]
+    pub pakx_base_url: Option<String>,
+
+    /// Skip Smithery resolution. Default: enabled.
+    #[arg(long)]
+    pub no_smithery: bool,
+
+    /// Skip the pakx-registry source. Default: enabled.
+    #[arg(long)]
+    pub no_pakx_registry: bool,
+
     /// Override the Claude Code home directory (testing).
     #[arg(long, hide = true)]
     pub claude_home: Option<PathBuf>,
@@ -30,6 +54,10 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
     let opts = InstallOpts {
         project_root: args.directory,
         mcp_base_url: args.mcp_base_url,
+        smithery_base_url: args.smithery_base_url,
+        pakx_base_url: args.pakx_base_url,
+        no_smithery: args.no_smithery,
+        no_pakx_registry: args.no_pakx_registry,
         claude_home: args.claude_home,
         no_lockfile: args.no_lockfile,
     };
