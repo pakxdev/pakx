@@ -20,6 +20,7 @@ use tempfile::TempDir;
 
 use crate::registry_url::validate_base_url;
 use crate::resolve::{resolve_federated, Resolved};
+use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
 const LOCKFILE_FILENAME: &str = "agents.lock";
@@ -74,9 +75,11 @@ pub async fn run(args: TestArgs) -> Result<()> {
 
     let manifest = read_manifest_from(&manifest_path)
         .with_context(|| format!("read manifest at {}", manifest_path.display()))?;
+    let manifest_label = display_manifest_path(&project_root, &manifest_path);
     println!(
-        "ok    manifest {} parsed (name={}, version={})",
-        manifest_path.display(),
+        "{} manifest {} parsed (name={}, version={})",
+        ui::glyph_ok(),
+        manifest_label,
         manifest.name,
         manifest.version,
     );
@@ -114,11 +117,27 @@ pub async fn run(args: TestArgs) -> Result<()> {
     report_unhandled(&manifest);
 
     if failures == 0 {
-        println!("\nall entries ok");
+        println!("\n{}", ui::heading("all entries ok"));
         Ok(())
     } else {
         anyhow::bail!("{failures} entry/entries failed validation")
     }
+}
+
+/// Render `manifest_path` for human output. When the path lives under
+/// `project_root` we strip the prefix so absolute temp paths (which leak
+/// host info and make output noisy) don't show up in CI logs. When the
+/// caller pointed `--manifest` at a path outside the project root we
+/// keep the absolute form so the user can still trace which file was
+/// parsed.
+fn display_manifest_path(
+    project_root: &std::path::Path,
+    manifest_path: &std::path::Path,
+) -> String {
+    manifest_path.strip_prefix(project_root).map_or_else(
+        |_| manifest_path.display().to_string(),
+        |p| p.display().to_string(),
+    )
 }
 
 fn resolve_manifest_path(
@@ -140,14 +159,20 @@ fn check_offline(manifest: &Manifest, lockfile: Option<&Lockfile>, failures: &mu
         let id = dep_id(dep);
         match lockfile {
             Some(lock) if lock.entries.values().any(|e| e.name == id) => {
-                println!("ok    mcp/{id}");
+                println!("{} mcp/{id}", ui::glyph_ok());
             }
             Some(_) => {
-                println!("fail: mcp/{id} not in {LOCKFILE_FILENAME} (offline cannot resolve)");
+                println!(
+                    "{} mcp/{id} not in {LOCKFILE_FILENAME} (offline cannot resolve)",
+                    ui::glyph_fail()
+                );
                 *failures += 1;
             }
             None => {
-                println!("fail: mcp/{id} cannot validate offline — no {LOCKFILE_FILENAME} present");
+                println!(
+                    "{} mcp/{id} cannot validate offline — no {LOCKFILE_FILENAME} present",
+                    ui::glyph_fail()
+                );
                 *failures += 1;
             }
         }
@@ -161,7 +186,7 @@ async fn check_online(manifest: &Manifest, client: &RegistryClient, failures: &m
     for dep in deps {
         let id = dep_id(dep);
         if let DepSpec::Git(_) = dep {
-            println!("fail: mcp/{id} git deps not yet supported");
+            println!("{} mcp/{id} git deps not yet supported", ui::glyph_fail());
             *failures += 1;
             continue;
         }
@@ -173,18 +198,22 @@ async fn check_online(manifest: &Manifest, client: &RegistryClient, failures: &m
         match resolve_federated(client, &id).await {
             Ok(Resolved::OfficialMcp(pkg) | Resolved::Federated(pkg)) => {
                 println!(
-                    "ok    mcp/{id} -> {source}:{pid}@{ver}",
+                    "{} mcp/{id} -> {source}:{pid}@{ver}",
+                    ui::glyph_ok(),
                     source = pkg.source.as_tag(),
                     pid = pkg.id,
                     ver = pkg.version,
                 );
             }
             Ok(Resolved::NotFound) => {
-                println!("fail: mcp/{id} not found in any federated registry");
+                println!(
+                    "{} mcp/{id} not found in any federated registry",
+                    ui::glyph_fail()
+                );
                 *failures += 1;
             }
             Err(e) => {
-                println!("fail: mcp/{id} {e}");
+                println!("{} mcp/{id} {e}", ui::glyph_fail());
                 *failures += 1;
             }
         }
@@ -215,13 +244,15 @@ fn report_unhandled(manifest: &Manifest) {
             // anything about a git URL until a resolver exists for it).
             if let DepSpec::Git(_) = dep {
                 println!(
-                    "skip  {kind}/{id} (not yet validated: git deps unsupported in this version)",
+                    "{} {kind}/{id} (not yet validated: git deps unsupported in this version)",
+                    ui::glyph_info(),
                     kind = kind.as_str(),
                     id = dep_id(dep),
                 );
             } else {
                 println!(
-                    "skip  {kind}/{id} (not yet validated: resolver not yet wired for this package type)",
+                    "{} {kind}/{id} (not yet validated: resolver not yet wired for this package type)",
+                    ui::glyph_info(),
                     kind = kind.as_str(),
                     id = dep_id(dep),
                 );
@@ -230,7 +261,12 @@ fn report_unhandled(manifest: &Manifest) {
         }
     }
     if skipped > 0 {
-        eprintln!("note: skipped {skipped} entries (only mcp: validated in this version)");
+        eprintln!(
+            "{}",
+            ui::dim_err(&format!(
+                "note: skipped {skipped} entries (only mcp: validated in this version)"
+            ))
+        );
     }
 }
 

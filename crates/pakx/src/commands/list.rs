@@ -12,14 +12,18 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
+use comfy_table::{Cell, CellAlignment};
 use pakx_agents::{Adapter, ClaudeCodeAdapter};
 use pakx_core::{read_lockfile_from, LockEntry};
 use serde::Serialize;
+
+use crate::ui;
 
 const LOCKFILE_FILENAME: &str = "agents.lock";
 
 #[derive(Debug, Clone, Args)]
 pub struct ListArgs {
+    /// Operate on a project at a path other than the cwd.
     #[arg(short = 'C', long = "directory")]
     pub directory: Option<PathBuf>,
 
@@ -69,11 +73,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
         if args.json {
             println!("[]");
         } else {
-            eprintln!(
-                "no {} found in {} — run `pakx install` first",
-                LOCKFILE_FILENAME,
-                project_root.display()
-            );
+            eprintln!("no {LOCKFILE_FILENAME} found — run `pakx install` first");
         }
         return Ok(());
     };
@@ -133,21 +133,35 @@ pub async fn run(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    for (key, entry, status) in entries {
-        let badge = match status {
-            "ok" => "[ok]",
-            "drift" => "[drift]",
-            _ => "",
+    let mut table = ui::table();
+    table.set_header(vec![
+        Cell::new("status"),
+        Cell::new("id"),
+        Cell::new("version").set_alignment(CellAlignment::Right),
+        Cell::new("registry"),
+        Cell::new("agents"),
+    ]);
+    for (_key, entry, status) in &entries {
+        let badge = match *status {
+            "ok" => ui::glyph_ok(),
+            "drift" => ui::glyph_drift(),
+            _ => ui::glyph_info(),
         };
-        println!(
-            "{badge:7} {kind:9} {name} @ {version}  ({key})",
-            badge = badge,
-            kind = entry.kind.as_str(),
-            name = entry.name,
-            version = entry.version,
-            key = key,
-        );
+        let agents = entry
+            .agents
+            .iter()
+            .map(pakx_core::AgentId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        table.add_row(vec![
+            Cell::new(badge),
+            Cell::new(entry.name.as_str()),
+            Cell::new(entry.version.as_str()).set_alignment(CellAlignment::Right),
+            Cell::new(entry.registry.as_tag()),
+            Cell::new(agents),
+        ]);
     }
+    println!("{table}");
 
     Ok(())
 }

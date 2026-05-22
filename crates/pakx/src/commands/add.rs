@@ -17,6 +17,8 @@ use pakx_registry_client::{CacheDir, OfficialMcpSource, RegistryClient, Registry
 use reqwest::Client;
 use tracing::{debug, warn};
 
+use crate::ui;
+
 const MANIFEST_FILENAME: &str = "agents.yml";
 const DEFAULT_MCP_BASE: &str = pakx_registry_client::OFFICIAL_MCP_BASE_URL;
 
@@ -89,15 +91,18 @@ pub async fn run(args: AddArgs) -> Result<()> {
         match validate_mcp(&args.id, args.mcp_base_url.as_deref()).await {
             Ok(version) => {
                 eprintln!(
-                    "validated {} v{} via official MCP Registry",
-                    args.id, version
+                    "{} {} v{} via official MCP Registry",
+                    ui::glyph_ok_err(),
+                    args.id,
+                    version
                 );
             }
             Err(e) => match e {
                 RegistryError::NotFound { .. } => {
                     warn!(target: "pakx::add", id = %args.id, "not in official MCP Registry; adding anyway");
                     eprintln!(
-                        "warning: {} not in the official MCP Registry; adding to manifest anyway (use --no-validate to silence)",
+                        "{} {} not in the official MCP Registry; adding to manifest anyway (use --no-validate to silence)",
+                        ui::glyph_warn_err(),
                         args.id
                     );
                 }
@@ -112,8 +117,8 @@ pub async fn run(args: AddArgs) -> Result<()> {
     match outcome {
         AddOutcome::AlreadyPresent => {
             eprintln!(
-                "{}: {} already declared under {}; manifest unchanged",
-                target.display(),
+                "{} {} already declared under {}; manifest unchanged",
+                ui::glyph_warn_err(),
                 args.id,
                 kind.as_str()
             );
@@ -125,11 +130,12 @@ pub async fn run(args: AddArgs) -> Result<()> {
     write_to(&target, &manifest).with_context(|| format!("write {}", target.display()))?;
 
     eprintln!(
-        "added {}/{} to {}; run `pakx install` to apply",
+        "{} added {} ({})",
+        ui::glyph_ok_err(),
+        ui::success_err(&args.id),
         kind.as_str(),
-        args.id,
-        target.display()
     );
+    eprintln!("       run `pakx install` to apply");
     Ok(())
 }
 

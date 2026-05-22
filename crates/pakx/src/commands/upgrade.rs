@@ -11,6 +11,8 @@ use clap::Args;
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::ui;
+
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const LATEST_URL: &str = "https://api.github.com/repos/pakxdev/pakx/releases/latest";
 const USER_AGENT: &str = concat!("pakx/", env!("CARGO_PKG_VERSION"));
@@ -52,7 +54,7 @@ pub async fn run(args: UpgradeArgs) -> Result<()> {
 
     match cmp {
         Ordering::Equal => {
-            println!("pakx {CURRENT} is the latest release.");
+            println!("pakx {} is the latest release.", ui::success(CURRENT));
         }
         Ordering::Greater => {
             println!(
@@ -60,10 +62,14 @@ pub async fn run(args: UpgradeArgs) -> Result<()> {
             );
         }
         Ordering::Less => {
-            println!("A newer pakx is available: {CURRENT} → {latest}");
-            println!("Release notes: {}", release.html_url);
+            println!(
+                "A newer pakx is available: {} -> {}",
+                ui::dim(CURRENT),
+                ui::success(latest),
+            );
+            println!("{} {}", ui::heading("release notes:"), release.html_url);
             println!();
-            println!("Upgrade with whichever channel you installed from:");
+            println!("{}", ui::heading("upgrade via your install channel:"));
             println!("  curl|sh / irm|iex   curl -fsSL https://pakx.dev/install.sh | sh");
             println!("                      irm https://pakx.dev/install.ps1 | iex");
             println!("  brew                brew upgrade pakx");

@@ -7,8 +7,11 @@ use clap::Args;
 use pakx_core::{Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::PakxBackend;
 
+use crate::ui;
+
 #[derive(Debug, Clone, Args)]
 pub struct WhoamiArgs {
+    /// Registry to interrogate. Defaults to <https://registry.pakx.dev>.
     #[arg(short = 'r', long = "registry", default_value = DEFAULT_REGISTRY_URL)]
     pub registry: String,
 
@@ -35,12 +38,12 @@ pub async fn run(args: WhoamiArgs) -> Result<()> {
             .login
             .clone()
             .unwrap_or_else(|| "(unknown)".to_owned());
-        println!("{login}");
+        println!("{}", ui::success(&login));
         return Ok(());
     }
 
     let backend = PakxBackend::new(&args.registry);
     let me = backend.whoami(&entry.token).await?;
-    println!("{}", me.login);
+    println!("{}", ui::success(&me.login));
     Ok(())
 }

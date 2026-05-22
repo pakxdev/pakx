@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::install::{run, InstallOpts};
+use crate::ui;
 
 #[derive(Debug, Clone, Args)]
 pub struct InstallArgs {
@@ -61,29 +62,57 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
         claude_home: args.claude_home,
         no_lockfile: args.no_lockfile,
     };
-    let report = run(opts).await?;
+    let pb = ui::spinner("resolving dependencies");
+    let report = run(opts).await;
+    pb.finish_and_clear();
+    let report = report?;
 
     if !report.installed.is_empty() {
-        eprintln!("installed:");
+        eprintln!("{}", ui::heading("installed:"));
         for id in &report.installed {
-            eprintln!("  + {id}");
+            eprintln!("  {} {}", ui::glyph_ok_err(), id);
         }
     }
     if !report.skipped.is_empty() {
-        eprintln!("skipped (unchanged or not yet supported):");
+        eprintln!(
+            "{}",
+            ui::heading("skipped (unchanged or not yet supported):")
+        );
         for id in &report.skipped {
-            eprintln!("  ~ {id}");
+            eprintln!("  {} {}", ui::dim_err("~"), id);
         }
     }
     if !report.failed.is_empty() {
-        eprintln!("failed:");
+        eprintln!("{}", ui::heading("failed:"));
         for (id, reason) in &report.failed {
-            eprintln!("  ! {id}: {reason}");
+            eprintln!("  {} {id}: {reason}", ui::glyph_fail_err());
         }
     }
     if let Some(p) = &report.lockfile_path {
-        eprintln!("wrote {}", p.display());
+        // Print the file name rather than the absolute path so CI logs
+        // / pasted snippets don't leak the host's temp / project dir.
+        let label = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map_or_else(|| p.display().to_string(), str::to_owned);
+        eprintln!("{} wrote {}", ui::glyph_ok_err(), label);
     }
+
+    // Final summary so users can scan the outcome at a glance.
+    let installed = report.installed.len();
+    let skipped = report.skipped.len();
+    let failed = report.failed.len();
+    eprintln!(
+        "\n{}: installed {}, skipped {}, failed {}",
+        ui::heading("summary"),
+        ui::success_err(&installed.to_string()),
+        skipped,
+        if failed > 0 {
+            ui::error_err(&failed.to_string())
+        } else {
+            failed.to_string()
+        },
+    );
 
     if report.failed.is_empty() {
         Ok(())
