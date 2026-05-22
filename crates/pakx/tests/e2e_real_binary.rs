@@ -505,3 +505,95 @@ async fn e2e_list_json_field_contract() {
         );
     }
 }
+
+/// Scenario 7 — `pakx search --json` must surface hits from *both*
+/// the pakx-registry source and Smithery in the same federated merge.
+///
+/// Regression for the 2026-05 incident: against production
+/// (`registry.pakx.dev`), `pakx search hello-world --json` returned 10
+/// Smithery hits and **zero** pakx-registry hits even though
+/// `arwenizEr/hello-world@0.1.1` was live. Root cause turned out to
+/// upstream of the CLI — the registry list endpoint's `latestVersion`
+/// subquery was returning `null`, and the CLI's `list_into_package`
+/// fallback was producing a `"0.0.0"` version that still merged into
+/// the output… but the prior shape mismatch on the `packages[].id`
+/// field meant entries deserialized cleanly yet the surrounding
+/// federated test coverage never pinned the dual-source merge. The
+/// list endpoint has since been fixed; this test pins the contract so
+/// the same regression can never recur silently on the CLI side.
+///
+/// Mocks `OfficialMcp` empty, `Smithery` with one hit, `pakx-registry`
+/// with one hit, then asserts the JSON output contains **both** the
+/// Smithery hit (`source: "smithery"`) and the pakx-registry hit
+/// (`source: "pakx"`, `version: "0.1.1"` — the live version that
+/// originally failed to surface).
+#[tokio::test]
+#[ignore = "e2e_real_binary — opt in via --ignored"]
+async fn e2e_search_json_surfaces_pakx_registry_and_smithery() {
+    let official = MockServer::start().await;
+    fixture_official_mcp_empty(&official).await;
+
+    let smithery = MockServer::start().await;
+    fixture_smithery_package(&smithery, "kapilthakare-cyberpunk/hello-server", "1.0.0").await;
+
+    // pakx-registry list endpoint — mirrors the prod shape after the
+    // `latestVersion` subquery fix: `{ packages: [{ id, kind,
+    // description, latestVersion }] }`.
+    let pakx_registry = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [
+                {
+                    "id": "arwenizEr/hello-world",
+                    "kind": "skill",
+                    "description": "first published pakx skill",
+                    "visibility": "public",
+                    "latestVersion": "0.1.1"
+                }
+            ]
+        })))
+        .mount(&pakx_registry)
+        .await;
+
+    let out = pakx()
+        .args([
+            "search",
+            "hello-world",
+            "--json",
+            "--mcp-base-url",
+            &official.uri(),
+            "--smithery-base-url",
+            &smithery.uri(),
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let arr: Value = serde_json::from_str(stdout.trim()).expect("search --json valid json");
+    let hits = arr.as_array().expect("search --json is an array");
+
+    let pakx_hit = hits
+        .iter()
+        .find(|h| h.get("source").and_then(Value::as_str) == Some("pakx"))
+        .unwrap_or_else(|| {
+            panic!("expected at least one pakx-registry hit in federated merge; got: {hits:?}")
+        });
+    assert_eq!(pakx_hit["id"], "arwenizEr/hello-world");
+    assert_eq!(
+        pakx_hit["version"], "0.1.1",
+        "pakx hit must surface the registry-supplied latestVersion (not the 0.0.0 fallback); \
+         got: {pakx_hit}"
+    );
+
+    let smithery_hit = hits
+        .iter()
+        .find(|h| h.get("source").and_then(Value::as_str) == Some("smithery"))
+        .unwrap_or_else(|| {
+            panic!("expected at least one smithery hit in federated merge; got: {hits:?}")
+        });
+    assert_eq!(smithery_hit["id"], "kapilthakare-cyberpunk/hello-server");
+}

@@ -97,6 +97,67 @@ async fn search_forwards_query_param() {
     assert_eq!(results[0].id, "acme/foo");
 }
 
+/// Regression for the 2026-05 federated-search incident: against
+/// production, `pakx search hello-world --json` returned 10 Smithery
+/// hits and **zero** pakx-registry hits even though
+/// `arwenizEr/hello-world@0.1.1` was live. After the registry-side
+/// `latestVersion` subquery fix, the list endpoint now returns the
+/// shape pinned below — `id`, `kind`, `description`, `visibility`,
+/// `latestVersion` per package — and the CLI must surface the entry
+/// with the registry-supplied version (not the `"0.0.0"` fallback).
+///
+/// `visibility` is not a field the CLI decodes directly but rides
+/// through the `extra` flatten so additive backend fields don't break
+/// the decoder. Pinning the full prod shape here means future backend
+/// renames trip this test, not silently degrade the federated merge.
+#[tokio::test]
+async fn search_surfaces_prod_list_shape_with_latest_version() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages"))
+        .and(query_param("q", "hello-world"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [
+                {
+                    "id": "arwenizEr/hello-world",
+                    "kind": "skill",
+                    "description": "first published pakx skill",
+                    "visibility": "public",
+                    "latestVersion": "0.1.1"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let results = src.search("hello-world").await.unwrap();
+    assert_eq!(results.len(), 1, "list endpoint hit must surface");
+    let pkg = &results[0];
+    assert_eq!(pkg.id, "arwenizEr/hello-world");
+    assert_eq!(pkg.name, "arwenizEr/hello-world");
+    assert_eq!(pkg.source, RegistrySource::Pakx);
+    assert_eq!(
+        pkg.version, "0.1.1",
+        "must use registry latestVersion, not 0.0.0 fallback"
+    );
+    assert_eq!(
+        pkg.description.as_deref(),
+        Some("first published pakx skill")
+    );
+    // `kind` rides into install_hints alongside the flatten-captured
+    // `visibility` field.
+    assert_eq!(
+        pkg.install_hints.get("kind").and_then(|v| v.as_str()),
+        Some("skill")
+    );
+    assert_eq!(
+        pkg.install_hints.get("visibility").and_then(|v| v.as_str()),
+        Some("public")
+    );
+}
+
 #[tokio::test]
 async fn fetch_returns_detail_with_latest_version() {
     let server = MockServer::start().await;
