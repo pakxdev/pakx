@@ -25,6 +25,7 @@ use commands::list::{self as list_cmd, ListArgs};
 use commands::login::{self as login_cmd, LoginArgs};
 use commands::pack::{self as pack_cmd, PackArgs};
 use commands::publish::{self as publish_cmd, PublishArgs};
+use commands::remove::{self as remove_cmd, RemoveArgs};
 use commands::search::{self, SearchArgs};
 use commands::test::{self as test_cmd, TestArgs};
 use commands::unpublish::{self as unpublish_cmd, UnpublishArgs};
@@ -49,6 +50,8 @@ enum Command {
     Init(InitArgs),
     /// Add a dependency to `agents.yml`.
     Add(AddArgs),
+    /// Remove a dependency from `agents.yml`.
+    Remove(RemoveArgs),
     /// Install everything in `agents.yml` to detected agents.
     Install(InstallArgs),
     /// List pinned dependencies (reads `agents.lock`).
@@ -86,6 +89,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init(args) => init::run(args).await,
         Command::Add(args) => add::run(args).await,
+        Command::Remove(args) => remove_cmd::run(args).await,
         Command::Install(args) => install_cmd::run_cmd(args).await,
         Command::List(args) => list_cmd::run(args).await,
         Command::Doctor(args) => doctor::run(args).await,

@@ -11,6 +11,7 @@ pub mod list;
 pub mod login;
 pub mod pack;
 pub mod publish;
+pub mod remove;
 pub mod search;
 pub mod test;
 pub mod unpublish;

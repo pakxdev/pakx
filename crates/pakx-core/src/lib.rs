@@ -24,7 +24,8 @@ pub use lockfile::{
     Integrity, LockEntry, Lockfile, RegistrySource, LOCKFILE_VERSION, REGISTRY_SOURCES,
 };
 pub use manifest::{
-    add_dep, add_shorthand, parse_manifest, read_from as read_manifest_from, write_manifest,
-    write_to as write_manifest_to, AddOutcome, AgentId, DepSpec, Dependencies, GitSpec, Manifest,
-    PackageType, RegistrySpec, StringSpec, KNOWN_AGENT_IDS, PACKAGE_TYPES,
+    add_dep, add_shorthand, parse_manifest, read_from as read_manifest_from, remove_shorthand,
+    sections_containing, write_manifest, write_to as write_manifest_to, AddOutcome, AgentId,
+    DepSpec, Dependencies, GitSpec, Manifest, PackageType, RegistrySpec, RemoveOutcome, StringSpec,
+    KNOWN_AGENT_IDS, PACKAGE_TYPES,
 };
