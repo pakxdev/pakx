@@ -9,7 +9,8 @@ pub mod write;
 
 pub use io::{read_from, write_to};
 pub use mutate::{
-    add_dep, add_shorthand, remove_shorthand, sections_containing, AddOutcome, RemoveOutcome,
+    add_dep, add_shorthand, remove_shorthand, sections_containing, sections_containing_id,
+    split_shorthand, update_shorthand, AddOutcome, RemoveOutcome, UpdateOutcome,
 };
 pub use parse::parse_manifest;
 pub use schema::{

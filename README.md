@@ -23,6 +23,7 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx install` | Resolve every MCP dep via the federated registry, install into Claude Code's project-scoped `.mcp.json`, and write `agents.lock`. |
 | `pakx list` | Show pinned lockfile entries with `[ok]` / `[drift]` against on-disk reality. `--json` for pipelines. |
 | `pakx outdated` | Show lockfile entries whose source registry has a newer non-deprecated version. Exits non-zero when anything is outdated (CI-friendly). `--json` for pipelines; `--registry <tag>` filters to one source. |
+| `pakx update` (alias `pakx up`) | Rewrite `agents.yml` pins to the latest version surfaced by `pakx outdated`, then run `pakx install` to fetch + verify the new pin. No-args = interactive prompt per outdated dep; `pakx update <id>` updates one dep without prompting; `pakx update <id>@<version>` pins verbatim (downgrade-friendly, skips the registry round-trip). Flags: `--yes` accepts every prompt, `--dry-run` previews changes without writing, `--no-install` rewrites the manifest only. Distinct from `pakx upgrade` (which upgrades the CLI binary itself). |
 | `pakx doctor` | 5-section health check (manifest, lockfile, drift, adapter detection, on-disk vs lockfile). |
 | `pakx search <query>` | Federated search across all sources. `--json` for pipelines. |
 | `pakx test` | Validate `agents.yml` without installing — resolves every `mcp:` dep against the federated registries (official MCP Registry + Smithery + pakx-registry; toggle with `--no-smithery` / `--no-pakx-registry`) and exits non-zero on the first failure. Other dep kinds (`skills:` / `subagents:` / `prompts:` / `commands:` / `hooks:`) are reported as `skip` until per-kind resolvers land. `--offline` checks against the lockfile only. Intended for CI / pre-commit. |
@@ -32,7 +33,7 @@ It federates existing registries — the official MCP Registry, Smithery, and th
 | `pakx pack` | Build a deterministic gzipped tarball from a `SKILL.md` directory. |
 | `pakx publish` | `pack` → `POST` package → `PUT` tarball. `--dry-run` skips the upload. |
 | `pakx unpublish <owner>/<name>@<version>` | `DELETE` (with grace-period tombstoning on the server side). |
-| `pakx upgrade` (alias `pakx update`) | Check GitHub Releases for a newer pakx and print the channel-appropriate install command. |
+| `pakx upgrade` | Check GitHub Releases for a newer **pakx CLI** and print the channel-appropriate install command. (For upgrading **packages** in `agents.yml`, see `pakx update` above.) |
 | `pakx completion <shell>` | Emit shell-completion script for bash / zsh / fish / powershell / elvish. |
 | `pakx config` | Print resolved CLI configuration — credentials path, cache dir, federated registry URLs. `--json` for pipelines. |
 

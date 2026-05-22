@@ -27,8 +27,9 @@ pub use lockfile::{
 };
 pub use manifest::{
     add_dep, add_shorthand, parse_manifest, read_from as read_manifest_from, remove_shorthand,
-    sections_containing, validate_sponsors, write_manifest, write_to as write_manifest_to,
-    AddOutcome, AgentId, DepSpec, Dependencies, GitSpec, Manifest, PackageType, RegistrySpec,
-    RemoveOutcome, Sponsor, SponsorError, SponsorKind, StringSpec, KNOWN_AGENT_IDS, MAX_SPONSORS,
+    sections_containing, sections_containing_id, split_shorthand, update_shorthand,
+    validate_sponsors, write_manifest, write_to as write_manifest_to, AddOutcome, AgentId, DepSpec,
+    Dependencies, GitSpec, Manifest, PackageType, RegistrySpec, RemoveOutcome, Sponsor,
+    SponsorError, SponsorKind, StringSpec, UpdateOutcome, KNOWN_AGENT_IDS, MAX_SPONSORS,
     PACKAGE_TYPES,
 };

@@ -35,6 +35,7 @@ use commands::remove::{self as remove_cmd, RemoveArgs};
 use commands::search::{self, SearchArgs};
 use commands::test::{self as test_cmd, TestArgs};
 use commands::unpublish::{self as unpublish_cmd, UnpublishArgs};
+use commands::update::{self as update_cmd, UpdateArgs};
 use commands::upgrade::{self as upgrade_cmd, UpgradeArgs};
 use commands::whoami::{self as whoami_cmd, WhoamiArgs};
 
@@ -91,8 +92,14 @@ enum Command {
     Publish(PublishArgs),
     /// Soft-delete a published version.
     Unpublish(UnpublishArgs),
-    /// Check GitHub Releases for a newer pakx version.
-    #[command(alias = "update")]
+    /// Rewrite `agents.yml` pins to a newer version, then reinstall.
+    ///
+    /// Note: this is **package** update — for upgrading the `pakx`
+    /// CLI binary itself, see `pakx upgrade`.
+    #[command(alias = "up")]
+    Update(UpdateArgs),
+    /// Check GitHub Releases for a newer pakx version. (Upgrades the
+    /// CLI binary itself, not packages — see `pakx update` for that.)
     Upgrade(UpgradeArgs),
     /// Emit shell completion script for bash / zsh / fish / powershell / elvish.
     Completion(CompletionArgs),
@@ -122,8 +129,10 @@ async fn main() -> ExitCode {
 
 /// Subcommand dispatcher. Pulled out of `main` so error rendering +
 /// exit-code mapping live in one place. Most commands return `()` on
-/// success — `outdated` is the exception (it propagates a non-zero
-/// exit code when any dep has drifted, CI-friendly).
+/// success — `outdated` and `update` are the exceptions (the former
+/// propagates a non-zero exit code when any dep has drifted; the
+/// latter maps install failure to `1` and "could not determine
+/// target version" to `2`, both CI-friendly).
 async fn dispatch(cmd: Command) -> Result<ExitCode> {
     match cmd {
         Command::Init(args) => init::run(args).await.map(|()| ExitCode::SUCCESS),
@@ -141,6 +150,7 @@ async fn dispatch(cmd: Command) -> Result<ExitCode> {
         Command::Pack(args) => pack_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Publish(args) => publish_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Unpublish(args) => unpublish_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Update(args) => update_cmd::run(args).await,
         Command::Upgrade(args) => upgrade_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Completion(args) => completion_cmd::run::<Cli>(args)
             .await

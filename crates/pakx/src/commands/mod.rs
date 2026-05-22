@@ -16,5 +16,6 @@ pub mod remove;
 pub mod search;
 pub mod test;
 pub mod unpublish;
+pub mod update;
 pub mod upgrade;
 pub mod whoami;
