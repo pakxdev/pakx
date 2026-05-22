@@ -1,11 +1,12 @@
 # examples
 
-Starter templates for each pakx package kind. Copy a directory, rename
-it, and `pakx publish` from inside it.
+Starter templates for both sides of the pakx workflow: **publishing** a
+package to the registry, and **consuming** packages from a project.
 
-| Directory | Kind | What it shows |
+| Directory | Side | What it shows |
 |---|---|---|
-| [`hello-world`](./hello-world) | skill | The minimum manifest + body needed to publish a skill. |
+| [`hello-world`](./hello-world) | publish | Minimal publishable skill — copy, rename, `pakx publish`. |
+| [`agents-yml-starter`](./agents-yml-starter) | consume | A populated `agents.yml` — copy into a project root, then `pakx install`. |
 
-More to come as additional kinds (`mcp`, `subagent`, `prompt`, `command`,
-`hook`) land in the publish flow.
+More to come as additional package kinds (`mcp`, `subagent`, `prompt`,
+`command`, `hook`) land in the publish flow.
