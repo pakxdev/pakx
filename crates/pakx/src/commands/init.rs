@@ -9,6 +9,8 @@ use inquire::{Confirm, MultiSelect, Text};
 use pakx_core::manifest::{AgentId, KNOWN_AGENT_IDS};
 use pakx_core::{write_manifest, Dependencies, Manifest};
 
+use crate::ui;
+
 /// Default file name produced by `init`.
 pub const MANIFEST_FILENAME: &str = "agents.yml";
 
@@ -84,7 +86,14 @@ pub async fn run(args: InitArgs) -> Result<()> {
     tokio::fs::write(&target, serialized.as_bytes())
         .await
         .with_context(|| format!("write {}", target.display()))?;
-    eprintln!("wrote {}", target.display());
+    eprintln!(
+        "{} wrote {}",
+        ui::glyph_ok_err(),
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(MANIFEST_FILENAME)
+    );
     Ok(())
 }
 
@@ -97,11 +106,14 @@ fn handle_existing_file(target: &Path, force: bool, yes: bool) -> Result<()> {
     }
     if yes {
         // `--yes` without `--force` is the CI-safe default: never silently
-        // overwrite. Force explicit consent for destructive paths.
-        return Err(anyhow!(
-            "{} already exists; pass --force to overwrite",
-            target.display()
-        ));
+        // overwrite. Force explicit consent for destructive paths. Use
+        // the file name (not the full path) so CI logs / pasted output
+        // don't leak the host's temp / project directory.
+        let label = target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(MANIFEST_FILENAME);
+        return Err(anyhow!("{label} already exists; pass --force to overwrite"));
     }
     let proceed = Confirm::new(&format!("{} already exists. Overwrite?", target.display()))
         .with_default(false)

@@ -14,6 +14,7 @@ use pakx_core::{Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::{BackendError, CreatePackageRequest, PakxBackend};
 
 use crate::pack::pack_dir;
+use crate::ui;
 
 #[derive(Debug, Clone, Args)]
 pub struct PublishArgs {
@@ -51,20 +52,23 @@ pub async fn run(args: PublishArgs) -> Result<()> {
         .get(&args.registry)
         .ok_or_else(|| anyhow::anyhow!("not logged in to {} — run `pakx login`", args.registry))?;
 
+    let pb = ui::spinner("packing");
     let pack = pack_dir(&src, std::env::temp_dir().as_path())?;
+    pb.finish_and_clear();
     eprintln!(
-        "packed {}@{} ({} bytes)",
-        pack.manifest.name,
-        pack.manifest.version,
+        "{} packed {} ({} bytes)",
+        ui::glyph_ok_err(),
+        ui::success_err(&format!("{}@{}", pack.manifest.name, pack.manifest.version)),
         pack.bytes.len()
     );
 
     if args.dry_run {
-        eprintln!("dry-run: skipping upload");
+        eprintln!("{}", ui::dim_err("dry-run: skipping upload"));
         return Ok(());
     }
 
     let backend = PakxBackend::new(&args.registry);
+    let pb = ui::spinner("creating package row");
     let pkg = backend
         .create_package(
             &entry.token,
@@ -76,13 +80,16 @@ pub async fn run(args: PublishArgs) -> Result<()> {
         )
         .await
         .map_err(map_backend_err)?;
+    pb.finish_and_clear();
     eprintln!(
-        "{} {} on {}",
+        "{} {} {} on {}",
+        ui::glyph_ok_err(),
         if pkg.created { "created" } else { "reusing" },
         pkg.id,
         args.registry
     );
 
+    let pb = ui::spinner("uploading tarball");
     let upload = backend
         .upload_version(
             &entry.token,
@@ -93,12 +100,21 @@ pub async fn run(args: PublishArgs) -> Result<()> {
         )
         .await
         .map_err(map_backend_err)?;
+    pb.finish_and_clear();
     eprintln!(
-        "uploaded {} v{} ({} bytes, sha256 {})",
-        upload.id,
+        "{} uploaded {} v{} ({} bytes, sha256 {})",
+        ui::glyph_ok_err(),
+        ui::success_err(&upload.id),
         upload.version,
         upload.size_bytes,
         &upload.sha256[..16]
+    );
+    eprintln!(
+        "{}",
+        ui::success_err(&format!(
+            "published {}/{}@{}",
+            pkg.owner, pkg.name, upload.version
+        ))
     );
     Ok(())
 }

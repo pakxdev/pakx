@@ -47,6 +47,19 @@ flate2 = "1.0"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Terminal styling — NO_COLOR-aware ANSI codes; pulled in only for
+# human-readable output paths. JSON / --json never gets colored bytes.
+owo-colors = "4"
+# UTF-8 bordered tables for `pakx list` / `pakx search`. Chosen over
+# `tabled` because it streams (no full-table macro) and clamps to a
+# user-supplied width — handy for piping to narrow terminals.
+comfy-table = { version = "7", default-features = false }
+# Spinners + progress bars for long ops (install, publish upload).
+# Disabling default features keeps `regex` out; we only use the bar +
+# spinner APIs.
+indicatif = { version = "0.17", default-features = false }
+# Detect terminal width so tables can truncate sensibly.
+terminal_size = "0.4"
 # Validation
 regex = "1.11"
 # URL parsing — used to vet test-only registry base URL overrides

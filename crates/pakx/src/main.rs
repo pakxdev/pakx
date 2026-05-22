@@ -10,6 +10,7 @@ mod install;
 mod pack;
 mod registry_url;
 mod resolve;
+mod ui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

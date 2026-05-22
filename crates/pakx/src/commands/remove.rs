@@ -18,6 +18,8 @@ use pakx_core::manifest::{
     RemoveOutcome,
 };
 
+use crate::ui;
+
 const MANIFEST_FILENAME: &str = "agents.yml";
 
 /// CLI-facing copy of [`PackageType`] so clap can derive `ValueEnum`
@@ -104,8 +106,16 @@ pub async fn run(args: RemoveArgs) -> Result<()> {
 
     write_to(&target, &manifest).with_context(|| format!("write {}", target.display()))?;
 
-    println!("removed {} ({})", args.id, kind.as_str());
-    eprintln!("run `pakx install` to reconcile installed agents");
+    println!(
+        "{} removed {} ({})",
+        ui::glyph_ok(),
+        ui::success(&args.id),
+        kind.as_str(),
+    );
+    eprintln!(
+        "{}",
+        ui::dim_err("       run `pakx install` to reconcile installed agents")
+    );
     Ok(())
 }
 

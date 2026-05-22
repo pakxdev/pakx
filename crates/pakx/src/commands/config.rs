@@ -10,6 +10,8 @@ use clap::Args;
 use pakx_core::Credentials;
 use pakx_registry_client::{CacheDir, OFFICIAL_MCP_BASE_URL, PAKX_BASE_URL, SMITHERY_BASE_URL};
 
+use crate::ui;
+
 #[derive(Debug, Clone, Args)]
 pub struct ConfigArgs {
     /// Print JSON instead of the human-readable table.
@@ -48,19 +50,20 @@ pub async fn run(args: ConfigArgs) -> Result<()> {
     }
 
     println!(
-        "pakx {} ({} / {})",
+        "{} {} ({} / {})",
+        ui::heading("pakx"),
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH
     );
     println!();
-    println!("paths:");
-    println!("  credentials: {credentials_path}");
-    println!("  cache:       {cache_dir}");
+    println!("{}", ui::heading("paths:"));
+    println!("  credentials: {}", ui::dim(&credentials_path));
+    println!("  cache:       {}", ui::dim(&cache_dir));
     println!();
-    println!("registries:");
-    println!("  official-mcp: {OFFICIAL_MCP_BASE_URL}");
-    println!("  smithery:     {SMITHERY_BASE_URL}");
-    println!("  pakx:         {PAKX_BASE_URL}");
+    println!("{}", ui::heading("registries:"));
+    println!("  official-mcp: {}", ui::dim(OFFICIAL_MCP_BASE_URL));
+    println!("  smithery:     {}", ui::dim(SMITHERY_BASE_URL));
+    println!("  pakx:         {}", ui::dim(PAKX_BASE_URL));
     Ok(())
 }

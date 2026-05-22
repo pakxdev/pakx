@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::pack::pack_dir;
+use crate::ui;
 
 #[derive(Debug, Clone, Args)]
 pub struct PackArgs {
@@ -23,9 +24,12 @@ pub async fn run(args: PackArgs) -> Result<()> {
     let out_dir = args.out.unwrap_or_else(|| PathBuf::from("."));
     let result = pack_dir(&src, &out_dir)?;
     eprintln!(
-        "packed {}@{} → {} ({} bytes)",
-        result.manifest.name,
-        result.manifest.version,
+        "{} packed {} -> {} ({} bytes)",
+        ui::glyph_ok_err(),
+        ui::success_err(&format!(
+            "{}@{}",
+            result.manifest.name, result.manifest.version
+        )),
         result.tarball_path.display(),
         result.bytes.len(),
     );

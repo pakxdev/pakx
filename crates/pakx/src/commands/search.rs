@@ -6,12 +6,15 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
+use comfy_table::Cell;
 use pakx_registry_client::{
     CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use reqwest::Client;
 use serde::Serialize;
+
+use crate::ui;
 
 #[derive(Debug, Clone, Args)]
 pub struct SearchArgs {
@@ -100,18 +103,31 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         return Ok(());
     }
 
+    let mut table = ui::table();
+    table.set_header(vec![
+        Cell::new("source"),
+        Cell::new("name"),
+        Cell::new("version"),
+        Cell::new("description"),
+    ]);
     for pkg in &truncated {
         let desc = pkg.description.as_deref().unwrap_or("");
-        println!(
-            "{source:14} {name:50} {version:10}  {desc}",
-            source = pkg.source.as_tag(),
-            name = truncate(&pkg.name, 50),
-            version = pkg.version,
-            desc = truncate(desc, 60),
-        );
+        table.add_row(vec![
+            Cell::new(pkg.source.as_tag()),
+            Cell::new(truncate(&pkg.name, 50)),
+            Cell::new(pkg.version.as_str()),
+            Cell::new(truncate(desc, 60)),
+        ]);
     }
+    println!("{table}");
     if results.len() > args.limit {
-        eprintln!("... {} more (raise -n to show)", results.len() - args.limit);
+        eprintln!(
+            "{}",
+            ui::dim_err(&format!(
+                "... {} more (raise -n to show)",
+                results.len() - args.limit
+            ))
+        );
     }
     Ok(())
 }

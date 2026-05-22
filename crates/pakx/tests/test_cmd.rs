@@ -53,7 +53,11 @@ fn test_offline_requires_lockfile_entry_for_each_mcp_dep() {
         .args(["test", "--offline"])
         .assert()
         .failure()
-        .stdout(predicate::str::contains("fail: mcp/io.github.acme/cool"));
+        // status glyph + id; loosened from the legacy "fail: mcp/..."
+        // prefix once `pakx test` switched to the project-wide
+        // `[ok] / [fail]` glyphs.
+        .stdout(predicate::str::contains("mcp/io.github.acme/cool"))
+        .stdout(predicate::str::contains("[fail]"));
 }
 
 #[test]
@@ -86,7 +90,8 @@ fn test_offline_passes_with_matching_lockfile_entry() {
         .args(["test", "--offline"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ok    mcp/io.github.acme/cool"))
+        .stdout(predicate::str::contains("[ok]"))
+        .stdout(predicate::str::contains("mcp/io.github.acme/cool"))
         .stdout(predicate::str::contains("all entries ok"));
 }
 
@@ -144,7 +149,8 @@ async fn test_online_resolves_against_registry() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ok    mcp/io.github.acme/cool"));
+        .stdout(predicate::str::contains("[ok]"))
+        .stdout(predicate::str::contains("mcp/io.github.acme/cool"));
 }
 
 #[tokio::test]
@@ -172,8 +178,9 @@ async fn test_online_fails_on_unknown_dep() {
         ])
         .assert()
         .failure()
+        .stdout(predicate::str::contains("[fail]"))
         .stdout(predicate::str::contains(
-            "fail: mcp/io.github.acme/ghost not found",
+            "mcp/io.github.acme/ghost not found",
         ));
 }
 
@@ -224,7 +231,8 @@ async fn test_online_falls_back_to_pakx_registry() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ok    mcp/alice/cool"))
+        .stdout(predicate::str::contains("[ok]"))
+        .stdout(predicate::str::contains("mcp/alice/cool"))
         // The status line must surface which source resolved the dep
         // so users see federated resolution actually happened.
         .stdout(predicate::str::contains("pakx:"));
@@ -264,7 +272,8 @@ async fn test_online_with_no_pakx_registry_does_not_fall_back() {
         ])
         .assert()
         .failure()
-        .stdout(predicate::str::contains("fail: mcp/alice/cool"));
+        .stdout(predicate::str::contains("[fail]"))
+        .stdout(predicate::str::contains("mcp/alice/cool"));
 }
 
 #[test]

@@ -12,6 +12,8 @@ use clap::Args;
 use pakx_core::{CredentialEntry, Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::{BackendError, PakxBackend};
 
+use crate::ui;
+
 #[derive(Debug, Clone, Args)]
 pub struct LoginArgs {
     /// Registry to log in to. Defaults to <https://registry.pakx.dev>.
@@ -37,12 +39,15 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     }
 
     let backend = PakxBackend::new(&args.registry);
+    let pb = ui::spinner(format!("verifying token against {}", args.registry));
     let me = backend.whoami(&token).await.map_err(|e| match e {
         BackendError::Unauthorized => {
             anyhow::anyhow!("registry rejected the token (401) — generate a fresh one")
         }
         other => anyhow::anyhow!(other),
-    })?;
+    });
+    pb.finish_and_clear();
+    let me = me?;
 
     let path = match args.credentials_file {
         Some(p) => p,
@@ -60,9 +65,10 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     creds.write_to(&path).context("write credentials")?;
 
     eprintln!(
-        "logged in to {} as {} (creds saved to {})",
+        "{} logged in to {} as {} (creds saved to {})",
+        ui::glyph_ok_err(),
         args.registry,
-        me.login,
+        ui::success_err(&me.login),
         path.display()
     );
     Ok(())

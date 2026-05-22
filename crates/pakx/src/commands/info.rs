@@ -3,8 +3,11 @@
 
 use anyhow::{anyhow, Result};
 use clap::Args;
+use comfy_table::{Cell, CellAlignment};
 use reqwest::Client;
 use serde::Deserialize;
+
+use crate::ui;
 
 const DEFAULT_REGISTRY: &str = "https://registry.pakx.dev";
 const USER_AGENT: &str = concat!("pakx/", env!("CARGO_PKG_VERSION"));
@@ -51,17 +54,27 @@ pub async fn run(args: InfoArgs) -> Result<()> {
         owner,
         name,
     );
+    // Wrap the network call in `with_context` so a connection refused
+    // / DNS failure shows the registry URL the user gave us, not the
+    // full reqwest error chain (which leaks the userinfo-stripped URL
+    // and a 3-level cause stack that confuses adopters).
     let response = Client::new()
         .get(&url)
         .header("user-agent", USER_AGENT)
         .header("accept", "application/json")
         .send()
-        .await?;
+        .await
+        .map_err(|e| anyhow!("could not reach {}: {e}", args.registry))?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(anyhow!("{}/{} not found on {}", owner, name, args.registry));
     }
-    let response = response.error_for_status()?;
-    let detail: PackageDetail = response.json().await?;
+    let response = response
+        .error_for_status()
+        .map_err(|e| anyhow!("registry returned an error: {e}"))?;
+    let detail: PackageDetail = response
+        .json()
+        .await
+        .map_err(|e| anyhow!("registry response was not valid JSON: {e}"))?;
 
     if args.json {
         let raw = serde_json::to_string_pretty(&serde_json::json!({
@@ -81,25 +94,29 @@ pub async fn run(args: InfoArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", detail.id);
+    println!("{}", ui::heading(&detail.id));
     if let Some(k) = &detail.kind {
-        println!("  kind:        {k}");
+        println!("  {} {}", ui::dim("kind:       "), k);
     }
     if let Some(d) = &detail.description {
-        println!("  description: {d}");
+        println!("  {} {}", ui::dim("description:"), d);
     }
     if let Some(c) = &detail.created_at {
-        println!("  created:     {c}");
+        println!("  {} {}", ui::dim("created:    "), c);
     }
-    println!("  registry:    {}", args.registry);
+    println!("  {} {}", ui::dim("registry:   "), args.registry);
     println!();
     if detail.versions.is_empty() {
-        println!("  no versions published yet.");
+        println!("  {}", ui::dim("no versions published yet."));
     } else {
-        println!(
-            "  {:<24} {:<12} {:<14} status",
-            "version", "size", "published",
-        );
+        println!("{}", ui::heading("versions:"));
+        let mut table = ui::table();
+        table.set_header(vec![
+            Cell::new("version").set_alignment(CellAlignment::Right),
+            Cell::new("size").set_alignment(CellAlignment::Right),
+            Cell::new("published"),
+            Cell::new("status"),
+        ]);
         for v in &detail.versions {
             let size = v.size_bytes.map_or_else(|| "-".to_string(), human_bytes);
             let published = v.published_at.as_deref().unwrap_or("-");
@@ -108,11 +125,14 @@ pub async fn run(args: InfoArgs) -> Result<()> {
             } else {
                 "active"
             };
-            println!(
-                "  {:<24} {:<12} {:<14} {}",
-                v.version, size, published, status
-            );
+            table.add_row(vec![
+                Cell::new(v.version.as_str()).set_alignment(CellAlignment::Right),
+                Cell::new(size).set_alignment(CellAlignment::Right),
+                Cell::new(published),
+                Cell::new(status),
+            ]);
         }
+        println!("{table}");
     }
     Ok(())
 }

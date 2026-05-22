@@ -17,11 +17,14 @@ use pakx_core::{
     compute_integrity, read_lockfile_from, read_manifest_from, Lockfile, Manifest, SkillFile,
 };
 
+use crate::ui;
+
 const MANIFEST_FILENAME: &str = "agents.yml";
 const LOCKFILE_FILENAME: &str = "agents.lock";
 
 #[derive(Debug, Clone, Args)]
 pub struct DoctorArgs {
+    /// Operate on a project at a path other than the cwd.
     #[arg(short = 'C', long = "directory")]
     pub directory: Option<PathBuf>,
 
@@ -36,18 +39,27 @@ struct Tally {
 }
 
 impl Tally {
+    // Glyphs are padded to a uniform visible width of 6 + 2 trailing
+    // spaces, so messages line up regardless of glyph length once the
+    // ANSI escapes round-trip through a terminal.
+    //
+    //   [ok]   = 4 chars + 2 pad = 6, then 2 spaces => 8 visible
+    //   [drift]= 7 chars + 0 pad           (overflows, but rare)
+    //   [fail] = 6 chars + 0 pad
+    //   [warn] = 6 chars + 0 pad
+    //   ----   = 4 chars + 2 pad = 6, then 2 spaces => 8 visible
     fn ok(msg: &str) {
-        println!("  ok    {msg}");
+        println!("  {}    {msg}", ui::glyph_ok());
     }
     fn info(msg: &str) {
-        println!("  ----  {msg}");
+        println!("  {}    {msg}", ui::glyph_info());
     }
     fn warn(&mut self, msg: &str) {
-        println!("  warn  {msg}");
+        println!("  {}  {msg}", ui::glyph_warn());
         self.problems += 1;
     }
     fn fail(&mut self, msg: &str) {
-        println!("  fail  {msg}");
+        println!("  {}  {msg}", ui::glyph_fail());
         self.problems += 1;
     }
 }
@@ -58,11 +70,12 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
         None => std::env::current_dir().context("cannot read cwd")?,
     };
     println!(
-        "pakx:    {} ({})",
+        "{} {} ({})",
+        ui::heading("pakx:"),
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
     );
-    println!("project: {}", project_root.display());
+    println!("{} {}", ui::heading("project:"), project_root.display());
 
     let mut t = Tally::default();
     let manifest = check_manifest(&project_root, &mut t);
@@ -75,7 +88,7 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
     check_on_disk(lock.as_ref(), &claude, &mut t).await;
 
     if t.problems == 0 {
-        println!("\nall checks passed");
+        println!("\n{}", ui::heading("all checks passed"));
         Ok(())
     } else {
         anyhow::bail!("{} issue(s) found", t.problems)

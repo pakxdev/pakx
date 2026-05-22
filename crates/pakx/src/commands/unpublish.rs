@@ -7,11 +7,14 @@ use clap::Args;
 use pakx_core::{Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::PakxBackend;
 
+use crate::ui;
+
 #[derive(Debug, Clone, Args)]
 pub struct UnpublishArgs {
     /// Spec `<owner>/<name>@<version>`.
     pub spec: String,
 
+    /// Override the pakx-registry base URL. Defaults to <https://registry.pakx.dev>.
     #[arg(short = 'r', long = "registry", default_value = DEFAULT_REGISTRY_URL)]
     pub registry: String,
 
@@ -34,7 +37,11 @@ pub async fn run(args: UnpublishArgs) -> Result<()> {
     backend
         .unpublish(&entry.token, owner, name, version)
         .await?;
-    eprintln!("unpublished {owner}/{name}@{version}");
+    eprintln!(
+        "{} {}",
+        ui::glyph_ok_err(),
+        ui::success_err(&format!("unpublished {owner}/{name}@{version}"))
+    );
     Ok(())
 }
 
