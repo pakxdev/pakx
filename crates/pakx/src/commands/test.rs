@@ -18,6 +18,7 @@ use pakx_registry_client::{
 use reqwest::Client;
 use tempfile::TempDir;
 
+use crate::redact::redact_path;
 use crate::registry_url::validate_base_url;
 use crate::resolve::{resolve_federated, Resolved};
 use crate::ui;
@@ -82,8 +83,12 @@ pub async fn run(args: TestArgs) -> Result<()> {
     };
     let manifest_path = resolve_manifest_path(&project_root, args.manifest.as_deref());
 
-    let manifest = read_manifest_from(&manifest_path)
-        .with_context(|| format!("read manifest at {}", manifest_path.display()))?;
+    let manifest = read_manifest_from(&manifest_path).with_context(|| {
+        format!(
+            "read manifest at {}",
+            redact_path(&manifest_path, &project_root)
+        )
+    })?;
     let manifest_label = display_manifest_path(&project_root, &manifest_path);
     println!(
         "{} manifest {} parsed (name={}, version={})",
@@ -100,8 +105,12 @@ pub async fn run(args: TestArgs) -> Result<()> {
         // must not abort on a malformed or absent lockfile — the registry
         // is the source of truth there.
         let lockfile_path = project_root.join(LOCKFILE_FILENAME);
-        let lockfile = read_lockfile_from(&lockfile_path)
-            .with_context(|| format!("read lockfile {}", lockfile_path.display()))?;
+        let lockfile = read_lockfile_from(&lockfile_path).with_context(|| {
+            format!(
+                "read lockfile {}",
+                redact_path(&lockfile_path, &project_root)
+            )
+        })?;
         check_offline(&manifest, lockfile.as_ref(), &mut failures);
     } else {
         let mcp_base_url = match args.mcp_base_url.as_deref() {

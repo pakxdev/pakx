@@ -311,6 +311,41 @@ fn test_exits_non_zero_on_unknown_manifest_field() {
         .stderr(predicate::str::contains("read manifest"));
 }
 
+/// CI logs surface every command's stderr. Embedding the host-absolute
+/// path to `agents.yml` leaks the runner workspace (and on self-hosted
+/// runners, the operator's username). Pin the relative form: when the
+/// manifest lives under the project root, the error must NOT contain
+/// the project root's absolute prefix.
+#[test]
+fn test_error_messages_do_not_leak_absolute_paths() {
+    let project = TempDir::new().unwrap();
+    // Project root is the tempdir's absolute path; the missing
+    // manifest sits directly under it. The error currently follows
+    // the `read manifest at <path>` template — verify the rendered
+    // path is the *file name*, not the tempdir's absolute form.
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).unwrap();
+    let abs = project.path().display().to_string();
+    assert!(
+        !stderr.contains(&abs),
+        "stderr leaked the absolute project root path {abs:?}: {stderr}",
+    );
+    // Sanity: the redacted form (`agents.yml`) is still present so
+    // the error is actionable.
+    assert!(
+        stderr.contains("agents.yml"),
+        "stderr must still mention `agents.yml`: {stderr}",
+    );
+}
+
 /// `--no-smithery --smithery-base-url …` is a contradiction (opting
 /// out of a source while supplying a URL for it). Clap must reject the
 /// combination outright. Mirrors the same guard on `pakx install`.

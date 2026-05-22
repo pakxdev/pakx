@@ -17,6 +17,7 @@ use pakx_registry_client::{CacheDir, OfficialMcpSource, RegistryClient, Registry
 use reqwest::Client;
 use tracing::{debug, warn};
 
+use crate::redact::{project_root_for, redact_path};
 use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
@@ -195,7 +196,9 @@ pub async fn run(args: AddArgs) -> Result<()> {
         AddOutcome::Added => {}
     }
 
-    write_to(&target, &manifest).with_context(|| format!("write {}", target.display()))?;
+    let project_root = project_root_for(&target);
+    write_to(&target, &manifest)
+        .with_context(|| format!("write {}", redact_path(&target, &project_root)))?;
 
     eprintln!(
         "{} added {} ({})",

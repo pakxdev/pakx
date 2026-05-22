@@ -29,6 +29,7 @@ use tracing::{debug, warn};
 
 use super::mcp_translate::{translate, TranslateError};
 use super::skill::{install_skill_from_pakx, parse_skill_shorthand, ResolvedSkill};
+use crate::redact::redact_path;
 use crate::registry_url::validate_base_url;
 use crate::resolve::{resolve_federated, Resolved};
 
@@ -69,8 +70,12 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         None => std::env::current_dir().context("cannot read cwd")?,
     };
     let manifest_path = project_root.join(MANIFEST_FILENAME);
-    let manifest = read_manifest_from(&manifest_path)
-        .with_context(|| format!("read manifest at {}", manifest_path.display()))?;
+    let manifest = read_manifest_from(&manifest_path).with_context(|| {
+        format!(
+            "read manifest at {}",
+            redact_path(&manifest_path, &project_root)
+        )
+    })?;
 
     let client = build_registry_client(
         opts.mcp_base_url.as_deref(),
@@ -159,8 +164,12 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
             entries,
         };
         let body = write_lockfile(&lock);
-        std::fs::write(&lockfile_path, body)
-            .with_context(|| format!("write lockfile {}", lockfile_path.display()))?;
+        std::fs::write(&lockfile_path, body).with_context(|| {
+            format!(
+                "write lockfile {}",
+                redact_path(&lockfile_path, &project_root)
+            )
+        })?;
         report.lockfile_path = Some(lockfile_path);
     }
 

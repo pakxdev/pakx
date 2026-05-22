@@ -107,6 +107,24 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **Action subcommands no longer leak absolute host paths into error
+  messages.** Every CI log embedding a `pakx test` / `pakx install` /
+  `pakx add` / `pakx remove` / `pakx init` / `pakx pack` / `pakx
+  publish` error previously contained the runner workspace path
+  (e.g. `C:\Users\runneradmin\AppData\Local\Temp\…` or
+  `/home/runner/work/<org>/<repo>/…`) verbatim. On self-hosted
+  runners this also leaks the operator's username. Error messages
+  now render paths relative to the project root when the target lives
+  underneath it, and fall back to the basename when it doesn't.
+  Implemented in a shared `pakx::redact::redact_path` helper used by
+  every action subcommand's `with_context` call sites, plus a
+  matching redact step on `pakx-core`'s `ManifestError` /
+  `LockfileError` / `Credentials` Display impls so the underlying
+  cause chain stays redacted too. The post-action hint lines
+  (`→ lockfile: <abs path>`) are intentionally **not** redacted —
+  they go to stdout for user value, and the user's next action
+  (`git add`) needs the absolute form.
+
 - **`pakx pack` now accepts CRLF-encoded SKILL.md frontmatter.**
   Notepad and VSCode-on-Windows (default LF→CRLF auto-fix) save
   `SKILL.md` with `\r\n` line endings. The fence scanner previously

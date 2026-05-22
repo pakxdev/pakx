@@ -216,6 +216,25 @@ fn tmp_path_for(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Render the optional `path` annotation in `CredentialsError`'s
+/// `Display`. Mirrors the redaction logic in `errors::fmt_path`: a CI
+/// log embedding the host-absolute credentials path leaks the runner
+/// workspace (and on self-hosted runners the operator's username), so
+/// we render the path relative to cwd when possible, otherwise the
+/// basename. The full absolute path remains available programmatically
+/// via the variant's `path` field.
 fn fmt_path(p: Option<&PathBuf>) -> String {
-    p.map_or_else(String::new, |path| format!(" at {}", path.display()))
+    p.map_or_else(String::new, |path| format!(" at {}", redact(path)))
+}
+
+fn redact(path: &std::path::Path) -> String {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(rel) = path.strip_prefix(&cwd) {
+            return rel.to_string_lossy().replace('\\', "/");
+        }
+    }
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }

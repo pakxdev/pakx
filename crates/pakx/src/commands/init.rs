@@ -9,6 +9,7 @@ use inquire::{Confirm, MultiSelect, Text};
 use pakx_core::manifest::{AgentId, KNOWN_AGENT_IDS};
 use pakx_core::{write_manifest, Dependencies, Manifest};
 
+use crate::redact::{project_root_for, redact_path};
 use crate::ui;
 
 /// Default file name produced by `init`.
@@ -83,9 +84,10 @@ pub async fn run(args: InitArgs) -> Result<()> {
         }
     }
 
+    let project_root = project_root_for(&target);
     tokio::fs::write(&target, serialized.as_bytes())
         .await
-        .with_context(|| format!("write {}", target.display()))?;
+        .with_context(|| format!("write {}", redact_path(&target, &project_root)))?;
     eprintln!(
         "{} wrote {}",
         ui::glyph_ok_err(),

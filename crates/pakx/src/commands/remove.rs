@@ -18,6 +18,7 @@ use pakx_core::manifest::{
     RemoveOutcome,
 };
 
+use crate::redact::{project_root_for, redact_path};
 use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
@@ -79,8 +80,13 @@ pub struct RemoveArgs {
 #[allow(clippy::unused_async)] // matches every other `commands::*::run` signature
 pub async fn run(args: RemoveArgs) -> Result<()> {
     let target = resolve_manifest_path(args.directory.as_deref(), args.manifest.as_deref())?;
-    let mut manifest = read_from(&target)
-        .map_err(|e| anyhow!(e).context(format!("read manifest at {}", target.display())))?;
+    let project_root = project_root_for(&target);
+    let mut manifest = read_from(&target).map_err(|e| {
+        anyhow!(e).context(format!(
+            "read manifest at {}",
+            redact_path(&target, &project_root)
+        ))
+    })?;
 
     let kind = pick_kind(&manifest, &args.id, args.kind.map(RemoveKind::to_core))?;
 
@@ -104,7 +110,8 @@ pub async fn run(args: RemoveArgs) -> Result<()> {
         }
     }
 
-    write_to(&target, &manifest).with_context(|| format!("write {}", target.display()))?;
+    write_to(&target, &manifest)
+        .with_context(|| format!("write {}", redact_path(&target, &project_root)))?;
 
     println!(
         "{} removed {} ({})",
