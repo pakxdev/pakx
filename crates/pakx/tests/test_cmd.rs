@@ -311,6 +311,50 @@ fn test_exits_non_zero_on_unknown_manifest_field() {
         .stderr(predicate::str::contains("read manifest"));
 }
 
+/// `--no-smithery --smithery-base-url …` is a contradiction (opting
+/// out of a source while supplying a URL for it). Clap must reject the
+/// combination outright. Mirrors the same guard on `pakx install`.
+#[test]
+fn test_rejects_no_smithery_combined_with_smithery_base_url() {
+    let project = TempDir::new().unwrap();
+    write_manifest(project.path(), "name: example\nversion: 0.1.0\n");
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "test",
+            "--no-smithery",
+            "--smithery-base-url",
+            "https://example.com",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--no-smithery"))
+        .stderr(predicate::str::contains("--smithery-base-url"))
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+/// Same guard for the pakx-registry pair.
+#[test]
+fn test_rejects_no_pakx_registry_combined_with_pakx_base_url() {
+    let project = TempDir::new().unwrap();
+    write_manifest(project.path(), "name: example\nversion: 0.1.0\n");
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "test",
+            "--no-pakx-registry",
+            "--pakx-base-url",
+            "https://example.com",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--no-pakx-registry"))
+        .stderr(predicate::str::contains("--pakx-base-url"))
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
 #[test]
 fn test_does_not_write_lockfile() {
     let project = TempDir::new().unwrap();

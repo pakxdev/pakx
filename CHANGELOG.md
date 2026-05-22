@@ -93,6 +93,14 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **`pakx test` now rejects `--no-smithery --smithery-base-url …` and
+  `--no-pakx-registry --pakx-base-url …` combinations** with a clap
+  conflict error. The previous round wired the `conflicts_with` guard
+  on `pakx install` only — `pakx test` had the same flag pair but no
+  guard, so the override URL was silently dropped when the matching
+  `--no-*` flag was also passed. The two surfaces are now in
+  lockstep.
+
 - **`pakx install` against a published skill no longer fails with
   `registry response for <id>@<version> omits tarballUrl`.** The PR #36
   resolver wired the install step to `GET /api/v1/packages/{owner}/{name}`

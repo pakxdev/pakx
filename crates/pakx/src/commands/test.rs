@@ -49,12 +49,21 @@ pub struct TestArgs {
 
     /// Override the Smithery registry base URL (testing). Same scheme
     /// restrictions as `--mcp-base-url`.
-    #[arg(long, hide = true)]
+    ///
+    /// Mutually exclusive with `--no-smithery`: opting out of a source
+    /// while supplying a base URL for it is a contradiction. Clap
+    /// errors on the contradiction so the user sees the mistake
+    /// instead of silently dropping the override. Mirrors the same
+    /// guard on `pakx install`.
+    #[arg(long, hide = true, conflicts_with = "no_smithery")]
     pub smithery_base_url: Option<String>,
 
     /// Override the pakx-registry base URL (testing). Same scheme
     /// restrictions as `--mcp-base-url`.
-    #[arg(long, hide = true)]
+    ///
+    /// Mutually exclusive with `--no-pakx-registry` for the same
+    /// reason as `--smithery-base-url` / `--no-smithery`.
+    #[arg(long, hide = true, conflicts_with = "no_pakx_registry")]
     pub pakx_base_url: Option<String>,
 
     /// Skip Smithery resolution even if a base URL is configured.
