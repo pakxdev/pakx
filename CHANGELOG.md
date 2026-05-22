@@ -98,6 +98,44 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **`pakx install` now resolves, downloads, verifies, and extracts
+  `skills:` dependencies through pakx-registry.** Previously the
+  install loop only handled `mcp:` deps; skills were silently
+  classified as `not yet supported`, leaving every published skill
+  uninstallable (no consumer flow existed for the first published
+  package, `arwenizEr/hello-world@0.1.1`). The new path:
+  - Resolves the manifest shorthand `<owner>/<name>[@<version>]`
+    against `GET /api/v1/packages/{owner}/{name}` on pakx-registry.
+    Pinned versions are honoured; unpinned deps fall back to the
+    API's `latestVersion` hint, and when that returns `null` (the
+    current behaviour per pakx-publish-smoke notes) to the highest
+    non-deprecated semver in `versions[]`.
+  - Streams the signed `tarballUrl` to a `tempfile::NamedTempFile`
+    with a 50 MiB hard cap; abort + cleanup on overflow.
+  - Sha256-verifies the downloaded bytes against the API-declared
+    `sha256` before any extraction step. Mismatch errors with
+    `integrity mismatch for <owner>/<name>: expected …, got …` and
+    deletes the staging file.
+  - Untars (over gzip) into `<claude-home>/skills/<owner>-<name>/`
+    (matches Claude Code's organic skills layout). Four
+    defense-in-depth guards fire on every entry: refuses absolute
+    paths, refuses `..` components (zip-slip), refuses symlinks and
+    hardlinks (defense in depth — `pakx pack` already refuses
+    symlinks server-side), and caps the **decompressed** total at
+    50 MiB to defeat a zip-bomb hiding behind cheap-to-stream
+    compression.
+  - Writes an `agents.lock` entry with `registry: "pakx"`,
+    `integrity: "sha256-<base64>"`, and `resolved_from` set to the
+    **canonical** pakx-registry URL (signed `?download=…` query
+    stripped — the signature is ephemeral, the canonical path is
+    the stable record).
+  - When `--no-pakx-registry` is passed, skill installs fail
+    cleanly with a "skill installs require pakx-registry; refused"
+    message rather than silently dropping the dep.
+  - Other adapters (cursor / codex / copilot / windsurf) do not
+    yet implement skills extraction; the Claude Code path runs
+    whenever a Claude home is configured (override or default),
+    which is always the case under the current runner.
 - `pakx remove <id>` — inverse of `pakx add`. Strips a single shorthand
   dep from `agents.yml` after a `[y/N]` confirmation (skip with `--yes`).
   Kind is inferred when the id is unambiguous; supplying `--kind

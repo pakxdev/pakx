@@ -3,5 +3,6 @@
 
 pub mod mcp_translate;
 pub mod runner;
+pub mod skill;
 
 pub use runner::{run, InstallOpts};

@@ -28,6 +28,7 @@ use reqwest::Client;
 use tracing::{debug, warn};
 
 use super::mcp_translate::{translate, TranslateError};
+use super::skill::{install_skill_from_pakx, parse_skill_shorthand, ResolvedSkill};
 use crate::registry_url::validate_base_url;
 use crate::resolve::{resolve_federated, Resolved};
 
@@ -79,6 +80,23 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         opts.no_pakx_registry,
     )?;
 
+    // Standalone PakxSource for skill installs. Skills resolve directly
+    // through pakx-registry (not the federated MCP fallback dance) so
+    // we hold a dedicated handle even when the federated client also
+    // owns one. Cheap — both share the inner reqwest connection pool
+    // via clone().
+    let pakx_source_with_url = if opts.no_pakx_registry {
+        None
+    } else {
+        let url = opts
+            .pakx_base_url
+            .clone()
+            .unwrap_or_else(|| PAKX_BASE_URL.to_owned());
+        let cache_root = std::env::temp_dir().join("pakx-install-cache");
+        let src = PakxSource::with_parts(Client::new(), &url, CacheDir::with_root(&cache_root));
+        Some((src, url))
+    };
+
     let claude = build_claude_adapter(&opts, &project_root);
 
     let mut report = InstallReport::default();
@@ -90,8 +108,40 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         }
     }
 
-    // Skills, subagents, prompts, commands, hooks — not yet wired into
-    // the resolver. Surface as "skipped" so users see they were noticed.
+    // Skills — wired through pakx-registry. Each dep gets fetched,
+    // sha256-verified, and extracted into the Claude Code skills tree.
+    // If `--no-pakx-registry` was passed, we can't resolve at all,
+    // so every skill dep is reported as a hard failure (matching the
+    // MCP path: opting out of the only source that knows the dep is
+    // a contradiction).
+    if let Some(deps) = &manifest.dependencies.skills {
+        if let Some((source, base_url)) = pakx_source_with_url.as_ref() {
+            let http = Client::new();
+            for dep in deps {
+                install_skill_dep(
+                    dep,
+                    source,
+                    &http,
+                    base_url,
+                    &claude,
+                    &mut report,
+                    &mut entries,
+                )
+                .await;
+            }
+        } else {
+            for dep in deps {
+                let label = format!("skills/{}", dep.display_hint());
+                report.failed.push((
+                    label,
+                    "skill installs require pakx-registry; --no-pakx-registry refused".into(),
+                ));
+            }
+        }
+    }
+
+    // Subagents / prompts / commands / hooks — not yet wired. Surface
+    // as "skipped" so users see they were noticed.
     for (kind, deps) in unhandled_deps(&manifest) {
         if let Some(list) = deps {
             for dep in list {
@@ -117,9 +167,8 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
     Ok(report)
 }
 
-const fn unhandled_deps(manifest: &Manifest) -> [(PackageType, &Option<Vec<DepSpec>>); 5] {
+const fn unhandled_deps(manifest: &Manifest) -> [(PackageType, &Option<Vec<DepSpec>>); 4] {
     [
-        (PackageType::Skills, &manifest.dependencies.skills),
         (PackageType::Subagents, &manifest.dependencies.subagents),
         (PackageType::Prompts, &manifest.dependencies.prompts),
         (PackageType::Commands, &manifest.dependencies.commands),
@@ -278,6 +327,102 @@ fn lock_entry_for(mcp: &McpServer, integrity: Integrity, source: RegistrySource)
         resolved_from: format!("{}:{}", source.as_tag(), mcp.id),
         registry: source,
         integrity,
+        agents: vec![AgentId::new_unchecked(ClaudeCodeAdapter::ID)],
+        dependencies: vec![],
+    }
+}
+
+/// Install one `skills:` dep: parse the shorthand, fetch metadata
+/// through `PakxSource`, verify, extract. Records `Adapter::install_*`
+/// results into `report` and writes a lockfile entry on success.
+///
+/// Other adapters (cursor/codex/copilot/windsurf) don't yet implement
+/// skill extraction; for them we add a `skipped: <adapter> does not
+/// yet implement skills extraction` entry rather than failing the
+/// whole install. The Claude Code path runs whenever a Claude home
+/// is configured (override or default), which it always is in the
+/// runner's `build_claude_adapter` path.
+async fn install_skill_dep(
+    dep: &DepSpec,
+    source: &PakxSource,
+    http: &reqwest::Client,
+    base_url: &str,
+    claude: &ClaudeCodeAdapter,
+    report: &mut InstallReport,
+    entries: &mut BTreeMap<String, LockEntry>,
+) {
+    // Only `String(...)` shorthand is wired at v0.1 — git + registry
+    // object specs need their own resolution paths (Phase C+).
+    let shorthand = match dep {
+        DepSpec::String(s) => s.as_str().to_owned(),
+        DepSpec::Git(g) => {
+            report.failed.push((
+                g.git.clone(),
+                "git deps not implemented for skills yet".into(),
+            ));
+            return;
+        }
+        DepSpec::Registry(r) => {
+            report.failed.push((
+                format!("{}/{}", r.registry, r.name),
+                "registry-object spec not implemented for skills yet".into(),
+            ));
+            return;
+        }
+    };
+
+    let (_, _, requested_version) = match parse_skill_shorthand(&shorthand) {
+        Ok(t) => t,
+        Err(e) => {
+            report.failed.push((shorthand, e.to_string()));
+            return;
+        }
+    };
+
+    debug!(target: "pakx::install", id = %shorthand, "resolving skill dep");
+
+    // Install path: Claude Code only at v0.1. Other adapters will
+    // grow their own extract logic as their adapters land.
+    let claude_home = claude.config_dir();
+    let resolved = match install_skill_from_pakx(
+        source,
+        http,
+        base_url,
+        claude_home,
+        &shorthand,
+        requested_version.as_deref(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            report.failed.push((shorthand, format!("{e:#}")));
+            return;
+        }
+    };
+
+    let lockfile_key = format!(
+        "{}/{}@{}",
+        PackageType::Skills.as_str(),
+        resolved.id,
+        resolved.version
+    );
+    entries.insert(lockfile_key, lock_entry_for_skill(&resolved));
+    report.installed.push(resolved.id);
+}
+
+/// Build a lockfile entry for a skill resolved through pakx-registry.
+/// Mirrors `lock_entry_for` (MCP) but pins the canonical
+/// pakx-registry URL — never the signed `tarballUrl`, which is
+/// ephemeral.
+fn lock_entry_for_skill(resolved: &ResolvedSkill) -> LockEntry {
+    LockEntry {
+        name: resolved.id.clone(),
+        kind: PackageType::Skills,
+        version: resolved.version.clone(),
+        resolved_from: resolved.canonical_url.clone(),
+        registry: RegistrySource::Pakx,
+        integrity: resolved.integrity.clone(),
         agents: vec![AgentId::new_unchecked(ClaudeCodeAdapter::ID)],
         dependencies: vec![],
     }
