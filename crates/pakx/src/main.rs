@@ -35,10 +35,12 @@ use commands::publish::{self as publish_cmd, PublishArgs};
 use commands::remove::{self as remove_cmd, RemoveArgs};
 use commands::search::{self, SearchArgs};
 use commands::test::{self as test_cmd, TestArgs};
+use commands::tree::{self as tree_cmd, TreeArgs};
 use commands::unpublish::{self as unpublish_cmd, UnpublishArgs};
 use commands::update::{self as update_cmd, UpdateArgs};
 use commands::upgrade::{self as upgrade_cmd, UpgradeArgs};
 use commands::whoami::{self as whoami_cmd, WhoamiArgs};
+use commands::why::{self as why_cmd, WhyArgs};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -73,6 +75,10 @@ enum Command {
     Install(InstallArgs),
     /// List pinned dependencies (reads `agents.lock`).
     List(ListArgs),
+    /// Render the lockfile grouped by kind + registry source.
+    Tree(TreeArgs),
+    /// Explain where a dependency comes from (`agents.yml` + lockfile).
+    Why(WhyArgs),
     /// Show lockfile entries whose source registry has a newer version.
     Outdated(OutdatedArgs),
     /// Flag lockfile entries pinned to a deprecated registry version.
@@ -143,6 +149,8 @@ async fn dispatch(cmd: Command) -> Result<ExitCode> {
         Command::Remove(args) => remove_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Install(args) => install_cmd::run_cmd(args).await.map(|()| ExitCode::SUCCESS),
         Command::List(args) => list_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Tree(args) => tree_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Why(args) => why_cmd::run(args).await,
         Command::Outdated(args) => outdated_cmd::run(args).await,
         Command::Audit(args) => audit_cmd::run(args).await,
         Command::Doctor(args) => doctor::run(args).await,
