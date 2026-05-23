@@ -29,6 +29,7 @@ use commands::init::{self, InitArgs};
 use commands::install::{self as install_cmd, InstallArgs};
 use commands::list::{self as list_cmd, ListArgs};
 use commands::login::{self as login_cmd, LoginArgs};
+use commands::manifest::{self as manifest_cmd, ManifestArgs};
 use commands::outdated::{self as outdated_cmd, OutdatedArgs};
 use commands::pack::{self as pack_cmd, PackArgs};
 use commands::publish::{self as publish_cmd, PublishArgs};
@@ -114,6 +115,13 @@ enum Command {
     Completion(CompletionArgs),
     /// Print resolved CLI configuration (paths + registry URLs).
     Config(ConfigArgs),
+    /// Get / set / delete a field in `agents.yml` by dot-path.
+    ///
+    /// Scripting surface modelled on `npm pkg get/set/delete` —
+    /// `pakx manifest get description`,
+    /// `pakx manifest set description "new"`,
+    /// `pakx manifest delete dependencies.skills[0]`.
+    Manifest(ManifestArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -168,5 +176,6 @@ async fn dispatch(cmd: Command) -> Result<ExitCode> {
             .await
             .map(|()| ExitCode::SUCCESS),
         Command::Config(args) => config_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Manifest(args) => manifest_cmd::run(args).await,
     }
 }
