@@ -12,7 +12,7 @@
 use anyhow::{anyhow, Result};
 use clap::Args;
 use comfy_table::{Cell, CellAlignment};
-use pakx_core::{http_client, Sponsor};
+use pakx_core::{http_client, manifest_get_value_json, manifest_parse_path, Sponsor};
 use pakx_registry_client::{CacheDir, PackageVersion, PakxSource};
 use serde::Deserialize;
 
@@ -27,6 +27,23 @@ const USER_AGENT: &str = concat!("pakx/", env!("CARGO_PKG_VERSION"));
 pub struct InfoArgs {
     /// Canonical `<owner>/<name>` of the package.
     pub id: String,
+
+    /// Optional `npm view`-style field path into the response body
+    /// (e.g. `versions`, `versions[0].sha256`, `description`,
+    /// `sponsors[0].url`). When set, the command prints just that
+    /// field instead of the full record:
+    ///
+    /// * scalar string values are printed unquoted to stdout;
+    /// * scalar number / bool values use their Rust `Display`;
+    /// * object / array values are emitted as compact single-line JSON;
+    /// * with `--json`, every value (including scalars) is emitted as
+    ///   JSON so callers can pipe into `jq` without parser branching;
+    /// * a missing path exits with status 1 and an error on stderr
+    ///   (or `null` on stdout under `--json`).
+    ///
+    /// Composes with `--version`: `pakx info <id> --version <v> sha256`
+    /// returns the per-version sha256.
+    pub field: Option<String>,
 
     /// Fetch and render the per-version metadata block — sha256,
     /// sizeBytes, publishedAt, and the signed tarballUrl — instead of
@@ -84,6 +101,13 @@ pub async fn run(args: InfoArgs) -> Result<()> {
         // the other `--json` subcommands (search, list, outdated, ...).
         ui::force_stdout_no_color();
     }
+    // Field-query mode short-circuits the human render entirely — even
+    // without `--json`, scalar field-query output must be byte-clean so
+    // `pakx info <id> versions[0].sha256 | tr -d '\n'` produces a hex
+    // string with no ANSI escape contamination.
+    if args.field.is_some() {
+        ui::force_stdout_no_color();
+    }
     if let Some(version) = args.version.as_deref() {
         return run_version(&args, &owner, &name, version).await;
     }
@@ -115,27 +139,35 @@ pub async fn run(args: InfoArgs) -> Result<()> {
         .await
         .map_err(|e| anyhow!("registry response was not valid JSON: {e}"))?;
 
+    // Build the JSON body shape exactly once — this is the contract
+    // both `--json` and the field-query mode walk. `sponsors` is a
+    // **stable** field on the `--json` contract per spec §2 — always
+    // emit the array (empty when none) so callers can rely on
+    // `.sponsors | length` without null-checking.
+    let body = serde_json::json!({
+        "id": detail.id,
+        "kind": detail.kind,
+        "description": detail.description,
+        "createdAt": detail.created_at,
+        "sponsors": detail.sponsors.iter().map(|s| serde_json::json!({
+            "kind": s.kind.as_str(),
+            "url": s.url,
+        })).collect::<Vec<_>>(),
+        "versions": detail.versions.iter().map(|v| serde_json::json!({
+            "version": v.version,
+            "sha256": v.sha256,
+            "sizeBytes": v.size_bytes,
+            "publishedAt": v.published_at,
+            "deprecatedAt": v.deprecated_at,
+        })).collect::<Vec<_>>(),
+    });
+
+    if let Some(field) = args.field.as_deref() {
+        return emit_field(&body, field, args.json);
+    }
+
     if args.json {
-        // `sponsors` is a **stable** field on the `--json` contract per
-        // spec §2 — always emit the array (empty when none) so callers
-        // can rely on `.sponsors | length` without null-checking.
-        let raw = serde_json::to_string_pretty(&serde_json::json!({
-            "id": detail.id,
-            "kind": detail.kind,
-            "description": detail.description,
-            "createdAt": detail.created_at,
-            "sponsors": detail.sponsors.iter().map(|s| serde_json::json!({
-                "kind": s.kind.as_str(),
-                "url": s.url,
-            })).collect::<Vec<_>>(),
-            "versions": detail.versions.iter().map(|v| serde_json::json!({
-                "version": v.version,
-                "sha256": v.sha256,
-                "sizeBytes": v.size_bytes,
-                "publishedAt": v.published_at,
-                "deprecatedAt": v.deprecated_at,
-            })).collect::<Vec<_>>(),
-        }))?;
+        let raw = serde_json::to_string_pretty(&body)?;
         println!("{raw}");
         return Ok(());
     }
@@ -236,17 +268,23 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
         })?;
     let kind = fetch_package_kind(&args.registry, owner, name).await;
 
+    let body = serde_json::json!({
+        "id": meta.id.clone().unwrap_or_else(|| format!("{owner}/{name}")),
+        "version": meta.version,
+        "kind": kind,
+        "sha256": meta.sha256,
+        "sizeBytes": meta.size_bytes,
+        "publishedAt": meta.published_at,
+        "deprecatedAt": meta.deprecated_at,
+        "tarballUrl": meta.tarball_url,
+    });
+
+    if let Some(field) = args.field.as_deref() {
+        return emit_field(&body, field, args.json);
+    }
+
     if args.json {
-        let raw = serde_json::to_string_pretty(&serde_json::json!({
-            "id": meta.id.clone().unwrap_or_else(|| format!("{owner}/{name}")),
-            "version": meta.version,
-            "kind": kind,
-            "sha256": meta.sha256,
-            "sizeBytes": meta.size_bytes,
-            "publishedAt": meta.published_at,
-            "deprecatedAt": meta.deprecated_at,
-            "tarballUrl": meta.tarball_url,
-        }))?;
+        let raw = serde_json::to_string_pretty(&body)?;
         println!("{raw}");
         return Ok(());
     }
@@ -361,6 +399,66 @@ fn render_version_human(
     // but keeping the param shape stable avoids a churn-churn churn if
     // we decide to surface it on this view too.
     let _ = args;
+}
+
+/// `npm view <pkg> <field>`-flavoured field-query emitter.
+///
+/// Walks `body` along the dot/bracket `field` path (parsed via
+/// `pakx_core::manifest::parse_path`, the same parser `pakx manifest
+/// get/set/delete` uses) and prints the result per the output
+/// discipline:
+///
+/// * **scalar string** values are printed **unquoted** (matches
+///   `npm view` for human consumption — `npm view react description`
+///   doesn't print the quotes);
+/// * **scalar number / bool / null** values print via their JSON
+///   representation (so booleans are `true`/`false`, nulls are `null`);
+/// * **object / array** values are emitted as **compact** single-line
+///   JSON — multi-line pretty would break the line-oriented contract
+///   the rest of the CLI's field-style emitters follow;
+/// * with `--json`, **every** value (including strings) is emitted as
+///   valid JSON so callers can pipe into `jq -r '.'` without parser
+///   branching;
+/// * a malformed path (e.g. `a..b`) is a hard error;
+/// * a path that resolves to nothing exits with code 1 — the human
+///   render gets an error on stderr, the `--json` render emits `null`
+///   on stdout.
+fn emit_field(body: &serde_json::Value, field: &str, json_mode: bool) -> Result<()> {
+    let path =
+        manifest_parse_path(field).map_err(|e| anyhow!("invalid field path '{field}': {e}"))?;
+    let Some(value) = manifest_get_value_json(body, &path) else {
+        if json_mode {
+            // Under `--json`, missing fields still emit valid JSON on
+            // stdout so `pakx info <id> <field> --json | jq` doesn't
+            // choke on parse-fails. The non-zero exit code is the
+            // signal that the lookup missed; mirrors `jq`'s own
+            // contract for "field not present".
+            println!("null");
+        }
+        return Err(anyhow!("field '{field}' not found in pakx info response"));
+    };
+    if json_mode {
+        // Compact (single-line) JSON keeps the line-oriented contract;
+        // pretty-printing would break consumers that read one line per
+        // field-query invocation.
+        println!("{value}");
+        return Ok(());
+    }
+    match value {
+        // Scalar strings print unquoted — `npm view react description`
+        // prints `React is a JavaScript library...` with no quotes; we
+        // match that for human ergonomics. (For string-with-quotes,
+        // callers pass `--json`.)
+        serde_json::Value::String(s) => println!("{s}"),
+        // Every other variant — null, bool, number, array, object —
+        // routes through the canonical `Display` impl on
+        // `serde_json::Value`, which produces compact JSON. For
+        // scalars (`null`, `true`, `false`, `42`) that's the unquoted
+        // representation; for compounds it's a single-line compact
+        // form, matching the "object / array → compact JSON" rule.
+        _ => println!("{value}"),
+    }
+    Ok(())
 }
 
 fn split_id(id: &str) -> Result<(String, String)> {

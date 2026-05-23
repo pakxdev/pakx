@@ -14,7 +14,10 @@ pub use mutate::{
     split_shorthand, update_shorthand, AddOutcome, RemoveOutcome, UpdateOutcome,
 };
 pub use parse::parse_manifest;
-pub use path::{delete_value, get_value, parse_path, set_value, DeleteOutcome, PathError, PathSeg};
+pub use path::{
+    delete_value, get_value, get_value_json, parse_path, set_value, DeleteOutcome, PathError,
+    PathSeg,
+};
 pub use schema::{
     AgentId, DepSpec, Dependencies, GitSpec, Manifest, PackageType, RegistrySpec, Sponsor,
     SponsorKind, StringSpec, KNOWN_AGENT_IDS, PACKAGE_TYPES,

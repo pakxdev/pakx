@@ -187,6 +187,36 @@ pub fn get_value<'a>(root: &'a Value, path: &[PathSeg]) -> Option<&'a Value> {
     Some(cur)
 }
 
+/// Resolve `path` against a `serde_json::Value` tree.
+///
+/// Mirror of [`get_value`] for JSON shapes — the `pakx info <id>
+/// <field>` field-query path walks the registry's JSON response, not
+/// `agents.yml`. Path syntax and semantics are identical (segments
+/// reuse [`PathSeg`] and [`parse_path`]); the only difference is the
+/// underlying value type.
+///
+/// Returns `None` for any missing segment (out-of-bounds index, absent
+/// key, or descending through a scalar) — the caller (CLI field-query
+/// surface) maps that to exit 1 + a `null` stdout under `--json`.
+#[must_use]
+pub fn get_value_json<'a>(
+    root: &'a serde_json::Value,
+    path: &[PathSeg],
+) -> Option<&'a serde_json::Value> {
+    let mut cur = root;
+    for seg in path {
+        match seg {
+            PathSeg::Key(k) => {
+                cur = cur.as_object()?.get(k)?;
+            }
+            PathSeg::Index(i) => {
+                cur = cur.as_array()?.get(*i)?;
+            }
+        }
+    }
+    Some(cur)
+}
+
 /// Write `value` at `path` inside `root`. Creates intermediate
 /// mappings as needed; refuses to fabricate intermediate sequences
 /// (the user must point at an existing sequence with `[N]` syntax).
@@ -613,5 +643,45 @@ mod tests {
             delete_value(&mut root, &path).unwrap(),
             DeleteOutcome::NotPresent
         );
+    }
+
+    #[test]
+    fn get_value_json_resolves_keys_indices_and_scalars() {
+        let root: serde_json::Value = serde_json::json!({
+            "id": "alice/hello",
+            "description": "a demo",
+            "versions": [
+                {"version": "0.1.0", "sha256": "aaa"},
+                {"version": "0.1.1", "sha256": "bbb"},
+            ],
+        });
+        let p = parse_path("description").unwrap();
+        assert_eq!(get_value_json(&root, &p).unwrap().as_str(), Some("a demo"));
+
+        let p = parse_path("versions[1].version").unwrap();
+        assert_eq!(get_value_json(&root, &p).unwrap().as_str(), Some("0.1.1"));
+
+        let p = parse_path("versions[0]").unwrap();
+        assert!(get_value_json(&root, &p).unwrap().is_object());
+
+        let p = parse_path("versions").unwrap();
+        assert!(get_value_json(&root, &p).unwrap().is_array());
+    }
+
+    #[test]
+    fn get_value_json_returns_none_on_miss() {
+        let root: serde_json::Value = serde_json::json!({
+            "id": "alice/hello",
+            "versions": [{"version": "0.1.0"}],
+        });
+        // Missing top-level key.
+        let p = parse_path("nope").unwrap();
+        assert!(get_value_json(&root, &p).is_none());
+        // Out-of-bounds index.
+        let p = parse_path("versions[99]").unwrap();
+        assert!(get_value_json(&root, &p).is_none());
+        // Descending into a scalar via a key segment.
+        let p = parse_path("id.deep").unwrap();
+        assert!(get_value_json(&root, &p).is_none());
     }
 }
