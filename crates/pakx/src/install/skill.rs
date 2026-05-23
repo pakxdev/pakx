@@ -49,7 +49,7 @@ use tracing::debug;
 /// from the signed URL) and a decompressed cap (sum of tar-entry
 /// payload sizes). Two independent guards catch both the
 /// "uncompressed-but-huge" tarball and the "tiny-but-zip-bomb" case.
-const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
+pub(super) const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Outcome of resolving one skill dep. Carries everything needed to
 /// write the lockfile entry **and** what we wrote to disk.
@@ -81,6 +81,13 @@ pub struct ResolvedSkill {
 // ---------------------------------------------------------------------------
 // Step 1 — parse the manifest shorthand
 // ---------------------------------------------------------------------------
+
+/// Same shape as [`parse_skill_shorthand`]; re-exported under a kind-
+/// neutral name so the bundle (commands / subagents / prompts / hooks)
+/// installer can call it without pretending it's parsing a skill id.
+pub(super) fn parse_bundle_shorthand(s: &str) -> Result<(String, String, Option<String>)> {
+    parse_skill_shorthand(s)
+}
 
 /// Parse the shorthand string a user wrote in `agents.yml`:
 ///
@@ -311,7 +318,7 @@ pub struct SkillResolution {
 /// Stream the signed `tarball_url` to a temp file, capping at 50 MiB.
 /// Returns the open temp file (positioned at start of file) so the
 /// caller can sha-hash it without re-reading from disk twice.
-async fn download_capped(
+pub(super) async fn download_capped(
     http: &reqwest::Client,
     tarball_url: &str,
 ) -> Result<tempfile::NamedTempFile> {
@@ -365,7 +372,7 @@ async fn download_capped(
 /// the SRI-style `Integrity` for the lockfile on success. On
 /// mismatch, the temp file gets unlinked (via the caller's `drop`)
 /// and we abort.
-fn verify_sha256(
+pub(super) fn verify_sha256(
     tmp: &mut tempfile::NamedTempFile,
     expected_hex: &str,
     id: &str,
@@ -426,7 +433,11 @@ fn sha_hex_eq(a: &str, b: &str) -> bool {
 /// Extract the verified tarball at `tmp` into `dest_root`, replacing
 /// any prior contents at that root. Enforces zip-slip / symlink /
 /// absolute-path / decompressed-size guards on every entry.
-fn extract_tarball(tmp: &mut tempfile::NamedTempFile, dest_root: &Path, id: &str) -> Result<()> {
+pub(super) fn extract_tarball(
+    tmp: &mut tempfile::NamedTempFile,
+    dest_root: &Path,
+    id: &str,
+) -> Result<()> {
     // Wipe + recreate the destination so we install a clean tree per
     // version. The path is owned by us (under `<claude_home>/skills/`)
     // so the wipe is safe.
@@ -601,7 +612,7 @@ fn validate_entry_path(p: &Path) -> Result<PathBuf, String> {
 /// triple. We never persist the signed `tarballUrl` into the lockfile
 /// because the signature is ephemeral; instead we record a stable URL
 /// that `pakx doctor` can re-resolve later.
-fn canonical_url(base_url: &str, owner: &str, name: &str, version: &str) -> String {
+pub(super) fn canonical_url(base_url: &str, owner: &str, name: &str, version: &str) -> String {
     format!(
         "{}/api/v1/packages/{}/{}/{}/tarball",
         base_url.trim_end_matches('/'),

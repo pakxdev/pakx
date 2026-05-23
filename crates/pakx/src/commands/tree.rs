@@ -6,13 +6,12 @@
 //! per-entry table; `tree` is the kind-then-source pivot of the same
 //! data.
 //!
-//! Adapter status is encoded per-kind: kinds with a wired install
-//! adapter (currently `skills` + `mcp`) are tagged `wired`, everything
-//! else is `skipped` to mirror how `pakx install` treats them today
-//! (see `crates/pakx/src/install/runner.rs::unhandled_deps`). The list
-//! is intentionally duplicated here rather than refactored into a
-//! shared constant — keeping the surface change small and localised
-//! to this PR; once the unwired adapters land they get flipped here.
+//! Adapter status is encoded per-kind via the single source of truth
+//! [`crate::install::ADAPTER_WIRED_KINDS`]: kinds in that constant get
+//! tagged `wired`, everything else gets `skipped`. After the sub-
+//! adapter installer round all six kinds are wired, but the `skipped`
+//! branch stays in code so a hypothetical future kind that lands
+//! without an install dispatch arm still renders honestly.
 //!
 //! Output:
 //!   - human: ASCII tree, no empty-group headers, one row per entry.
@@ -30,24 +29,20 @@ use clap::Args;
 use pakx_core::{read_lockfile_from, LockEntry, PackageType, RegistrySource, PACKAGE_TYPES};
 use serde::Serialize;
 
+use crate::install::ADAPTER_WIRED_KINDS;
 use crate::ui;
 
 const LOCKFILE_FILENAME: &str = "agents.lock";
 
-/// Adapter wiring status. Mirrors the dispatch table in
-/// `crates/pakx/src/install/runner.rs`. The wire strings are part of
-/// the JSON contract — only additive changes.
-const fn adapter_status(kind: PackageType) -> &'static str {
-    match kind {
-        // `runner::run` calls `install_mcp_dep` for `manifest.dependencies.mcp`
-        // and `install_skill_dep` for `manifest.dependencies.skills`.
-        PackageType::Mcp | PackageType::Skills => "wired",
-        // Everything else falls into `unhandled_deps` and is skipped
-        // with an informational warning.
-        PackageType::Subagents
-        | PackageType::Prompts
-        | PackageType::Commands
-        | PackageType::Hooks => "skipped",
+/// Adapter wiring status. Reads from the single-source-of-truth
+/// constant [`crate::install::ADAPTER_WIRED_KINDS`]. The wire strings
+/// (`wired` / `skipped`) are part of the JSON contract — only
+/// additive changes.
+fn adapter_status(kind: PackageType) -> &'static str {
+    if ADAPTER_WIRED_KINDS.contains(&kind) {
+        "wired"
+    } else {
+        "skipped"
     }
 }
 
