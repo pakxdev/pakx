@@ -267,6 +267,119 @@ fn add_dual_positional_invalid_kind_rejected() {
         .stderr(predicate::str::contains("is not a valid kind"));
 }
 
+// ---------------------------------------------------------------------------
+// pakx-registry kind probe (no `-t / --type` supplied)
+// ---------------------------------------------------------------------------
+
+/// Spin up a wiremock pakx-registry that reports a given `kind` for the
+/// single id `<owner>/<name>`. Mirrors the wire shape of
+/// `GET /api/v1/packages/{owner}/{name}` — id, kind, optional versions.
+async fn mock_pakx_registry_returns_kind(owner: &str, name: &str, kind: &str) -> MockServer {
+    let server = MockServer::start().await;
+    let id = format!("{owner}/{name}");
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/packages/{owner}/{name}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": id,
+            "kind": kind,
+            "versions": [{"version": "0.1.0"}],
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mock_pakx_registry_404() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/packages/.+"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Regression for the user-reported bug:
+///
+///   `pakx add arwenizEr/hello-world` → warn-then-misroute to `mcp:`,
+///   then `pakx install` fails because the package is actually a
+///   pakx-registry skill.
+///
+/// With the kind probe in place, pakx-registry is consulted first; it
+/// reports `kind: "skills"`, the manifest lands the id under `skills:`,
+/// and the MCP-registry validation never fires.
+#[tokio::test]
+async fn add_probes_pakx_registry_and_routes_skill_kind() {
+    let temp = TempDir::new().unwrap();
+    let pakx = mock_pakx_registry_returns_kind("arwenizEr", "hello-world", "skills").await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args([
+            "add",
+            "arwenizEr/hello-world",
+            "--pakx-base-url",
+            &pakx.uri(),
+        ])
+        .assert()
+        .success()
+        // No "official MCP Registry" warning when pakx-registry hits —
+        // the probe is authoritative.
+        .stderr(predicate::str::contains("official MCP Registry").not());
+
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    let m = parse_manifest(&body, None).unwrap();
+    assert!(
+        m.dependencies.skills.is_some(),
+        "should route to skills section based on pakx-registry kind probe; body=\n{body}"
+    );
+    assert!(
+        m.dependencies.mcp.is_none(),
+        "should NOT misroute to mcp; body=\n{body}"
+    );
+}
+
+/// When pakx-registry returns 404 AND the official MCP Registry also
+/// has no record, `pakx add` preserves the historical fallback
+/// (`kind = mcp`) but emits the softened warning that names BOTH
+/// sources, so the user understands the full search path.
+#[tokio::test]
+async fn add_softened_warning_when_neither_registry_finds_id() {
+    let temp = TempDir::new().unwrap();
+    let pakx = mock_pakx_registry_404().await;
+    let mcp = mock_mcp_server_404().await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args([
+            "add",
+            "foo/bar",
+            "--pakx-base-url",
+            &pakx.uri(),
+            "--mcp-base-url",
+            &mcp.uri(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "not found in pakx-registry or the official MCP Registry",
+        ))
+        .stderr(predicate::str::contains("override with -t skills"));
+
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    let m = parse_manifest(&body, None).unwrap();
+    assert!(
+        m.dependencies.mcp.is_some(),
+        "should preserve historical mcp fallback; body=\n{body}"
+    );
+    assert!(
+        m.dependencies.skills.is_none(),
+        "should NOT speculatively add to skills; body=\n{body}"
+    );
+}
+
 /// `--mcp-base-url` must vet via `validate_base_url` BEFORE the
 /// validation probe fires. Mirrors `pakx install` / `pakx test` —
 /// a userinfo-smuggled URL must never see an HTTP request, even
