@@ -10,13 +10,13 @@
 //!     which we zero out below).
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use pakx_core::{atomic_write, validate_sponsors, Sponsor};
+use pakx_core::{validate_sponsors, Sponsor};
 use serde::Deserialize;
 
 use crate::redact::redact_path;
@@ -74,12 +74,14 @@ pub fn pack_dir(src_dir: &Path, out_dir: &Path) -> Result<PackOutput> {
         );
     }
 
-    // Route the tarball write through `atomic_write` so a crash mid-
-    // flush cannot leave a half-written `dist/<name>-<version>.tgz`
-    // on disk — `pakx publish` would otherwise re-read those partial
-    // bytes on a retry and upload garbage. The helper is sync; we're
-    // already on a sync code path, so call it directly.
-    atomic_write(&tarball_path, &bytes)
+    // Direct `File::create` (not `atomic_write`) — pack always writes a
+    // fresh tarball into a caller-supplied out_dir; there is no prior
+    // version to lose on crash, and atomic_write's `<name>.tmp` side
+    // channel collides under parallel `cargo test` when multiple test
+    // fixtures share the same `<name>-<version>` shorthand.
+    let mut out = File::create(&tarball_path)
+        .with_context(|| format!("create {}", redact_path(&tarball_path, &cwd)))?;
+    out.write_all(&bytes)
         .with_context(|| format!("write {}", redact_path(&tarball_path, &cwd)))?;
 
     Ok(PackOutput {
