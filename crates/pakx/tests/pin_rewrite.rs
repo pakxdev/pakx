@@ -452,6 +452,109 @@ async fn update_bare_id_exits_two_when_registry_unreachable() {
         .code(2);
 }
 
+/// `pakx update --kind <type>` disambiguates when an id is declared
+/// under more than one section. Without it, the run errors out with
+/// "declared under multiple sections"; with it, only the matching
+/// section is rewritten and the sibling section is left untouched.
+#[tokio::test]
+async fn update_kind_flag_resolves_ambiguous_id_to_one_section() {
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - shared/dep@0.1.0\n  skills:\n    - shared/dep@0.1.0\n",
+    );
+    // No lockfile needed — the explicit `<id>@<version>` form skips
+    // both the registry query and the outdated check.
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "update",
+            "shared/dep@0.2.0",
+            "--kind",
+            "skills",
+            "--no-install",
+            "--yes",
+        ])
+        .assert()
+        .success();
+
+    let yml = std::fs::read_to_string(project.path().join("agents.yml")).unwrap();
+    let m = pakx_core::parse_manifest(&yml, None).unwrap();
+    // Skills section bumped, mcp untouched.
+    let skills = m.dependencies.skills.as_ref().unwrap();
+    let mcp = m.dependencies.mcp.as_ref().unwrap();
+    let dump = |list: &[pakx_core::DepSpec]| -> Vec<String> {
+        list.iter()
+            .map(|d| match d {
+                pakx_core::DepSpec::String(s) => s.as_str().to_owned(),
+                _ => String::new(),
+            })
+            .collect()
+    };
+    assert_eq!(dump(skills), vec!["shared/dep@0.2.0".to_string()]);
+    assert_eq!(
+        dump(mcp),
+        vec!["shared/dep@0.1.0".to_string()],
+        "mcp section must remain at the old pin",
+    );
+}
+
+/// Without `--kind`, an ambiguous id errors out cleanly and the
+/// rerun-hint mentions every candidate section. Locks in the
+/// replacement for the prior `(TODO)` error message.
+#[tokio::test]
+async fn update_errors_on_ambiguous_id_without_kind_flag() {
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - shared/dep@0.1.0\n  skills:\n    - shared/dep@0.1.0\n",
+    );
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["update", "shared/dep@0.2.0", "--no-install", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("declared under multiple sections"))
+        .stderr(predicate::str::contains("--kind"))
+        // The prior message included an explicit `(TODO)` — we never
+        // ship `--kind` and `(TODO)` in the same string again.
+        .stderr(predicate::str::contains("(TODO)").not());
+}
+
+/// `--kind` aimed at a kind that doesn't actually hold the requested
+/// id surfaces the clean diagnostic instead of silently rewriting a
+/// sibling section. Mirrors the `pakx remove --kind` not-declared
+/// branch byte-for-byte.
+#[tokio::test]
+async fn update_kind_flag_errors_when_no_entry_of_that_kind_matches() {
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - alpha/dep@0.1.0\n",
+    );
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "update",
+            "alpha/dep@0.2.0",
+            "--kind",
+            "skills",
+            "--no-install",
+            "--yes",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no `skills` entry named `alpha/dep` in agents.yml",
+        ));
+}
+
 #[tokio::test]
 async fn update_missing_id_in_lockfile_errors_loudly() {
     let project = TempDir::new().unwrap();

@@ -23,6 +23,9 @@ pub async fn run(args: PackArgs) -> Result<()> {
     let src = args.source.unwrap_or_else(|| PathBuf::from("."));
     let out_dir = args.out.unwrap_or_else(|| PathBuf::from("."));
     let result = pack_dir(&src, &out_dir)?;
+    for warning in &result.warnings {
+        eprintln!("{} {warning}", ui::glyph_warn_err());
+    }
     eprintln!(
         "{} packed {} -> {} ({} bytes)",
         ui::glyph_ok_err(),

@@ -41,6 +41,11 @@ pub struct PackOutput {
     pub manifest: Manifest,
     pub tarball_path: PathBuf,
     pub bytes: Vec<u8>,
+    /// Non-fatal advisories surfaced by `read_manifest`. Currently:
+    /// missing `description:` in the SKILL.md frontmatter (skills
+    /// packages only). Callers (`pakx pack`, `pakx publish`) decide
+    /// whether to print to stderr — the pack itself still succeeds.
+    pub warnings: Vec<String>,
 }
 
 /// Pack `src_dir` into a `.tgz` written to `out_dir`. Returns both the
@@ -53,7 +58,7 @@ pub fn pack_dir(src_dir: &Path, out_dir: &Path) -> Result<PackOutput> {
     // relative to the cwd when possible, and fall back to the basename
     // when they live outside the project root.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let manifest = read_manifest(src_dir, &cwd)?;
+    let (manifest, warnings) = read_manifest(src_dir, &cwd)?;
     let tarball_name = format!("{}-{}.tgz", manifest.name, manifest.version);
     let tarball_path = out_dir.join(&tarball_name);
 
@@ -78,10 +83,11 @@ pub fn pack_dir(src_dir: &Path, out_dir: &Path) -> Result<PackOutput> {
         manifest,
         tarball_path,
         bytes,
+        warnings,
     })
 }
 
-fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<Manifest> {
+fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<(Manifest, Vec<String>)> {
     let skill_md = src_dir.join(SKILL_MD);
     let text = std::fs::read_to_string(&skill_md)
         .with_context(|| format!("read {}", redact_path(&skill_md, project_root)))?;
@@ -96,11 +102,36 @@ fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<Manifest> {
     let sponsors = frontmatter.sponsors.unwrap_or_default();
     validate_sponsors(&sponsors)
         .map_err(|e| anyhow!("{SKILL_MD} sponsor-link validation failed: {e}"))?;
-    Ok(Manifest {
-        name,
-        version,
-        sponsors,
-    })
+    // `pakx pack` only operates on directories containing a `SKILL.md`
+    // (the function bails earlier otherwise), so by definition the
+    // bundle is a skills package — there is no other kind that uses
+    // this entry point. Warn (don't error) when `description:` is
+    // missing or empty: Claude Code reads the SKILL.md frontmatter
+    // `description` field at discovery time to decide whether to load
+    // a skill at all (see <https://code.claude.com/docs/en/skills>),
+    // so a missing description ships a package that is effectively
+    // dead-on-arrival inside Claude Code. Publishers should still be
+    // able to pack technically-malformed bundles for local smoke /
+    // air-gapped uploads — hence warning, not failure.
+    let mut warnings = Vec::new();
+    let has_description = frontmatter
+        .description
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !has_description {
+        warnings.push(format!(
+            "{SKILL_MD} is missing `description:` \u{2014} Claude Code uses this field to decide when to load the skill; consider adding one."
+        ));
+    }
+    Ok((
+        Manifest {
+            name,
+            version,
+            sponsors,
+        },
+        warnings,
+    ))
 }
 
 /// Strongly-typed view of the SKILL.md YAML frontmatter we consume at
@@ -116,6 +147,11 @@ struct FrontmatterRaw {
     version: Option<serde_yaml_ng::Value>,
     #[serde(default)]
     sponsors: Option<Vec<Sponsor>>,
+    /// Free-form description Claude Code uses at skill-load decision
+    /// time (see <https://code.claude.com/docs/en/skills>). Pulled out
+    /// at pack-time so we can warn — non-fatally — when it's absent.
+    #[serde(default)]
+    description: Option<serde_yaml_ng::Value>,
 }
 
 #[derive(Default)]
@@ -123,6 +159,7 @@ struct Frontmatter {
     name: Option<String>,
     version: Option<String>,
     sponsors: Option<Vec<Sponsor>>,
+    description: Option<String>,
 }
 
 fn extract_frontmatter(text: &str) -> Result<Frontmatter> {
@@ -184,6 +221,7 @@ fn extract_frontmatter(text: &str) -> Result<Frontmatter> {
         name: raw.name.and_then(scalar_to_string),
         version: raw.version.and_then(scalar_to_string),
         sponsors: raw.sponsors,
+        description: raw.description.and_then(scalar_to_string),
     })
 }
 

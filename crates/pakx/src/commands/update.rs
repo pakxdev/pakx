@@ -24,8 +24,6 @@
 //!   - Conflict resolution across dep kinds. The single-section
 //!     auto-pick mirrors `pakx remove`'s behaviour: pick when
 //!     unambiguous, error otherwise (the user re-runs with `--kind`).
-//!     `--kind` is not yet wired here but the underlying
-//!     [`sections_containing_id`] helper supports it when needed.
 //!   - `--major-only` / `--minor-only` filters. Adding them would
 //!     bloat the surface without serving the v0.1 user, who is almost
 //!     always running `pakx update` on a known-good drift.
@@ -42,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use inquire::Confirm;
 use pakx_core::manifest::{
     read_from, sections_containing_id, split_shorthand, update_shorthand, write_to, DepSpec,
@@ -56,6 +54,32 @@ use crate::redact::{project_root_for, redact_path};
 use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
+
+/// CLI-facing copy of [`PackageType`] so clap can derive `ValueEnum`
+/// without forcing the trait onto the core type. Matches the variant
+/// set used by `pakx add --type` / `pakx remove --kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UpdateKind {
+    Skills,
+    Mcp,
+    Subagents,
+    Prompts,
+    Commands,
+    Hooks,
+}
+
+impl UpdateKind {
+    const fn to_core(self) -> PackageType {
+        match self {
+            Self::Skills => PackageType::Skills,
+            Self::Mcp => PackageType::Mcp,
+            Self::Subagents => PackageType::Subagents,
+            Self::Prompts => PackageType::Prompts,
+            Self::Commands => PackageType::Commands,
+            Self::Hooks => PackageType::Hooks,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Args)]
 #[allow(clippy::struct_excessive_bools)] // CLI flags are independent toggles; a state machine here would obscure the surface
@@ -115,6 +139,13 @@ pub struct UpdateArgs {
     /// no-op (matches `pakx install` semantics).
     #[arg(long)]
     pub no_pakx_registry: bool,
+
+    /// Explicit dep-kind disambiguator. Required when the requested
+    /// `<id>` is declared under more than one section in
+    /// `agents.yml`; ignored (but accepted) otherwise. Mirrors the
+    /// `--kind` flag on `pakx remove`.
+    #[arg(short = 'k', long = "kind", value_enum)]
+    pub kind: Option<UpdateKind>,
 }
 
 /// One concrete rewrite to apply to the manifest. Either supplied
@@ -184,10 +215,13 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
         }
 
         // Find the section. Single-section auto-pick mirrors
-        // `pakx remove`. If `pakx update` ever needs `--kind` for
-        // ambiguous ids, the surface is ready (`sections_containing_id`
-        // returns the candidate list).
-        let kind = pick_kind(&manifest, &plan.id_no_version)?;
+        // `pakx remove`. When the id is ambiguous (declared in
+        // multiple sections) the user disambiguates with `--kind`.
+        let kind = pick_kind(
+            &manifest,
+            &plan.id_no_version,
+            args.kind.map(UpdateKind::to_core),
+        )?;
         if args.dry_run {
             println!(
                 "{} would update {} -> {} ({})",
@@ -468,21 +502,41 @@ fn plan_from_row(row: &Row) -> Plan {
     }
 }
 
-/// Single-section auto-pick mirroring `pakx remove`. Errors loudly when
-/// the id is missing or ambiguous. Falls through to a non-shorthand-
-/// spec diagnostic when the id only matches a git / registry-object
-/// dep — the spec mandates that error message specifically so the
-/// user knows the source form is the blocker rather than a typo.
-fn pick_kind(manifest: &Manifest, id_no_version: &str) -> Result<PackageType> {
+/// Decide which `dependencies` section to rewrite for `id_no_version`.
+///
+/// Resolution order — mirrors `pakx remove`:
+///   1. Explicit `--kind` wins. Rejected with a clean diagnostic when
+///      no entry of that kind matches the requested id (better to fail
+///      loudly than to silently rewrite a sibling section).
+///   2. Unambiguous shorthand match (exactly one section) auto-picks.
+///   3. Ambiguous (≥2 sections) errors out with the rerun hint that
+///      names the candidate kinds.
+///   4. No match falls through to either the non-shorthand-spec
+///      diagnostic (the spec mandates that exact message) or the
+///      `not found in agents.yml` fallback.
+fn pick_kind(
+    manifest: &Manifest,
+    id_no_version: &str,
+    explicit: Option<PackageType>,
+) -> Result<PackageType> {
     let present = sections_containing_id(manifest, id_no_version);
+    if let Some(kind) = explicit {
+        if !present.contains(&kind) {
+            bail!(
+                "no `{}` entry named `{id_no_version}` in agents.yml",
+                kind.as_str(),
+            );
+        }
+        return Ok(kind);
+    }
     match present.as_slice() {
         [only] => return Ok(*only),
         many if !many.is_empty() => {
             let listed: Vec<&str> = many.iter().map(|k| k.as_str()).collect();
             bail!(
-                "{id_no_version} is declared under multiple sections ({}); ambiguous — \
-                 remove the duplicate or wait for `pakx update --kind` (TODO)",
+                "{id_no_version} is declared under multiple sections ({}); rerun with `--kind <{}>`",
                 listed.join(", "),
+                listed.join("|"),
             )
         }
         _ => {}

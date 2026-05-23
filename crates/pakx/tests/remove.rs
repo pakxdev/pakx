@@ -219,7 +219,39 @@ fn remove_errors_when_explicit_kind_does_not_match() {
         .args(["remove", "a/b", "--kind", "skills", "--yes"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not declared under skills"));
+        .stderr(predicate::str::contains(
+            "no `skills` entry named `a/b` in agents.yml",
+        ));
+}
+
+/// Cross-command parity: `pakx update --kind` and `pakx remove --kind`
+/// both surface the same "no `<kind>` entry named `<id>` in agents.yml"
+/// message when the requested kind doesn't actually hold the id.
+/// Locks the wording so the error stays predictable across the two
+/// commands.
+#[test]
+fn remove_kind_flag_error_matches_update_kind_flag_wording() {
+    let temp = TempDir::new().unwrap();
+    write_manifest(
+        temp.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - alpha/dep\n",
+    );
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["remove", "alpha/dep", "--kind", "skills", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no `skills` entry named `alpha/dep` in agents.yml",
+        ));
+
+    // Manifest must be unchanged — the failure is at lookup time,
+    // before any rewrite happens.
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    let m = parse_manifest(&body, None).unwrap();
+    assert_eq!(m.dependencies.mcp.as_ref().unwrap().len(), 1);
 }
 
 #[test]

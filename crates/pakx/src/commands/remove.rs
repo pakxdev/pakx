@@ -146,11 +146,7 @@ fn pick_kind(manifest: &Manifest, id: &str, explicit: Option<PackageType>) -> Re
     let present = sections_containing(manifest, id);
     if let Some(kind) = explicit {
         if !present.contains(&kind) {
-            bail!(
-                "{} not declared under {}: nothing to remove",
-                id,
-                kind.as_str(),
-            );
+            bail!("no `{}` entry named `{id}` in agents.yml", kind.as_str());
         }
         return Ok(kind);
     }

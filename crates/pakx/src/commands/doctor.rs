@@ -5,8 +5,15 @@
 //!  * Lockfile presence, version, and `manifestHash` drift.
 //!  * Detected agents vs the `agents:` whitelist in `agents.yml`.
 //!  * Lockfile entries vs `Adapter::list()` output (drift detection).
+//!
+//! With `--json`, emits a single-line JSON object on stdout while all
+//! human-readable lines route to stderr. Field names are a stable
+//! contract — `pakx whoami --json` / `pakx list --json` follow the same
+//! discipline so pipelines can `jq` the result without parsing prose.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -16,6 +23,7 @@ use pakx_agents::{
 use pakx_core::{
     compute_integrity, read_lockfile_from, read_manifest_from, Lockfile, Manifest, SkillFile,
 };
+use serde::Serialize;
 
 use crate::ui;
 
@@ -31,110 +39,262 @@ pub struct DoctorArgs {
     /// Override Claude Code home dir (testing).
     #[arg(long, hide = true)]
     pub claude_home: Option<PathBuf>,
+
+    /// Emit machine-readable JSON on stdout (single line, newline-terminated).
+    /// All human-readable lines route to stderr instead of stdout, matching
+    /// the `--json` discipline of `pakx list` / `pakx info` / `pakx whoami`.
+    #[arg(long)]
+    pub json: bool,
 }
 
-#[derive(Default)]
-struct Tally {
-    problems: usize,
+/// Wire-format payload emitted by `--json`. Field names are a stable
+/// contract — only additive changes (new optional check keys) are
+/// backwards-compatible. `ok` is `false` when at least one entry in
+/// `errors` is set; `warnings` are informational and never flip `ok`.
+#[derive(Debug, Default, Serialize)]
+struct JsonPayload {
+    ok: bool,
+    /// Per-check status keyed by a short stable id (e.g. `"manifest"`,
+    /// `"lockfile"`). Order is alphabetical because `BTreeMap` keeps
+    /// the wire format deterministic across runs.
+    checks: BTreeMap<&'static str, CheckEntry>,
+    /// Free-form, non-fatal advisory messages. Examples: a lockfile
+    /// missing entirely (warn, not fail — fresh project before
+    /// `pakx install` lands here).
+    warnings: Vec<String>,
+    /// Fatal diagnostics. Any non-empty `errors` array forces
+    /// `ok: false` and exit code 1.
+    errors: Vec<String>,
 }
 
-impl Tally {
-    // Glyphs are padded to a uniform visible width of 6 + 2 trailing
-    // spaces, so messages line up regardless of glyph length once the
-    // ANSI escapes round-trip through a terminal.
-    //
-    //   [ok]   = 4 chars + 2 pad = 6, then 2 spaces => 8 visible
-    //   [drift]= 7 chars + 0 pad           (overflows, but rare)
-    //   [fail] = 6 chars + 0 pad
-    //   [warn] = 6 chars + 0 pad
-    //   ----   = 4 chars + 2 pad = 6, then 2 spaces => 8 visible
-    fn ok(msg: &str) {
-        println!("  {}    {msg}", ui::glyph_ok());
+/// One row in the `checks` map. `ok` is the only required field; the
+/// optional `path` / `version` / `count` / `detail` lets each check
+/// surface its native datum without forcing a uniform shape.
+#[derive(Debug, Default, Serialize)]
+struct CheckEntry {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<usize>,
+    /// One-line human-readable summary, included so pipelines that just
+    /// want a status line per check can render without re-deriving it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+/// Sink for diagnostics — collects both into a structured payload and
+/// (in human mode) emits the existing glyph lines verbatim.
+struct Report {
+    json_mode: bool,
+    payload: JsonPayload,
+}
+
+impl Report {
+    fn new(json_mode: bool) -> Self {
+        Self {
+            json_mode,
+            payload: JsonPayload {
+                ok: true,
+                ..JsonPayload::default()
+            },
+        }
     }
-    fn info(msg: &str) {
-        println!("  {}    {msg}", ui::glyph_info());
+
+    /// Pass-through human log line. Stdout in human mode; suppressed in
+    /// JSON mode (the structured payload covers it).
+    fn say(&self, line: &str) {
+        if !self.json_mode {
+            println!("{line}");
+        }
     }
-    fn warn(&mut self, msg: &str) {
-        println!("  {}  {msg}", ui::glyph_warn());
-        self.problems += 1;
+
+    /// Stderr log line in JSON mode (so the human-readable trail is
+    /// still available for interactive runs that piped `--json` into
+    /// `jq` while watching the terminal). Routed to stdout otherwise.
+    fn say_err(&self, line: &str) {
+        if self.json_mode {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
     }
-    fn fail(&mut self, msg: &str) {
-        println!("  {}  {msg}", ui::glyph_fail());
-        self.problems += 1;
+
+    fn ok_check(&mut self, id: &'static str, entry: CheckEntry, line: &str) {
+        self.say_err(&format!("  {}    {line}", ui::glyph_ok()));
+        self.payload.checks.insert(id, entry);
+    }
+
+    fn info_check(&mut self, id: &'static str, entry: CheckEntry, line: &str) {
+        self.say_err(&format!("  {}    {line}", ui::glyph_info()));
+        self.payload.checks.insert(id, entry);
+    }
+
+    fn warn_check(&mut self, id: &'static str, entry: CheckEntry, line: &str) {
+        self.say_err(&format!("  {}  {line}", ui::glyph_warn()));
+        self.payload.warnings.push(line.to_owned());
+        self.payload.checks.insert(id, entry);
+    }
+
+    fn fail_check(&mut self, id: &'static str, entry: CheckEntry, line: &str) {
+        self.say_err(&format!("  {}  {line}", ui::glyph_fail()));
+        self.payload.errors.push(line.to_owned());
+        self.payload.ok = false;
+        self.payload.checks.insert(id, entry);
+    }
+
+    /// Per-entry status that does not own a stable check id of its own
+    /// (e.g. one row per lockfile entry). Goes into warnings or errors
+    /// according to severity, but not into the `checks` map.
+    fn warn_loose(&mut self, line: &str) {
+        self.say_err(&format!("  {}  {line}", ui::glyph_warn()));
+        self.payload.warnings.push(line.to_owned());
     }
 }
 
-pub async fn run(args: DoctorArgs) -> Result<()> {
+pub async fn run(args: DoctorArgs) -> Result<ExitCode> {
     let project_root = match args.directory.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,
     };
-    println!(
+    let mut report = Report::new(args.json);
+    report.say_err(&format!(
         "{} {} ({})",
         ui::heading("pakx:"),
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
-    );
-    println!("{} {}", ui::heading("project:"), project_root.display());
+    ));
+    report.say_err(&format!(
+        "{} {}",
+        ui::heading("project:"),
+        project_root.display()
+    ));
 
-    let mut t = Tally::default();
-    let manifest = check_manifest(&project_root, &mut t);
-    let lock = check_lockfile(&project_root, &mut t);
-    check_drift(manifest.as_ref(), lock.as_ref(), &mut t);
+    let manifest = check_manifest(&project_root, &mut report);
+    let lock = check_lockfile(&project_root, &mut report);
+    check_drift(manifest.as_ref(), lock.as_ref(), &mut report);
 
     let claude = build_claude(args.claude_home.as_deref(), &project_root);
-    let detected = check_adapters(&claude).await;
-    check_agent_whitelist(manifest.as_ref(), &detected, &mut t);
-    check_on_disk(lock.as_ref(), &claude, &mut t).await;
+    let detected = check_adapters(&claude, &mut report).await;
+    check_agent_whitelist(manifest.as_ref(), &detected, &mut report);
+    check_on_disk(lock.as_ref(), &claude, &mut report).await;
 
-    if t.problems == 0 {
-        println!("\n{}", ui::heading("all checks passed"));
-        Ok(())
+    let problems = report.payload.errors.len() + report.payload.warnings.len();
+
+    if report.json_mode {
+        let line = serde_json::to_string(&report.payload).context("serialize doctor as json")?;
+        println!("{line}");
+        return Ok(if report.payload.errors.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
+    }
+
+    if problems == 0 {
+        report.say(&format!("\n{}", ui::heading("all checks passed")));
+        Ok(ExitCode::SUCCESS)
     } else {
-        anyhow::bail!("{} issue(s) found", t.problems)
+        anyhow::bail!("{problems} issue(s) found")
     }
 }
 
-fn check_manifest(project_root: &Path, t: &mut Tally) -> Option<Manifest> {
+fn check_manifest(project_root: &Path, r: &mut Report) -> Option<Manifest> {
     let path = project_root.join(MANIFEST_FILENAME);
+    let path_str = path.display().to_string();
     match read_manifest_from(&path) {
         Ok(m) => {
-            Tally::ok(&format!(
+            let detail = format!(
                 "manifest {MANIFEST_FILENAME} parsed (name={}, version={})",
                 m.name, m.version
-            ));
+            );
+            r.ok_check(
+                "manifest",
+                CheckEntry {
+                    ok: true,
+                    path: Some(path_str),
+                    version: Some(m.version.clone()),
+                    detail: Some(detail.clone()),
+                    ..CheckEntry::default()
+                },
+                &detail,
+            );
             Some(m)
         }
         Err(e) => {
-            t.fail(&format!("manifest {MANIFEST_FILENAME} failed: {e}"));
+            let detail = format!("manifest {MANIFEST_FILENAME} failed: {e}");
+            r.fail_check(
+                "manifest",
+                CheckEntry {
+                    ok: false,
+                    path: Some(path_str),
+                    detail: Some(detail.clone()),
+                    ..CheckEntry::default()
+                },
+                &detail,
+            );
             None
         }
     }
 }
 
-fn check_lockfile(project_root: &Path, t: &mut Tally) -> Option<Lockfile> {
+fn check_lockfile(project_root: &Path, r: &mut Report) -> Option<Lockfile> {
     let path = project_root.join(LOCKFILE_FILENAME);
+    let path_str = path.display().to_string();
     match read_lockfile_from(&path) {
         Ok(Some(l)) => {
-            Tally::ok(&format!(
+            let detail = format!(
                 "lockfile {LOCKFILE_FILENAME} parsed ({} entries, version {})",
                 l.entries.len(),
                 l.lockfile_version
-            ));
+            );
+            r.ok_check(
+                "lockfile",
+                CheckEntry {
+                    ok: true,
+                    path: Some(path_str),
+                    count: Some(l.entries.len()),
+                    detail: Some(detail.clone()),
+                    ..CheckEntry::default()
+                },
+                &detail,
+            );
             Some(l)
         }
         Ok(None) => {
-            t.warn(&format!("no {LOCKFILE_FILENAME} (run `pakx install`)"));
+            let detail = format!("no {LOCKFILE_FILENAME} (run `pakx install`)");
+            r.warn_check(
+                "lockfile",
+                CheckEntry {
+                    ok: false,
+                    path: Some(path_str),
+                    detail: Some(detail.clone()),
+                    ..CheckEntry::default()
+                },
+                &detail,
+            );
             None
         }
         Err(e) => {
-            t.fail(&format!("lockfile {LOCKFILE_FILENAME} failed: {e}"));
+            let detail = format!("lockfile {LOCKFILE_FILENAME} failed: {e}");
+            r.fail_check(
+                "lockfile",
+                CheckEntry {
+                    ok: false,
+                    path: Some(path_str),
+                    detail: Some(detail.clone()),
+                    ..CheckEntry::default()
+                },
+                &detail,
+            );
             None
         }
     }
 }
 
-fn check_drift(manifest: Option<&Manifest>, lock: Option<&Lockfile>, t: &mut Tally) {
+fn check_drift(manifest: Option<&Manifest>, lock: Option<&Lockfile>, r: &mut Report) {
     let Some(m) = manifest else { return };
     let Some(l) = lock else { return };
 
@@ -144,24 +304,42 @@ fn check_drift(manifest: Option<&Manifest>, lock: Option<&Lockfile>, t: &mut Tal
         contents: body.into_bytes(),
     }]);
     if computed == l.manifest_hash {
-        Tally::ok("manifest hash matches lockfile");
+        r.ok_check(
+            "manifest_hash",
+            CheckEntry {
+                ok: true,
+                detail: Some("manifest hash matches lockfile".to_owned()),
+                ..CheckEntry::default()
+            },
+            "manifest hash matches lockfile",
+        );
     } else {
-        t.warn("manifest drift: lockfile pinned to a different manifest — re-run `pakx install`");
+        let detail =
+            "manifest drift: lockfile pinned to a different manifest — re-run `pakx install`";
+        r.warn_check(
+            "manifest_hash",
+            CheckEntry {
+                ok: false,
+                detail: Some(detail.to_owned()),
+                ..CheckEntry::default()
+            },
+            detail,
+        );
     }
 
     if let Some(deps) = &m.dependencies.mcp {
         for dep in deps {
             let id = dep.display_hint();
             if l.entries.values().any(|e| e.name == *id) {
-                Tally::ok(&format!("mcp/{id} pinned"));
+                r.say_err(&format!("  {}    mcp/{id} pinned", ui::glyph_ok()));
             } else {
-                t.warn(&format!("mcp/{id} not in lockfile — run `pakx install`"));
+                r.warn_loose(&format!("mcp/{id} not in lockfile — run `pakx install`"));
             }
         }
     }
 }
 
-async fn check_adapters(claude: &ClaudeCodeAdapter) -> Vec<(&'static str, bool)> {
+async fn check_adapters(claude: &ClaudeCodeAdapter, r: &mut Report) -> Vec<(&'static str, bool)> {
     let detected: Vec<(&'static str, bool)> = vec![
         (ClaudeCodeAdapter::ID, claude.detect().await),
         (
@@ -178,20 +356,35 @@ async fn check_adapters(claude: &ClaudeCodeAdapter) -> Vec<(&'static str, bool)>
             detect_or_false(WindsurfAdapter::new()).await,
         ),
     ];
+    let detected_count = detected.iter().filter(|(_, p)| *p).count();
     for (id, present) in &detected {
         if *present {
-            Tally::ok(&format!("adapter {id} detected"));
+            r.say_err(&format!("  {}    adapter {id} detected", ui::glyph_ok()));
         } else {
-            Tally::info(&format!("adapter {id} not detected"));
+            r.say_err(&format!(
+                "  {}    adapter {id} not detected",
+                ui::glyph_info()
+            ));
         }
     }
+    let detail = format!("{detected_count} adapter(s) detected");
+    r.info_check(
+        "adapters",
+        CheckEntry {
+            ok: true,
+            count: Some(detected_count),
+            detail: Some(detail.clone()),
+            ..CheckEntry::default()
+        },
+        &detail,
+    );
     detected
 }
 
 fn check_agent_whitelist(
     manifest: Option<&Manifest>,
     detected: &[(&'static str, bool)],
-    t: &mut Tally,
+    r: &mut Report,
 ) {
     let Some(m) = manifest else { return };
     let Some(whitelist) = &m.agents else { return };
@@ -200,7 +393,7 @@ fn check_agent_whitelist(
             .iter()
             .any(|(x, present)| *x == id.as_str() && *present);
         if !is_installed {
-            t.warn(&format!(
+            r.warn_loose(&format!(
                 "manifest declares agent {:?} but it is not installed",
                 id.as_str()
             ));
@@ -208,7 +401,7 @@ fn check_agent_whitelist(
     }
 }
 
-async fn check_on_disk(lock: Option<&Lockfile>, claude: &ClaudeCodeAdapter, t: &mut Tally) {
+async fn check_on_disk(lock: Option<&Lockfile>, claude: &ClaudeCodeAdapter, r: &mut Report) {
     let Some(l) = lock else { return };
     let Ok(installed) = claude.list().await else {
         return;
@@ -216,9 +409,9 @@ async fn check_on_disk(lock: Option<&Lockfile>, claude: &ClaudeCodeAdapter, t: &
     for (key, entry) in &l.entries {
         let present = installed.iter().any(|i| matches_entry(i, entry));
         if present {
-            Tally::ok(&format!("on-disk: {key}"));
+            r.say_err(&format!("  {}    on-disk: {key}", ui::glyph_ok()));
         } else if matches!(entry.kind, pakx_core::manifest::PackageType::Skills) {
-            t.warn(&format!("on-disk: {key} missing — adapter has no record"));
+            r.warn_loose(&format!("on-disk: {key} missing — adapter has no record"));
         }
         // MCP entries live in .mcp.json (not enumerated by list()), so
         // absence here is not a drift signal for them.
