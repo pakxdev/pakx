@@ -1,6 +1,6 @@
 [package]
-name = "pakx"
-description = "Universal package manager for AI agent context"
+name = "pakx-cli"
+description = "Universal package manager for AI agent context (binary crate; installs the `pakx` command)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

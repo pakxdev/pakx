@@ -37,13 +37,19 @@ scoop bucket add pakx https://github.com/pakxdev/scoop-pakx
 scoop install pakx
 ```
 
-From source (requires Rust 1.87+):
+From crates.io (binary crate is `pakx-cli`; the installed command is `pakx`):
 
 ```sh
-cargo install --git https://github.com/pakxdev/pakx --tag v0.1.3 --locked pakx
+cargo install pakx-cli
 ```
 
-`cargo install pakx` from crates.io is not yet published; the GitHub-tag install above is the supported source path until then.
+Or pinned to a tag from source (requires Rust 1.87+):
+
+```sh
+cargo install --git https://github.com/pakxdev/pakx --tag v0.1.4 --locked pakx-cli
+```
+
+The crate name `pakx` on crates.io is taken by an unrelated project; the published binary crate is `pakx-cli`. The binary it installs is named `pakx`.
 
 Prebuilt binaries plus matching `.sha256` files for `darwin / linux / windows × arm64 / x86_64` are at <https://github.com/pakxdev/pakx/releases/latest>.
 
