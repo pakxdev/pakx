@@ -12,6 +12,7 @@
 //! query pakx-registry; that lands when we wire `pakx search` to
 //! aggregate public packages alongside MCP/Smithery.
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use pakx_core::{http_client_with_timeout, Sponsor, UPLOAD_REQUEST_TIMEOUT};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,16 @@ pub struct CreatePackageRequest<'a> {
     /// never wipes existing sponsors on a republish.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sponsors: Option<&'a [Sponsor]>,
+    /// Long-form README markdown captured from the bundle's
+    /// `README.md` at pack time. Omitted from the JSON body entirely
+    /// when `None` so the registry's omit-vs-explicit semantics fire:
+    /// a bundle without a README on republish never clears a
+    /// previously-stored README. The CLI never sends `null` here —
+    /// clearing a stored README is a PATCH operation, not a publish
+    /// one. Capped at 256 KiB at the registry; pack-time truncation
+    /// in `pack::load_readme` keeps the wire payload under that limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readme: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,6 +167,7 @@ impl PakxBackend {
         name: &str,
         version: &str,
         tarball: Vec<u8>,
+        readme: Option<&str>,
     ) -> Result<UploadVersionResponse, BackendError> {
         // Reject hostile shapes (`..`, leading `.`, embedded `..`, `/`,
         // `\`, control chars, empty) **before** any encoding work.
@@ -170,14 +182,25 @@ impl PakxBackend {
         // wrong endpoint — `PakxSource::fetch` already encodes these
         // segments and we mirror the same shape here.
         let url = self.package_version_url(owner, name, version);
-        let res = self
+        let mut req = self
             .http
             .put(url)
             .bearer_auth(token)
-            .header("content-type", "application/gzip")
-            .body(tarball)
-            .send()
-            .await?;
+            .header("content-type", "application/gzip");
+        // Optional README markdown piggybacked alongside the tarball.
+        // The PUT body itself is the raw `.tgz` so the registry can
+        // pre-check Content-Length without buffering; the README rides
+        // in `x-pakx-readme-b64` (base64 to normalize header byte set —
+        // raw markdown with newlines + code fences would tear into
+        // multiple header lines). Omitted entirely when `readme` is
+        // `None` so the registry's omit-vs-explicit semantics fire.
+        // Sized at 256 KiB on the registry side; pack-time truncation
+        // in `pack::load_readme` keeps the encoded value comfortably
+        // under any header-length ceiling for sensible READMEs.
+        if let Some(text) = readme {
+            req = req.header("x-pakx-readme-b64", BASE64.encode(text.as_bytes()));
+        }
+        let res = req.body(tarball).send().await?;
         let status = res.status();
         match status {
             StatusCode::OK | StatusCode::CREATED => Ok(res.json::<UploadVersionResponse>().await?),
