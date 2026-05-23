@@ -1,0 +1,148 @@
+name: release-build
+
+# On every published GitHub Release, build the `pakx` binary for the
+# five supported target triples and upload each binary + a `.sha256`
+# sidecar (raw hex digest, no newline) as release assets. Asset names
+# match the v0.1.3 layout so install scripts (and pakx-web's
+# sync-install-pins.mjs) keep working unchanged:
+#
+#   pakx-<tag>-x86_64-unknown-linux-gnu
+#   pakx-<tag>-aarch64-unknown-linux-gnu
+#   pakx-<tag>-x86_64-apple-darwin
+#   pakx-<tag>-aarch64-apple-darwin
+#   pakx-<tag>-x86_64-pc-windows-gnu.exe
+#
+# `workflow_dispatch` is provided so the operator can backfill a
+# release whose assets are missing (e.g. v0.1.4 was published with
+# only the Windows binary attached).
+#
+#   gh workflow run release-build.yml -f tag=v0.1.4
+#
+# Runs in parallel with release-dispatch.yml on the same
+# `release: published` event; the two workflows do not interact.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to (re)build assets for'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.triple }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: false
+          - triple: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+          - triple: x86_64-apple-darwin
+            runner: macos-13
+            cross: false
+          - triple: aarch64-apple-darwin
+            runner: macos-14
+            cross: false
+          - triple: x86_64-pc-windows-gnu
+            runner: windows-latest
+            cross: false
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.triple }}
+
+      - name: Install cross (aarch64-linux only)
+        if: matrix.cross == true
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build (native)
+        if: matrix.cross == false
+        shell: bash
+        run: |
+          cargo build --release --workspace --locked --bin pakx --target ${{ matrix.triple }}
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        shell: bash
+        run: |
+          cross build --release --locked --bin pakx --target ${{ matrix.triple }}
+
+      - name: Stage artifact (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          src="target/${{ matrix.triple }}/release/pakx"
+          dst="dist/pakx-${TAG}-${{ matrix.triple }}"
+          cp "$src" "$dst"
+          # Strip symbols. On macOS use the host `strip`; on Linux use
+          # the matching cross binutils for foreign arches (cross
+          # already produces stripped-friendly ELFs but we re-strip
+          # here for size parity with the v0.1.3 assets).
+          if [ "${{ matrix.triple }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get update -y
+            sudo apt-get install -y binutils-aarch64-linux-gnu
+            aarch64-linux-gnu-strip "$dst" || true
+          else
+            strip "$dst" || true
+          fi
+          # sha256 sidecar: raw hex digest, no newline, no filename.
+          if [ "$(uname)" = "Darwin" ]; then
+            shasum -a 256 "$dst" | awk '{ printf "%s", $1 }' > "${dst}.sha256"
+          else
+            sha256sum "$dst" | awk '{ printf "%s", $1 }' > "${dst}.sha256"
+          fi
+          ls -l dist
+
+      - name: Stage artifact (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $src = "target/${{ matrix.triple }}/release/pakx.exe"
+          $dst = "dist/pakx-$env:TAG-${{ matrix.triple }}.exe"
+          Copy-Item $src $dst
+          # Skip strip on Windows (PE strip is finicky; binary is small).
+          $hash = (Get-FileHash -Algorithm SHA256 $dst).Hash.ToLower()
+          # Write raw hex digest, no newline, UTF-8 no BOM.
+          [System.IO.File]::WriteAllText("$dst.sha256", $hash)
+          Get-ChildItem dist
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.triple }}" = "x86_64-pc-windows-gnu" ]; then
+            asset="dist/pakx-${TAG}-${{ matrix.triple }}.exe"
+          else
+            asset="dist/pakx-${TAG}-${{ matrix.triple }}"
+          fi
+          gh release upload "$TAG" "$asset" "${asset}.sha256" --clobber
+
+# TODO: SBOM generation. v0.1.3 shipped pakx-v0.1.3-sbom.cdx.json;
+# reproduce with cargo-cyclonedx or syft in a follow-up job that
+# uploads pakx-<tag>-sbom.cdx.json once per release (not per triple).
