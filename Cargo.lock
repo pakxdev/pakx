@@ -1165,7 +1165,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
-name = "pakx"
+name = "pakx-agents"
+version = "0.1.4"
+dependencies = [
+ "async-trait",
+ "base64",
+ "dirs",
+ "pakx-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "pakx-cli"
 version = "0.1.4"
 dependencies = [
  "anyhow",
@@ -1200,22 +1216,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wiremock",
-]
-
-[[package]]
-name = "pakx-agents"
-version = "0.1.4"
-dependencies = [
- "async-trait",
- "base64",
- "dirs",
- "pakx-core",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
 ]
 
 [[package]]
