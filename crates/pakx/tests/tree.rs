@@ -48,8 +48,10 @@ fn multi_kind_lockfile() -> String {
     )
 }
 
-/// Lockfile with an entry whose kind has no install adapter wired
-/// (`subagents`). Used to verify the `skipped` adapter tag surfaces.
+/// Lockfile with a `subagents` entry. After the sub-adapter install
+/// round all six kinds are wired; this fixture pins that subagents
+/// surfaces `adapter: "wired"` in both the human and JSON tree
+/// outputs (regression on the round-33 hand-coded adapter list).
 fn skipped_kind_lockfile() -> String {
     format!(
         r#"{{"lockfileVersion":1,"manifestHash":"{MANIFEST_HASH}","entries":{{
@@ -139,6 +141,11 @@ fn tree_skips_empty_groups() {
     // Lockfile only has `subagents` — `skills/` and `mcp/` headers
     // must not appear even though they're earlier in the canonical
     // PACKAGE_TYPES order. Contract: empty group renders nothing.
+    //
+    // After the sub-adapter install round, `subagents` is wired
+    // (along with every other kind), so the adapter status line
+    // surfaces `wired`. The empty-group filtering contract is
+    // unchanged.
     let project = TempDir::new().unwrap();
     write_lockfile(project.path(), &skipped_kind_lockfile());
     let output = Command::cargo_bin(BIN)
@@ -154,7 +161,10 @@ fn tree_skips_empty_groups() {
     assert!(stdout.contains("subagents/"));
     assert!(!stdout.contains("skills/"), "empty kind must not render");
     assert!(!stdout.contains("\nmcp/"), "empty kind must not render");
-    assert!(stdout.contains("skipped"), "adapter status must surface");
+    assert!(
+        stdout.contains("subagents adapter"),
+        "wired adapter line must surface"
+    );
 }
 
 #[test]
@@ -193,9 +203,12 @@ fn tree_json_emits_expected_shape() {
 }
 
 #[test]
-fn tree_json_marks_unwired_adapters_skipped() {
-    // Contract: kinds without an install adapter (`subagents` here)
-    // surface `adapter: "skipped"` so JSON consumers can filter on it.
+fn tree_json_marks_subagents_wired_after_sub_adapter_round() {
+    // Regression on the round-33 hand-coded adapter list: after the
+    // sub-adapter install round, `subagents` (along with prompts /
+    // commands / hooks) must surface `adapter: "wired"` in the
+    // `--json` view. The lockfile-side schema is unchanged; only the
+    // adapter-status derivation in `pakx tree` / `pakx why` flips.
     let project = TempDir::new().unwrap();
     write_lockfile(project.path(), &skipped_kind_lockfile());
     let output = Command::cargo_bin(BIN)
@@ -210,7 +223,7 @@ fn tree_json_marks_unwired_adapters_skipped() {
     let parsed: Value = serde_json::from_slice(&output).unwrap();
     let entry = &parsed["kinds"]["subagents"]["pakx"][0];
     assert_eq!(entry["id"], "foo/bar");
-    assert_eq!(entry["adapter"], "skipped");
+    assert_eq!(entry["adapter"], "wired");
 }
 
 #[test]

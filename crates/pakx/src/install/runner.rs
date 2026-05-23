@@ -27,6 +27,7 @@ use pakx_registry_client::{
 use reqwest::Client;
 use tracing::{debug, warn};
 
+use super::bundle::{install_bundle_from_pakx, ResolvedBundle};
 use super::mcp_translate::{translate, TranslateError};
 use super::skill::{install_skill_from_pakx, parse_skill_shorthand, ResolvedSkill};
 use crate::redact::redact_path;
@@ -35,6 +36,25 @@ use crate::resolve::{resolve_federated, Resolved};
 
 const MANIFEST_FILENAME: &str = "agents.yml";
 const LOCKFILE_FILENAME: &str = "agents.lock";
+
+/// Kinds whose install adapter is fully wired through the runner.
+///
+/// Used by `pakx tree` + `pakx why` to tag each lockfile entry as
+/// `wired` vs `skipped` without duplicating the dispatch list across
+/// modules. **Single source of truth** — the runner's `match` below
+/// MUST cover every kind in this constant (and only those). A clippy
+/// lint can't enforce the round-trip, so the runner's match arm
+/// reaches `unreachable!()` for anything outside this set and the
+/// associated unit test (`adapter_wired_kinds_matches_dispatch`)
+/// asserts the membership.
+pub const ADAPTER_WIRED_KINDS: &[PackageType] = &[
+    PackageType::Skills,
+    PackageType::Mcp,
+    PackageType::Subagents,
+    PackageType::Prompts,
+    PackageType::Commands,
+    PackageType::Hooks,
+];
 
 #[derive(Debug, Default, Clone)]
 pub struct InstallOpts {
@@ -145,16 +165,19 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         }
     }
 
-    // Subagents / prompts / commands / hooks — not yet wired. Surface
-    // as "skipped" so users see they were noticed.
-    for (kind, deps) in unhandled_deps(&manifest) {
-        if let Some(list) = deps {
-            for dep in list {
-                let label = format!("{}/{}", kind.as_str(), dep.display_hint());
-                report.skipped.push(label);
-            }
-        }
-    }
+    // Subagents / prompts / commands / hooks — wired through
+    // pakx-registry via the generic bundle installer. Each kind
+    // extracts under a kind-specific subdirectory of the Claude Code
+    // tree (`agents/`, `prompts/`, `commands/`, `hooks/`) but is
+    // otherwise identical to the skill path.
+    install_all_bundle_deps(
+        &manifest,
+        pakx_source_with_url.as_ref(),
+        &claude,
+        &mut report,
+        &mut entries,
+    )
+    .await;
 
     // Lockfile write gate: skip if any dep failed.
     //
@@ -189,7 +212,10 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
     Ok(report)
 }
 
-const fn unhandled_deps(manifest: &Manifest) -> [(PackageType, &Option<Vec<DepSpec>>); 4] {
+/// Bundle deps grouped by kind. Order matches the dispatch order used
+/// by `runner::run` — `pakx install` reports the kinds in this exact
+/// order, so flipping it would change the user-visible log.
+const fn bundle_deps(manifest: &Manifest) -> [(PackageType, &Option<Vec<DepSpec>>); 4] {
     [
         (PackageType::Subagents, &manifest.dependencies.subagents),
         (PackageType::Prompts, &manifest.dependencies.prompts),
@@ -450,6 +476,134 @@ fn lock_entry_for_skill(resolved: &ResolvedSkill) -> LockEntry {
     }
 }
 
+/// Drive every `subagents` / `prompts` / `commands` / `hooks` entry
+/// through the bundle installer.
+///
+/// Extracted out of `run` so the top-level loop stays readable
+/// (clippy's `too_many_lines` cap on a single function). When
+/// `--no-pakx-registry` is set we fail each dep loudly — the same
+/// policy the skill path uses — because there is no other source that
+/// can satisfy the request.
+async fn install_all_bundle_deps(
+    manifest: &Manifest,
+    pakx_source_with_url: Option<&(PakxSource, String)>,
+    claude: &ClaudeCodeAdapter,
+    report: &mut InstallReport,
+    entries: &mut BTreeMap<String, LockEntry>,
+) {
+    for (kind, deps) in bundle_deps(manifest) {
+        let Some(deps) = deps else { continue };
+        if let Some((source, base_url)) = pakx_source_with_url {
+            let http = Client::new();
+            for dep in deps {
+                install_bundle_dep(kind, dep, source, &http, base_url, claude, report, entries)
+                    .await;
+            }
+        } else {
+            for dep in deps {
+                let label = format!("{}/{}", kind.as_str(), dep.display_hint());
+                report.failed.push((
+                    label,
+                    format!(
+                        "{} installs require pakx-registry; --no-pakx-registry refused",
+                        kind.as_str()
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// Install one bundle dep (commands / subagents / prompts / hooks).
+///
+/// Mirrors [`install_skill_dep`] step-for-step; the only delta is
+/// the call into the kind-parameterised
+/// [`super::bundle::install_bundle_from_pakx`].
+#[allow(clippy::too_many_arguments)] // matches `install_skill_dep`; refactoring would obscure the parity
+async fn install_bundle_dep(
+    kind: PackageType,
+    dep: &DepSpec,
+    source: &PakxSource,
+    http: &reqwest::Client,
+    base_url: &str,
+    claude: &ClaudeCodeAdapter,
+    report: &mut InstallReport,
+    entries: &mut BTreeMap<String, LockEntry>,
+) {
+    // Only the shorthand string form is wired at v0 — git + registry
+    // object specs need their own resolution paths (Phase C+), same
+    // policy as the skill installer.
+    let shorthand = match dep {
+        DepSpec::String(s) => s.as_str().to_owned(),
+        DepSpec::Git(g) => {
+            report.failed.push((
+                g.git.clone(),
+                format!("git deps not implemented for {} yet", kind.as_str()),
+            ));
+            return;
+        }
+        DepSpec::Registry(r) => {
+            report.failed.push((
+                format!("{}/{}", r.registry, r.name),
+                format!(
+                    "registry-object spec not implemented for {} yet",
+                    kind.as_str()
+                ),
+            ));
+            return;
+        }
+    };
+
+    let (_, _, requested_version) = match parse_skill_shorthand(&shorthand) {
+        Ok(t) => t,
+        Err(e) => {
+            report.failed.push((shorthand, e.to_string()));
+            return;
+        }
+    };
+
+    debug!(target: "pakx::install", kind = kind.as_str(), id = %shorthand, "resolving bundle dep");
+
+    let claude_home = claude.config_dir();
+    let resolved = match install_bundle_from_pakx(
+        source,
+        http,
+        base_url,
+        claude_home,
+        kind,
+        &shorthand,
+        requested_version.as_deref(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            report.failed.push((shorthand, format!("{e:#}")));
+            return;
+        }
+    };
+
+    let lockfile_key = format!("{}/{}@{}", kind.as_str(), resolved.id, resolved.version);
+    entries.insert(lockfile_key, lock_entry_for_bundle(&resolved));
+    report.installed.push(resolved.id);
+}
+
+/// Build a lockfile entry for a bundle resolved through pakx-registry.
+/// Same shape as [`lock_entry_for_skill`] but pinned to the bundle's
+/// kind so downstream readers see the right discriminator.
+fn lock_entry_for_bundle(resolved: &ResolvedBundle) -> LockEntry {
+    LockEntry {
+        name: resolved.id.clone(),
+        kind: resolved.kind,
+        version: resolved.version.clone(),
+        resolved_from: resolved.canonical_url.clone(),
+        registry: RegistrySource::Pakx,
+        integrity: resolved.integrity.clone(),
+        agents: vec![AgentId::new_unchecked(ClaudeCodeAdapter::ID)],
+        dependencies: vec![],
+    }
+}
+
 /// Sha256 over the serialized manifest body. Stored in the lockfile so
 /// `pakx doctor` can detect drift.
 fn hash_manifest(manifest: &Manifest) -> Integrity {
@@ -459,4 +613,29 @@ fn hash_manifest(manifest: &Manifest) -> Integrity {
         contents: body.into_bytes(),
     };
     compute_integrity(&[file])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ADAPTER_WIRED_KINDS;
+    use pakx_core::PACKAGE_TYPES;
+
+    /// Invariant: every `PackageType` variant must appear in
+    /// [`ADAPTER_WIRED_KINDS`]. After this PR all six kinds have an
+    /// install dispatch arm; if a future PR adds a new kind it must
+    /// either wire it here too or explicitly remove it from the
+    /// constant (which would force `tree` / `why` to render
+    /// `skipped`). Either way the test forces the author to think
+    /// about the contract.
+    #[test]
+    fn adapter_wired_kinds_covers_every_package_type() {
+        for kind in PACKAGE_TYPES {
+            assert!(
+                ADAPTER_WIRED_KINDS.contains(&kind),
+                "{} missing from ADAPTER_WIRED_KINDS — wire the install dispatch \
+                 in runner::run before adding it to the constant",
+                kind.as_str(),
+            );
+        }
+    }
 }

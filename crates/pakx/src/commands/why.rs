@@ -36,6 +36,7 @@ use pakx_core::{
 use pakx_registry_client::PAKX_BASE_URL;
 use serde::Serialize;
 
+use crate::install::ADAPTER_WIRED_KINDS;
 use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
@@ -65,17 +66,14 @@ impl KindFilter {
     }
 }
 
-/// Adapter wiring status, duplicated from `commands::tree` rather
-/// than re-exported so each subcommand stays self-contained. If the
-/// list changes both call sites need to flip together — they are
-/// kept identical on purpose.
-const fn adapter_status(kind: PackageType) -> &'static str {
-    match kind {
-        PackageType::Mcp | PackageType::Skills => "wired",
-        PackageType::Subagents
-        | PackageType::Prompts
-        | PackageType::Commands
-        | PackageType::Hooks => "skipped",
+/// Adapter wiring status. Backed by the single-source-of-truth
+/// constant [`crate::install::ADAPTER_WIRED_KINDS`] so this command
+/// and `pakx tree` can never drift out of sync.
+fn adapter_status(kind: PackageType) -> &'static str {
+    if ADAPTER_WIRED_KINDS.contains(&kind) {
+        "wired"
+    } else {
+        "skipped"
     }
 }
 
