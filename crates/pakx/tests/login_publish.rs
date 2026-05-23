@@ -711,3 +711,151 @@ fn unpublish_rejects_bad_spec() {
         .assert()
         .failure();
 }
+
+/// `pakx publish --json` must keep all progress on stderr and emit a
+/// **single** newline-terminated JSON object on stdout once upload
+/// completes. The shape is part of the documented contract — pin every
+/// stable field name here so any future churn shows up in CI.
+#[tokio::test]
+async fn publish_json_emits_stable_shape_on_stdout() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = mock_registry("alice").await;
+    write_skill(&src, "pdf", "1.0.0");
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "publish",
+            src.path().to_str().unwrap(),
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.ends_with('\n'), "stdout must end with newline");
+    let body = stdout.trim_end_matches('\n');
+    assert!(
+        !body.contains('\n'),
+        "json output must be single-line: {body}"
+    );
+    let v: Value = serde_json::from_str(body).expect("stdout is valid json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["name"], "alice/pdf");
+    assert_eq!(v["version"], "1.0.0");
+    assert_eq!(v["sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(v["sizeBytes"], 123);
+    assert_eq!(v["tarballUrl"], "https://example.com/tarball.tgz");
+    let registry_url = v["registryUrl"].as_str().expect("registryUrl string");
+    assert!(
+        registry_url.contains("/p/pakx/alice/pdf/1.0.0"),
+        "registryUrl must point at the dashboard route: {registry_url}"
+    );
+    // `publishedAt` is reserved on the JSON contract for when the
+    // backend wires it through the upload response — emit null today.
+    assert!(
+        v["publishedAt"].is_null(),
+        "publishedAt should be null until the backend response carries it"
+    );
+    assert!(
+        v["warnings"].as_array().is_some(),
+        "warnings array must always be present, even when empty"
+    );
+
+    // Stdout MUST NOT carry any of the human progress lines that go to
+    // stderr (`packed`, `uploaded`, etc.). The JSON contract reserves
+    // stdout exclusively for the payload object.
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("uploaded") || stderr.contains("published"),
+        "human progress must remain on stderr: {stderr}"
+    );
+    assert!(
+        !body.contains("uploaded"),
+        "stdout json payload must not contain human progress: {body}"
+    );
+}
+
+/// `--dry-run` short-circuits before the registry round-trip. The JSON
+/// contract still applies: emit `{ok: true, dryRun: true}` and skip
+/// registry-side fields. Pin the contract so future churn shows up.
+#[tokio::test]
+async fn publish_json_dry_run_emits_dry_run_flag() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = mock_registry("alice").await;
+    write_skill(&src, "pdf", "1.0.0");
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "publish",
+            src.path().to_str().unwrap(),
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+            "--json",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("stdout is valid json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["dryRun"], true);
+    assert_eq!(v["name"], "pdf");
+    assert_eq!(v["version"], "1.0.0");
+    assert!(
+        v.get("tarballUrl").is_none(),
+        "tarballUrl must be absent on dry-run"
+    );
+    assert!(
+        v.get("registryUrl").is_none(),
+        "registryUrl must be absent on dry-run"
+    );
+    assert!(
+        v["warnings"].as_array().is_some(),
+        "warnings array must always be present"
+    );
+}

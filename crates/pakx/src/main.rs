@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 
 use crate::ui::ColorMode;
 use commands::add::{self, AddArgs};
+use commands::audit::{self as audit_cmd, AuditArgs};
 use commands::completion::{self as completion_cmd, CompletionArgs};
 use commands::config::{self as config_cmd, ConfigArgs};
 use commands::doctor::{self, DoctorArgs};
@@ -74,6 +75,8 @@ enum Command {
     List(ListArgs),
     /// Show lockfile entries whose source registry has a newer version.
     Outdated(OutdatedArgs),
+    /// Flag lockfile entries pinned to a deprecated registry version.
+    Audit(AuditArgs),
     /// Health-check the project + agent install state.
     Doctor(DoctorArgs),
     /// Search the federated registry for packages.
@@ -141,6 +144,7 @@ async fn dispatch(cmd: Command) -> Result<ExitCode> {
         Command::Install(args) => install_cmd::run_cmd(args).await.map(|()| ExitCode::SUCCESS),
         Command::List(args) => list_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Outdated(args) => outdated_cmd::run(args).await,
+        Command::Audit(args) => audit_cmd::run(args).await,
         Command::Doctor(args) => doctor::run(args).await,
         Command::Search(args) => search::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Test(args) => test_cmd::run(args).await.map(|()| ExitCode::SUCCESS),

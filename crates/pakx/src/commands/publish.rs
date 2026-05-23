@@ -5,6 +5,16 @@
 //!      -> upserts the package row (owner is taken from the bearer token).
 //!   2. PUT  /api/v1/packages/<owner>/<name>/<version>
 //!      -> uploads the tarball bytes. Returns sha256 + signed URL.
+//!
+//! Output modes:
+//!
+//! - **Human (default).** Progress + warnings stream to stderr with the
+//!   project's `[ok]` / `[warn]` glyph cadence; stdout stays silent.
+//! - **`--json`.** Progress + warnings still go to stderr so CI logs
+//!   keep the warning trail; stdout receives a **single**
+//!   newline-terminated JSON object once the upload completes. Field
+//!   names are a stable camelCase contract — `jq` consumers can pipe
+//!   directly.
 
 use std::path::PathBuf;
 
@@ -37,10 +47,18 @@ pub struct PublishArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Emit a single machine-readable JSON object on stdout describing
+    /// the publish outcome. Progress lines + warnings still go to
+    /// stderr. Field names are a stable contract for downstream
+    /// pipelines (`registryUrl`, `tarballUrl`, `sha256`, ...).
+    #[arg(long)]
+    pub json: bool,
+
     #[arg(long, hide = true)]
     pub credentials_file: Option<PathBuf>,
 }
 
+#[allow(clippy::too_many_lines)] // linear flow; helpers would obscure shape
 pub async fn run(args: PublishArgs) -> Result<()> {
     let src = args.source.clone().unwrap_or_else(|| PathBuf::from("."));
     let creds_path = match args.credentials_file.clone() {
@@ -55,6 +73,10 @@ pub async fn run(args: PublishArgs) -> Result<()> {
     let pb = ui::spinner("packing");
     let pack = pack_dir(&src, std::env::temp_dir().as_path())?;
     pb.finish_and_clear();
+    // Warnings stream to stderr regardless of `--json` so CI logs always
+    // surface the publisher hygiene hints (missing `description:`, etc.)
+    // — the JSON payload also carries them so a `--json | jq .warnings`
+    // pipeline doesn't need a separate stderr capture.
     for warning in &pack.warnings {
         eprintln!("{} {warning}", ui::glyph_warn_err());
     }
@@ -66,7 +88,25 @@ pub async fn run(args: PublishArgs) -> Result<()> {
     );
 
     if args.dry_run {
-        eprintln!("{}", ui::dim_err("dry-run: skipping upload"));
+        // `--dry-run` short-circuits before the registry round-trip.
+        // The JSON contract still applies: emit a stub object that
+        // tooling can detect via `"ok": true` + `"dryRun": true` and
+        // skip the assertion on `registryUrl` / `tarballUrl` /
+        // `publishedAt`. Human mode keeps the v0 stderr hint.
+        if args.json {
+            let payload = serde_json::json!({
+                "ok": true,
+                "dryRun": true,
+                "name": pack.manifest.name,
+                "version": pack.manifest.version,
+                "sizeBytes": pack.bytes.len(),
+                "warnings": pack.warnings,
+            });
+            let line = serde_json::to_string(&payload).expect("serialize publish dry-run json");
+            println!("{line}");
+        } else {
+            eprintln!("{}", ui::dim_err("dry-run: skipping upload"));
+        }
         return Ok(());
     }
 
@@ -127,6 +167,36 @@ pub async fn run(args: PublishArgs) -> Result<()> {
             pkg.owner, pkg.name, upload.version
         ))
     );
+
+    if args.json {
+        // Dashboard route — same shape as the human "→ view:" hint
+        // below. Anchored on `https://pakx.dev` (the public dashboard)
+        // independent of `args.registry`, which is the **API** base.
+        let registry_url = format!(
+            "https://pakx.dev/p/pakx/{}/{}/{}",
+            pkg.owner, pkg.name, upload.version
+        );
+        let payload = serde_json::json!({
+            "ok": true,
+            "name": format!("{}/{}", pkg.owner, pkg.name),
+            "version": upload.version,
+            "sha256": upload.sha256,
+            "sizeBytes": upload.size_bytes,
+            "registryUrl": registry_url,
+            "tarballUrl": upload.tarball_url,
+            // `publishedAt` is part of the per-version detail endpoint
+            // (see `pakx info --version`) but not the upload response,
+            // so we emit `null` to keep the shape forward-compatible
+            // — a future backend field would land here without
+            // breaking jq pipelines that already key off it.
+            "publishedAt": serde_json::Value::Null,
+            "warnings": pack.warnings,
+        });
+        let line = serde_json::to_string(&payload).expect("serialize publish json");
+        println!("{line}");
+        return Ok(());
+    }
+
     // Single dimmed next-step hint pointing at the public dashboard
     // listing. The URL shape `https://pakx.dev/p/pakx/<owner>/<name>`
     // matches the dashboard route — the trailing `pakx` segment is
