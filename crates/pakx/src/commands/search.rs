@@ -23,8 +23,12 @@ pub struct SearchArgs {
     /// Free-text query. Empty string returns the first page.
     pub query: Option<String>,
 
-    /// Maximum results to display.
-    #[arg(short = 'n', long, default_value_t = 20)]
+    /// Maximum results to display. Must be >= 1 — `-n 0` would
+    /// silently return an empty list, which is never what a user
+    /// actually wants from a search command. Clap enforces the floor
+    /// via `value_parser` so the error fires at parse time with a
+    /// clean diagnostic instead of producing an empty result page.
+    #[arg(short = 'n', long, default_value_t = 20, value_parser = parse_limit)]
     pub limit: usize,
 
     /// Emit machine-readable JSON on stdout (single line, newline-terminated).
@@ -67,6 +71,13 @@ pub struct SearchArgs {
     /// pointing at a sink.
     #[arg(long)]
     pub no_official_mcp: bool,
+
+    /// Bypass the federated-source cache for this invocation. Drops
+    /// the per-call cache TTL to zero so a cached search response is
+    /// ignored and the source is re-queried. Useful when an upstream
+    /// has just published a package the cache hasn't yet expired.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 /// Wire-format hit emitted by `--json`. Field names are a stable
@@ -101,6 +112,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         args.no_smithery,
         args.no_pakx_registry,
         args.no_official_mcp,
+        args.no_cache,
     )?;
     let query = args.query.unwrap_or_default();
     let results = client.search(&query).await;
@@ -157,6 +169,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::fn_params_excessive_bools)] // each bool maps 1:1 to a documented CLI flag; folding into an enum would obscure the surface
 fn build_client(
     mcp_base: Option<&str>,
     smithery_base: Option<&str>,
@@ -164,6 +177,7 @@ fn build_client(
     no_smithery: bool,
     no_pakx_registry: bool,
     no_official_mcp: bool,
+    no_cache: bool,
 ) -> Result<RegistryClient> {
     // Per-call cache root so parallel integration tests can't share
     // cache entries when their `wiremock` mock servers happen to land
@@ -191,7 +205,7 @@ fn build_client(
             None => OFFICIAL_MCP_BASE_URL,
         };
         let mcp =
-            OfficialMcpSource::with_parts(http_client(), mcp_url, CacheDir::with_root(&cache_root));
+            OfficialMcpSource::with_parts(http_client(), mcp_url, cache_dir(&cache_root, no_cache));
         client = client.with_source(Box::new(mcp));
     }
     if !no_smithery {
@@ -205,7 +219,7 @@ fn build_client(
         let sm = SmitherySource::with_parts(
             http_client(),
             smithery_url,
-            CacheDir::with_root(&cache_root),
+            cache_dir(&cache_root, no_cache),
         );
         client = client.with_source(Box::new(sm));
     }
@@ -218,10 +232,38 @@ fn build_client(
             None => PAKX_BASE_URL,
         };
         let pakx =
-            PakxSource::with_parts(http_client(), pakx_url, CacheDir::with_root(&cache_root));
+            PakxSource::with_parts(http_client(), pakx_url, cache_dir(&cache_root, no_cache));
         client = client.with_source(Box::new(pakx));
     }
     Ok(client)
+}
+
+/// Per-call `CacheDir` factory. Sets TTL to zero when `no_cache` is on
+/// so any previously-cached entry is considered expired and the source
+/// is re-queried. Centralised so the three source builders stay in
+/// lock-step with the `--no-cache` contract.
+fn cache_dir(root: &std::path::Path, no_cache: bool) -> CacheDir {
+    let cd = CacheDir::with_root(root);
+    if no_cache {
+        cd.with_ttl(std::time::Duration::ZERO)
+    } else {
+        cd
+    }
+}
+
+/// Clap value parser for `--limit`. Rejects `0` (which would silently
+/// produce an empty result page) and any non-numeric value via the
+/// `usize` parse step. Pulled out as a named function so the `#[arg(...)]`
+/// attribute stays readable and the rejection message is reused in
+/// tests.
+fn parse_limit(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|e| format!("--limit must be a non-negative integer: {e}"))?;
+    if n == 0 {
+        return Err("--limit must be >= 1 (use a larger value to see results)".to_owned());
+    }
+    Ok(n)
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -59,6 +59,14 @@ pub struct InfoArgs {
     /// Print JSON instead of the human-friendly table.
     #[arg(long)]
     pub json: bool,
+
+    /// Bypass the federated-source cache for this invocation. Honoured
+    /// by the `--version` path (which goes through `PakxSource`); the
+    /// default package-detail path uses an uncached direct HTTP
+    /// request and is therefore unaffected. Mirrors
+    /// `pakx search --no-cache`.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,7 +263,15 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
     // throwaway entry.
     let cache_root =
         tempfile::tempdir().map_err(|e| anyhow!("could not create temp cache dir: {e}"))?;
-    let cache = CacheDir::with_root(cache_root.path());
+    let cache = if args.no_cache {
+        // `--no-cache`: clamp TTL to zero so any prior entry is
+        // considered expired and `PakxSource` re-queries the
+        // registry. The cache write still happens (cheap) but the
+        // read path is bypassed.
+        CacheDir::with_root(cache_root.path()).with_ttl(std::time::Duration::ZERO)
+    } else {
+        CacheDir::with_root(cache_root.path())
+    };
     let source = PakxSource::with_parts(http_client(), &args.registry, cache);
     let meta = source
         .fetch_version(owner, name, version)

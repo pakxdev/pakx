@@ -88,6 +88,15 @@ pub struct AuditArgs {
     /// rationale as `--mcp-base-url`.
     #[arg(long, hide = true)]
     pub smithery_base_url: Option<String>,
+
+    /// Bypass the federated-source cache for this invocation. The
+    /// `fetch_version` call this audit relies on already skips the
+    /// cache (signed URLs are short-TTL), but the flag is accepted for
+    /// shape parity with the other read commands so a CI script can
+    /// pass `--no-cache` unconditionally across `pakx outdated`,
+    /// `pakx audit`, `pakx search`, etc.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 /// Per-entry classification after the registry query.
@@ -180,7 +189,7 @@ pub async fn run(args: AuditArgs) -> Result<ExitCode> {
     // Smithery today (those sources have no per-version deprecation
     // signal). Still validate the URLs early so a typo surfaces with a
     // clean error instead of silently being ignored.
-    let pakx = build_pakx_source(args.pakx_base_url.as_deref())?;
+    let pakx = build_pakx_source(args.pakx_base_url.as_deref(), args.no_cache)?;
     if let Some(u) = args.mcp_base_url.as_deref() {
         validate_base_url(u)?;
     }
@@ -208,7 +217,7 @@ pub async fn run(args: AuditArgs) -> Result<ExitCode> {
     })
 }
 
-fn build_pakx_source(pakx_base_url: Option<&str>) -> Result<PakxSource> {
+fn build_pakx_source(pakx_base_url: Option<&str>, no_cache: bool) -> Result<PakxSource> {
     let pakx_url = match pakx_base_url {
         Some(u) => {
             validate_base_url(u)?;
@@ -235,11 +244,12 @@ fn build_pakx_source(pakx_base_url: Option<&str>) -> Result<PakxSource> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    Ok(PakxSource::with_parts(
-        http_client(),
-        pakx_url,
-        CacheDir::with_root(&cache_root),
-    ))
+    let cache = if no_cache {
+        CacheDir::with_root(&cache_root).with_ttl(std::time::Duration::ZERO)
+    } else {
+        CacheDir::with_root(&cache_root)
+    };
+    Ok(PakxSource::with_parts(http_client(), pakx_url, cache))
 }
 
 async fn audit_entry(entry: &LockEntry, pakx: &PakxSource) -> Row {

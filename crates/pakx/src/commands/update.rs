@@ -51,6 +51,7 @@ use tracing::debug;
 use super::outdated::{gather_outdated, Row, Status};
 use crate::install::{run as install_run, InstallOpts};
 use crate::redact::{project_root_for, redact_path};
+use crate::registry_url::validate_base_url;
 use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
@@ -171,6 +172,24 @@ struct Plan {
 
 #[allow(clippy::too_many_lines)] // linear orchestration: planning, prompt, mutate, write, install
 pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
+    // Vet every user-supplied `--*-base-url` at the TOP of `run` before
+    // any registry probe or manifest read fires. The downstream
+    // `gather_outdated` → `build_clients` path also calls
+    // `validate_base_url`, but its per-entry warnings (`eprintln!` from
+    // `check_entry`) hit the user's terminal first; surfacing the
+    // userinfo-smuggle rejection right here keeps the error precedes-
+    // any-side-effects discipline that `pakx install` / `pakx test`
+    // already follow.
+    if let Some(u) = args.pakx_base_url.as_deref() {
+        validate_base_url(u)?;
+    }
+    if let Some(u) = args.mcp_base_url.as_deref() {
+        validate_base_url(u)?;
+    }
+    if let Some(u) = args.smithery_base_url.as_deref() {
+        validate_base_url(u)?;
+    }
+
     let project_root = match args.directory.clone() {
         Some(p) => p,
         None => env::current_dir().context("cannot read cwd")?,
@@ -324,6 +343,11 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
         no_pakx_registry: args.no_pakx_registry,
         claude_home: args.claude_home,
         no_lockfile: false,
+        // `pakx update` was the trigger for the version-rewrite —
+        // honour the freshest registry view by default. Adding a
+        // dedicated `--no-cache` here is deferred until users ask for
+        // it; the implicit fresh-read matches the user's intent.
+        no_cache: false,
     };
     let report = install_run(opts).await?;
     if !report.failed.is_empty() {
@@ -373,6 +397,7 @@ async fn plan_phase(args: &UpdateArgs, project_root: &Path) -> Result<PlanPhase>
             args.mcp_base_url.as_deref(),
             args.smithery_base_url.as_deref(),
             None,
+            false,
         )
         .await?;
         // Error rows print on stderr via `gather_outdated`'s internals;
@@ -442,6 +467,7 @@ async fn build_plan_for_id(
         mcp_base_url,
         smithery_base_url,
         None,
+        false,
     )
     .await?;
     if rows.is_empty() {

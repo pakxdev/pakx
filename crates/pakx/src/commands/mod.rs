@@ -5,6 +5,7 @@ pub mod audit;
 pub mod completion;
 pub mod config;
 pub mod doctor;
+pub mod export;
 pub mod info;
 pub mod init;
 pub mod install;

@@ -178,6 +178,27 @@ async fn outdated_without_lockfile_prints_hint() {
         .stderr(predicate::str::contains("no agents.lock"));
 }
 
+/// `pakx outdated --help` must document the exit-code contract,
+/// including the "no lockfile" 0-exit clarification (round 39). Pin
+/// the language so a future help rewrite that drops the clarification
+/// trips this test loudly.
+#[test]
+fn outdated_help_documents_no_lockfile_exit_code() {
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args(["outdated", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    assert!(
+        help.contains("no lockfile") || help.contains("no drift can exist"),
+        "outdated --help should call out the no-lockfile exit-code contract: {help}",
+    );
+}
+
 #[tokio::test]
 async fn outdated_empty_lockfile_prints_hint() {
     let project = TempDir::new().unwrap();

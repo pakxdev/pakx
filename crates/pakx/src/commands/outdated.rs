@@ -71,7 +71,16 @@ impl RegistryFilter {
     }
 }
 
+/// Help-text suffix appended to the `--help` summary so users see the
+/// empty-lockfile exit-code contract without having to dig through the
+/// module docs. Pulled out as a constant so the spec language and the
+/// CLI surface stay in lock-step.
+const HELP_AFTER: &str = "Exit codes: 0 when every entry is up-to-date \
+(or when no lockfile exists — no drift can exist without pins), 1 when \
+any dep has drifted.";
+
 #[derive(Debug, Clone, Args)]
+#[command(after_long_help = HELP_AFTER)]
 pub struct OutdatedArgs {
     /// Operate on a project at a path other than the cwd.
     #[arg(short = 'C', long = "directory")]
@@ -99,6 +108,13 @@ pub struct OutdatedArgs {
     /// Override the Smithery registry base URL (testing).
     #[arg(long, hide = true)]
     pub smithery_base_url: Option<String>,
+
+    /// Bypass the federated-source cache for this invocation. Drops
+    /// the per-call cache TTL to zero so the registry is re-queried
+    /// rather than serving a stale `versions[]` / `latestVersion`
+    /// response. Useful right after a publish.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 /// Lockfile entry classification after the registry query.
@@ -178,6 +194,7 @@ pub async fn gather_outdated(
     mcp_base_url: Option<&str>,
     smithery_base_url: Option<&str>,
     registry_filter: Option<RegistryFilter>,
+    no_cache: bool,
 ) -> Result<Vec<Row>> {
     let lockfile_path = project_root.join(LOCKFILE_FILENAME);
     let lock = read_lockfile_from(&lockfile_path)
@@ -188,7 +205,7 @@ pub async fn gather_outdated(
     if lock.entries.is_empty() {
         return Ok(Vec::new());
     }
-    let clients = build_clients(pakx_base_url, mcp_base_url, smithery_base_url)?;
+    let clients = build_clients(pakx_base_url, mcp_base_url, smithery_base_url, no_cache)?;
     let mut rows = Vec::with_capacity(lock.entries.len());
     for entry in lock.entries.values() {
         if let Some(filter) = registry_filter {
@@ -240,6 +257,7 @@ pub async fn run(args: OutdatedArgs) -> Result<ExitCode> {
         args.mcp_base_url.as_deref(),
         args.smithery_base_url.as_deref(),
         args.registry,
+        args.no_cache,
     )
     .await?;
 
@@ -269,6 +287,7 @@ fn build_clients(
     pakx_base_url: Option<&str>,
     mcp_base_url: Option<&str>,
     smithery_base_url: Option<&str>,
+    no_cache: bool,
 ) -> Result<Clients> {
     let pakx_url = match pakx_base_url {
         Some(u) => {
@@ -311,10 +330,18 @@ fn build_clients(
             .map_or(0, |d| d.as_nanos())
     ));
     let http = http_client();
+    let cd = |root: &std::path::Path| {
+        let c = CacheDir::with_root(root);
+        if no_cache {
+            c.with_ttl(std::time::Duration::ZERO)
+        } else {
+            c
+        }
+    };
     Ok(Clients {
-        pakx: PakxSource::with_parts(http.clone(), pakx_url, CacheDir::with_root(&cache_root)),
-        mcp: OfficialMcpSource::with_parts(http.clone(), mcp_url, CacheDir::with_root(&cache_root)),
-        smithery: SmitherySource::with_parts(http, smithery_url, CacheDir::with_root(&cache_root)),
+        pakx: PakxSource::with_parts(http.clone(), pakx_url, cd(&cache_root)),
+        mcp: OfficialMcpSource::with_parts(http.clone(), mcp_url, cd(&cache_root)),
+        smithery: SmitherySource::with_parts(http, smithery_url, cd(&cache_root)),
     })
 }
 

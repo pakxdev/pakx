@@ -56,6 +56,7 @@ pub const ADAPTER_WIRED_KINDS: &[PackageType] = &[
 ];
 
 #[derive(Debug, Default, Clone)]
+#[allow(clippy::struct_excessive_bools)] // each field maps 1:1 to a documented CLI flag; folding into an enum would obscure the surface
 pub struct InstallOpts {
     /// Override project root (defaults to cwd).
     pub project_root: Option<PathBuf>,
@@ -73,6 +74,13 @@ pub struct InstallOpts {
     pub claude_home: Option<PathBuf>,
     /// Skip writing the lockfile (dry-run-ish).
     pub no_lockfile: bool,
+    /// Bypass the federated-source cache for this invocation. When
+    /// `true`, the per-call `CacheDir` is built with a 0-second TTL so
+    /// any prior cached metadata is ignored and the registry is
+    /// re-queried. Mirrors `pakx search --no-cache` etc. — the
+    /// installer's cache reads happen via `RegistryClient` /
+    /// `PakxSource::fetch`, both of which honour the `CacheDir` TTL.
+    pub no_cache: bool,
 }
 
 #[derive(Debug, Default)]
@@ -81,6 +89,50 @@ pub struct InstallReport {
     pub skipped: Vec<String>,
     pub failed: Vec<(String, String)>,
     pub lockfile_path: Option<PathBuf>,
+    /// Per-entry structured record. Populated alongside the legacy
+    /// `installed`/`skipped`/`failed` vecs so existing consumers
+    /// (`pakx install`'s human render, `pakx update`'s post-update
+    /// log) keep working unchanged while `pakx install --json` can
+    /// emit kind + version metadata per entry. Order is preserved as
+    /// the dispatch order (`mcp` → `skills` → `subagents` → `prompts`
+    /// → `commands` → `hooks`).
+    pub entries: Vec<InstallReportEntry>,
+}
+
+/// One row in [`InstallReport::entries`]. `status` is one of `ok`,
+/// `skipped`, or `failed` — the same trichotomy the human render
+/// surfaces — and `error` is populated only on the failed path.
+/// `kind` carries the [`PackageType`] discriminator so a JSON consumer
+/// can pivot per-kind without re-grepping the id.
+#[derive(Debug, Clone)]
+pub struct InstallReportEntry {
+    pub id: String,
+    pub status: InstallStatus,
+    pub kind: PackageType,
+    pub version: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Per-entry result discriminator. Three states match the v0
+/// human surface: `Ok` (newly installed), `Skipped` (idempotent
+/// re-install, no work done), `Failed` (error captured in `error`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallStatus {
+    Ok,
+    Skipped,
+    Failed,
+}
+
+impl InstallStatus {
+    /// Stable wire tag used by `pakx install --json`. Only additive
+    /// changes (new variants) are backwards-compatible.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
@@ -102,6 +154,7 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         opts.pakx_base_url.as_deref(),
         opts.no_smithery,
         opts.no_pakx_registry,
+        opts.no_cache,
     )?;
 
     // Standalone PakxSource for skill installs. Skills resolve directly
@@ -117,7 +170,8 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
             .clone()
             .unwrap_or_else(|| PAKX_BASE_URL.to_owned());
         let cache_root = std::env::temp_dir().join("pakx-install-cache");
-        let src = PakxSource::with_parts(http_client(), &url, CacheDir::with_root(&cache_root));
+        let src =
+            PakxSource::with_parts(http_client(), &url, cache_dir(&cache_root, opts.no_cache));
         Some((src, url))
     };
 
@@ -156,10 +210,13 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         } else {
             for dep in deps {
                 let label = format!("skills/{}", dep.display_hint());
-                report.failed.push((
+                push_failed(
+                    &mut report,
                     label,
+                    PackageType::Skills,
+                    None,
                     "skill installs require pakx-registry; --no-pakx-registry refused".into(),
-                ));
+                );
             }
         }
     }
@@ -229,6 +286,7 @@ fn build_registry_client(
     pakx_base_url: Option<&str>,
     no_smithery: bool,
     no_pakx_registry: bool,
+    no_cache: bool,
 ) -> Result<RegistryClient> {
     // Validate every user-supplied override BEFORE any HTTP work.
     // `pakx test` already did this; install must mirror it or the same
@@ -245,7 +303,7 @@ fn build_registry_client(
 
     let cache_root = std::env::temp_dir().join("pakx-install-cache");
     let mcp =
-        OfficialMcpSource::with_parts(http_client(), mcp_url, CacheDir::with_root(&cache_root));
+        OfficialMcpSource::with_parts(http_client(), mcp_url, cache_dir(&cache_root, no_cache));
     let mut client = RegistryClient::new().with_source(Box::new(mcp));
 
     if !no_smithery {
@@ -256,7 +314,7 @@ fn build_registry_client(
             }
             None => SMITHERY_BASE_URL,
         };
-        let sm = SmitherySource::with_parts(http_client(), url, CacheDir::with_root(&cache_root));
+        let sm = SmitherySource::with_parts(http_client(), url, cache_dir(&cache_root, no_cache));
         client = client.with_source(Box::new(sm));
     }
 
@@ -268,11 +326,27 @@ fn build_registry_client(
             }
             None => PAKX_BASE_URL,
         };
-        let pakx = PakxSource::with_parts(http_client(), url, CacheDir::with_root(&cache_root));
+        let pakx = PakxSource::with_parts(http_client(), url, cache_dir(&cache_root, no_cache));
         client = client.with_source(Box::new(pakx));
     }
 
     Ok(client)
+}
+
+/// Build a `CacheDir` for the install runner. When `no_cache` is true
+/// the TTL is clamped to zero so any prior cache entry is treated as
+/// expired and the registry is re-queried on first read. The cache
+/// **root** is still set (per-call writes still happen) — making the
+/// TTL zero gives "skip read, still write" semantics, which is enough
+/// to satisfy the `--no-cache` contract without forking the
+/// `CacheDir` API.
+fn cache_dir(root: &Path, no_cache: bool) -> CacheDir {
+    let cd = CacheDir::with_root(root);
+    if no_cache {
+        cd.with_ttl(std::time::Duration::ZERO)
+    } else {
+        cd
+    }
 }
 
 fn build_claude_adapter(opts: &InstallOpts, project_root: &Path) -> ClaudeCodeAdapter {
@@ -298,9 +372,13 @@ async fn install_mcp_dep(
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Registry(r) => r.name.clone(),
         DepSpec::Git(g) => {
-            report
-                .failed
-                .push((g.git.clone(), "git deps not implemented for MCP yet".into()));
+            push_failed(
+                report,
+                g.git.clone(),
+                PackageType::Mcp,
+                None,
+                "git deps not implemented for MCP yet".into(),
+            );
             return;
         }
     };
@@ -315,13 +393,17 @@ async fn install_mcp_dep(
         }
         Ok(Resolved::NotFound) => {
             warn!(target: "pakx::install", %id, "not in any federated registry");
-            report
-                .failed
-                .push((id.clone(), "not found in any federated registry".into()));
+            push_failed(
+                report,
+                id.clone(),
+                PackageType::Mcp,
+                None,
+                "not found in any federated registry".into(),
+            );
             return;
         }
         Err(e) => {
-            report.failed.push((id.clone(), e.to_string()));
+            push_failed(report, id.clone(), PackageType::Mcp, None, e.to_string());
             return;
         }
     };
@@ -329,13 +411,23 @@ async fn install_mcp_dep(
     let transport = match translate(&pkg) {
         Ok(t) => t,
         Err(TranslateError::NoTransport { .. }) => {
-            report
-                .failed
-                .push((id.clone(), "no installable transport advertised".into()));
+            push_failed(
+                report,
+                id.clone(),
+                PackageType::Mcp,
+                Some(pkg.version.clone()),
+                "no installable transport advertised".into(),
+            );
             return;
         }
         Err(e) => {
-            report.failed.push((id.clone(), e.to_string()));
+            push_failed(
+                report,
+                id.clone(),
+                PackageType::Mcp,
+                Some(pkg.version.clone()),
+                e.to_string(),
+            );
             return;
         }
     };
@@ -349,17 +441,76 @@ async fn install_mcp_dep(
 
     match claude.install_mcp(&mcp).await {
         Ok(_) => {
-            report.installed.push(mcp.id.clone());
+            push_ok(
+                report,
+                mcp.id.clone(),
+                PackageType::Mcp,
+                Some(mcp.version.clone()),
+            );
             entries.insert(mcp.lockfile_key(), lock_entry_for(&mcp, integrity, source));
         }
         Err(AdapterError::AlreadyInstalled { id }) => {
-            report.skipped.push(id);
+            push_skipped(report, id, PackageType::Mcp, Some(mcp.version.clone()));
             entries.insert(mcp.lockfile_key(), lock_entry_for(&mcp, integrity, source));
         }
         Err(e) => {
-            report.failed.push((mcp.id, e.to_string()));
+            push_failed(
+                report,
+                mcp.id,
+                PackageType::Mcp,
+                Some(mcp.version.clone()),
+                e.to_string(),
+            );
         }
     }
+}
+
+/// Append a successful install to both the legacy `installed` vec
+/// and the structured `entries` list. Keeps the two surfaces in sync.
+fn push_ok(report: &mut InstallReport, id: String, kind: PackageType, version: Option<String>) {
+    report.installed.push(id.clone());
+    report.entries.push(InstallReportEntry {
+        id,
+        status: InstallStatus::Ok,
+        kind,
+        version,
+        error: None,
+    });
+}
+
+/// Append a skipped install (already up to date, idempotent reinstall).
+fn push_skipped(
+    report: &mut InstallReport,
+    id: String,
+    kind: PackageType,
+    version: Option<String>,
+) {
+    report.skipped.push(id.clone());
+    report.entries.push(InstallReportEntry {
+        id,
+        status: InstallStatus::Skipped,
+        kind,
+        version,
+        error: None,
+    });
+}
+
+/// Append a failed install with its rendered reason.
+fn push_failed(
+    report: &mut InstallReport,
+    id: String,
+    kind: PackageType,
+    version: Option<String>,
+    reason: String,
+) {
+    report.failed.push((id.clone(), reason.clone()));
+    report.entries.push(InstallReportEntry {
+        id,
+        status: InstallStatus::Failed,
+        kind,
+        version,
+        error: Some(reason),
+    });
 }
 
 /// Build a lockfile entry, recording **which federated source** the
@@ -403,17 +554,23 @@ async fn install_skill_dep(
     let shorthand = match dep {
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Git(g) => {
-            report.failed.push((
+            push_failed(
+                report,
                 g.git.clone(),
+                PackageType::Skills,
+                None,
                 "git deps not implemented for skills yet".into(),
-            ));
+            );
             return;
         }
         DepSpec::Registry(r) => {
-            report.failed.push((
+            push_failed(
+                report,
                 format!("{}/{}", r.registry, r.name),
+                PackageType::Skills,
+                None,
                 "registry-object spec not implemented for skills yet".into(),
-            ));
+            );
             return;
         }
     };
@@ -421,7 +578,7 @@ async fn install_skill_dep(
     let (_, _, requested_version) = match parse_skill_shorthand(&shorthand) {
         Ok(t) => t,
         Err(e) => {
-            report.failed.push((shorthand, e.to_string()));
+            push_failed(report, shorthand, PackageType::Skills, None, e.to_string());
             return;
         }
     };
@@ -443,7 +600,13 @@ async fn install_skill_dep(
     {
         Ok(r) => r,
         Err(e) => {
-            report.failed.push((shorthand, format!("{e:#}")));
+            push_failed(
+                report,
+                shorthand,
+                PackageType::Skills,
+                requested_version.clone(),
+                format!("{e:#}"),
+            );
             return;
         }
     };
@@ -455,7 +618,12 @@ async fn install_skill_dep(
         resolved.version
     );
     entries.insert(lockfile_key, lock_entry_for_skill(&resolved));
-    report.installed.push(resolved.id);
+    push_ok(
+        report,
+        resolved.id,
+        PackageType::Skills,
+        Some(resolved.version),
+    );
 }
 
 /// Build a lockfile entry for a skill resolved through pakx-registry.
@@ -501,13 +669,16 @@ async fn install_all_bundle_deps(
         } else {
             for dep in deps {
                 let label = format!("{}/{}", kind.as_str(), dep.display_hint());
-                report.failed.push((
+                push_failed(
+                    report,
                     label,
+                    kind,
+                    None,
                     format!(
                         "{} installs require pakx-registry; --no-pakx-registry refused",
                         kind.as_str()
                     ),
-                ));
+                );
             }
         }
     }
@@ -535,20 +706,26 @@ async fn install_bundle_dep(
     let shorthand = match dep {
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Git(g) => {
-            report.failed.push((
+            push_failed(
+                report,
                 g.git.clone(),
+                kind,
+                None,
                 format!("git deps not implemented for {} yet", kind.as_str()),
-            ));
+            );
             return;
         }
         DepSpec::Registry(r) => {
-            report.failed.push((
+            push_failed(
+                report,
                 format!("{}/{}", r.registry, r.name),
+                kind,
+                None,
                 format!(
                     "registry-object spec not implemented for {} yet",
                     kind.as_str()
                 ),
-            ));
+            );
             return;
         }
     };
@@ -556,7 +733,7 @@ async fn install_bundle_dep(
     let (_, _, requested_version) = match parse_skill_shorthand(&shorthand) {
         Ok(t) => t,
         Err(e) => {
-            report.failed.push((shorthand, e.to_string()));
+            push_failed(report, shorthand, kind, None, e.to_string());
             return;
         }
     };
@@ -577,14 +754,20 @@ async fn install_bundle_dep(
     {
         Ok(r) => r,
         Err(e) => {
-            report.failed.push((shorthand, format!("{e:#}")));
+            push_failed(
+                report,
+                shorthand,
+                kind,
+                requested_version.clone(),
+                format!("{e:#}"),
+            );
             return;
         }
     };
 
     let lockfile_key = format!("{}/{}@{}", kind.as_str(), resolved.id, resolved.version);
     entries.insert(lockfile_key, lock_entry_for_bundle(&resolved));
-    report.installed.push(resolved.id);
+    push_ok(report, resolved.id, kind, Some(resolved.version));
 }
 
 /// Build a lockfile entry for a bundle resolved through pakx-registry.

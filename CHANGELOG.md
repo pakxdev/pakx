@@ -6,7 +6,65 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- **`pakx export <id>` — copy an installed package's on-disk tree into
+  a portable folder.** Resolves the id via the lockfile (no network
+  round-trip), copies the tree under `<claude_home>/<subdir>/<owner>-<name>/`
+  into `<cwd>/<name-after-slash>` (or `--output <DIR>`). Refuses to
+  overwrite an existing directory unless `--force`. `--json` emits
+  `{from, to, files}`. MCP entries are rejected because their install
+  state lives in `.mcp.json`, not in a per-package tree.
+
+- **`pakx pack --output <DIR>`** as the canonical long form for
+  selecting the tarball output directory. The historical `--out` alias
+  remains for one release.
+
+- **`pakx pack --dry-run [--json]`** enumerates the tarball entries
+  without writing the `.tgz`. The `--json` payload extends the regular
+  pack contract with `dryRun: true` and `files: [{path, sizeBytes}]`.
+
+- **`pakx install --json`** emits `[{id, status, kind, version, error?}]`
+  on stdout. Human progress + summary still render on stderr. Mirrors
+  the `pakx outdated --json` shape.
+
+- **`--no-cache` global flag** on `pakx search`, `pakx info`,
+  `pakx outdated`, `pakx audit`, `pakx add`, and `pakx install`. Drops
+  the per-call federated-source cache TTL to zero so the registry is
+  re-queried rather than serving a stale response. Useful right after
+  a publish.
+
+- **`pakx doctor --clear-cache`** wipes every per-call cache directory
+  pakx may have left under `std::env::temp_dir()` (including the
+  persistent `pakx-install-cache` root). Best-effort; surfaces
+  per-entry removal failures on stderr without tripping the doctor
+  exit code.
+
+### Fixed
+
+- **`pakx search --limit` clamped to >= 1.** `-n 0` previously
+  returned an empty list silently; clap now rejects the value at parse
+  time with a clean diagnostic.
+
+- **`pakx update` validates `--*-base-url` BEFORE the outdated
+  probe.** Previously the validation fired only after `gather_outdated`
+  emitted per-entry stderr noise, hiding the rejection. Validation
+  now runs at the top of `run` so a userinfo-smuggled override surfaces
+  as the only error.
+
+- **`pakx outdated --help` documents the exit-code contract for the
+  no-lockfile case.** The `--help` output now spells out that an
+  absent lockfile exits 0 (no drift can exist without pins), matching
+  the existing behaviour.
+
+### Changed
+
+- **`pakx unpublish` no longer claims a 30-day soft-delete grace.** The
+  prior copy ("30-day soft-delete grace; resolves to 404 after the
+  window closes") was aspirational — no hard-delete cron exists on the
+  pakx-registry backend. The corrected language: "still resolvable for
+  existing pins but hidden from list endpoints." Existing pinned
+  installs continue to work after `pakx unpublish` forever.
 
 ## [0.1.4] — 2026-05-23
 

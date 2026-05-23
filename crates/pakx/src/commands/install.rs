@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
-use crate::install::{run, InstallOpts};
+use crate::install::{run, InstallOpts, InstallReportEntry, InstallStatus};
 use crate::ui;
 
 #[derive(Debug, Clone, Args)]
+#[allow(clippy::struct_excessive_bools)] // CLI flags are independent toggles; a state machine here would obscure the surface
 pub struct InstallArgs {
     /// Operate on a project at a path other than the cwd.
     #[arg(short = 'C', long = "directory")]
@@ -49,9 +50,35 @@ pub struct InstallArgs {
     /// Override the Claude Code home directory (testing).
     #[arg(long, hide = true)]
     pub claude_home: Option<PathBuf>,
+
+    /// Emit a machine-readable JSON array on stdout
+    /// (`[{id, status, kind, version, error?}, ...]`).
+    ///
+    /// Human progress + summary continue to render on stderr — the
+    /// JSON shape is the stable contract for downstream pipelines
+    /// (`jq`, CI parsers, ...). Mirrors `pakx outdated --json` /
+    /// `pakx audit --json`.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Bypass the federated-source cache for this invocation. Sets the
+    /// per-call cache TTL to zero so any cached `versions[]` /
+    /// `latestVersion` response is ignored and the registry is
+    /// re-queried. Useful right after a publish when the cache may
+    /// still hold a stale "no such version" response. Mirrored across
+    /// `pakx search` / `pakx info` / `pakx outdated` / `pakx audit` /
+    /// `pakx add`.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 pub async fn run_cmd(args: InstallArgs) -> Result<()> {
+    if args.json {
+        // Force stdout to no-color BEFORE any paint helper memoises a
+        // stream decision. Keeps `pakx install --color always --json | jq`
+        // byte-clean. Stderr remains color-able for the human render.
+        ui::force_stdout_no_color();
+    }
     let opts = InstallOpts {
         project_root: args.directory,
         mcp_base_url: args.mcp_base_url,
@@ -61,6 +88,7 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
         no_pakx_registry: args.no_pakx_registry,
         claude_home: args.claude_home,
         no_lockfile: args.no_lockfile,
+        no_cache: args.no_cache,
     };
     let pb = ui::spinner("resolving dependencies");
     let report = run(opts).await;
@@ -114,6 +142,10 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
         },
     );
 
+    if args.json {
+        emit_install_json(&report.entries);
+    }
+
     if report.failed.is_empty() {
         // Single dimmed hint pointing at the lockfile — users want
         // to see which file landed without scanning the project tree.
@@ -131,4 +163,40 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
     } else {
         anyhow::bail!("{} dep(s) failed to install", report.failed.len())
     }
+}
+
+/// Emit the `pakx install --json` payload: a single newline-terminated
+/// array of `{id, status, kind, version, error?}` rows on stdout. The
+/// field set mirrors `pakx outdated --json` discipline — `error` is
+/// omitted (rather than `null`) on success rows so `jq '.[] | select(.error)'`
+/// returns only failures without an `.error == null` filter.
+fn emit_install_json(entries: &[InstallReportEntry]) {
+    let rows: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            let mut obj = serde_json::json!({
+                "id": e.id,
+                "status": status_tag(e.status),
+                "kind": e.kind.as_str(),
+            });
+            if let Some(v) = e.version.as_deref() {
+                obj["version"] = serde_json::Value::String(v.to_owned());
+            } else {
+                obj["version"] = serde_json::Value::Null;
+            }
+            if let Some(err) = e.error.as_deref() {
+                obj["error"] = serde_json::Value::String(err.to_owned());
+            }
+            obj
+        })
+        .collect();
+    let line = serde_json::to_string(&rows).expect("serialize install report json");
+    println!("{line}");
+}
+
+/// Stable wire tag for [`InstallStatus`]. Pulled out here so the
+/// match arm sits next to the JSON shape that consumes it — keeps the
+/// contract obvious when an additive variant lands later.
+const fn status_tag(s: InstallStatus) -> &'static str {
+    s.as_str()
 }
