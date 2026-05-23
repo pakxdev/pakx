@@ -24,6 +24,7 @@ use commands::audit::{self as audit_cmd, AuditArgs};
 use commands::completion::{self as completion_cmd, CompletionArgs};
 use commands::config::{self as config_cmd, ConfigArgs};
 use commands::doctor::{self, DoctorArgs};
+use commands::export::{self as export_cmd, ExportArgs};
 use commands::info::{self as info_cmd, InfoArgs};
 use commands::init::{self, InitArgs};
 use commands::install::{self as install_cmd, InstallArgs};
@@ -102,6 +103,8 @@ enum Command {
     Publish(PublishArgs),
     /// Soft-delete a published version.
     Unpublish(UnpublishArgs),
+    /// Copy an installed package's tree into a portable folder.
+    Export(ExportArgs),
     /// Rewrite `agents.yml` pins to a newer version, then reinstall.
     ///
     /// Note: this is **package** update — for upgrading the `pakx`
@@ -170,6 +173,7 @@ async fn dispatch(cmd: Command) -> Result<ExitCode> {
         Command::Pack(args) => pack_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Publish(args) => publish_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Unpublish(args) => unpublish_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Export(args) => export_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Update(args) => update_cmd::run(args).await,
         Command::Upgrade(args) => upgrade_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Completion(args) => completion_cmd::run::<Cli>(args)

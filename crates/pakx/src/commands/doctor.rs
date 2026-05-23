@@ -45,6 +45,17 @@ pub struct DoctorArgs {
     /// the `--json` discipline of `pakx list` / `pakx info` / `pakx whoami`.
     #[arg(long)]
     pub json: bool,
+
+    /// Wipe the per-call federated-source cache directories that the
+    /// read commands (`pakx search`, `pakx info`, `pakx outdated`,
+    /// `pakx audit`, `pakx add`) seed under `std::env::temp_dir()` via
+    /// their `pid + nanos`-keyed roots. Best-effort — failures to
+    /// remove individual entries are reported on stderr without
+    /// failing the doctor run. Use this when the install-cache
+    /// persistent dir (`<temp>/pakx-install-cache/`) is also holding
+    /// a stale entry the `--no-cache` flag alone wouldn't clear.
+    #[arg(long)]
+    pub clear_cache: bool,
 }
 
 /// Wire-format payload emitted by `--json`. Field names are a stable
@@ -159,6 +170,20 @@ pub async fn run(args: DoctorArgs) -> Result<ExitCode> {
         // `--json | jq` discipline — keep stdout byte-clean. Stderr
         // (the streaming per-check render below) still colors.
         ui::force_stdout_no_color();
+    }
+    if args.clear_cache {
+        // Stderr-only so the JSON contract is unaffected. Per-call
+        // dirs are best-effort cleanup; the persistent
+        // `pakx-install-cache` root is also wiped because it's the one
+        // location the `--no-cache` flag can't shake off (its TTL
+        // applies to the read path only).
+        let removed = clear_cache_roots(args.json);
+        eprintln!(
+            "{} cleared {} cache director{}",
+            ui::glyph_ok_err(),
+            removed,
+            if removed == 1 { "y" } else { "ies" }
+        );
     }
     let project_root = match args.directory.clone() {
         Some(p) => p,
@@ -436,6 +461,63 @@ async fn detect_or_false<A: Adapter>(adapter: Option<A>) -> bool {
         Some(a) => a.detect().await,
         None => false,
     }
+}
+
+/// Remove every per-call cache directory `pakx` may have left under
+/// `std::env::temp_dir()`. The read commands name their cache roots
+/// with a `pakx-<verb>-cache-<pid>-<nanos>` pattern, so we walk the
+/// temp dir and remove anything whose file name starts with one of
+/// the known prefixes — plus the persistent `pakx-install-cache` root
+/// that the installer reuses across calls.
+///
+/// Returns the count of directories successfully removed. Failures
+/// are reported on stderr (under `json_mode = true` this is the only
+/// way to surface them without breaking the JSON contract) but never
+/// trip the exit code — a transient FS error here shouldn't break a
+/// `pakx doctor --clear-cache` invocation.
+fn clear_cache_roots(json_mode: bool) -> usize {
+    const PREFIXES: &[&str] = &[
+        "pakx-install-cache",
+        "pakx-search-cache-",
+        "pakx-outdated-cache-",
+        "pakx-audit-cache-",
+        "pakx-add-cache-",
+        "pakx-add-probe-",
+    ];
+    let temp = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&temp) else {
+        return 0;
+    };
+    let mut count = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(n) = name.to_str() else { continue };
+        if !PREFIXES.iter().any(|p| n.starts_with(p)) {
+            continue;
+        }
+        let path = entry.path();
+        // Be cautious — only delete what we created (directories). A
+        // file named the same way is suspicious enough to leave
+        // alone rather than risk losing user data.
+        if !path.is_dir() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => count = count.saturating_add(1),
+            Err(e) => {
+                // Stderr-only so JSON mode's stdout stays intact.
+                // `json_mode` doesn't suppress the warn — it's a
+                // legitimate operational signal the user should see.
+                let _ = json_mode;
+                eprintln!(
+                    "{} could not remove {}: {e}",
+                    ui::glyph_warn_err(),
+                    path.display()
+                );
+            }
+        }
+    }
+    count
 }
 
 fn build_claude(home_override: Option<&Path>, project_root: &Path) -> ClaudeCodeAdapter {

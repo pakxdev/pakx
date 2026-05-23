@@ -560,6 +560,144 @@ async fn install_skill_errors_when_registry_omits_tarball_url() {
 // 50 MiB cap (decompressed)
 // ---------------------------------------------------------------------------
 
+/// `pakx install --json` emits a JSON array of per-entry rows on
+/// stdout, mirroring the `pakx outdated --json` discipline. The
+/// happy-path row carries `status: "ok"`, the entry's kind, and the
+/// resolved version. Human progress + summary still render on stderr.
+#[tokio::test]
+async fn install_json_emits_per_entry_rows_with_status_ok() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let id = "alice/json-install";
+    let version = "0.1.0";
+
+    let (tarball, sha) = build_test_tarball(&[TarEntry::file(
+        "SKILL.md",
+        b"---\nname: json-install\nversion: 0.1.0\n---\n# hi\n",
+    )]);
+    let server = mock_pakx_skill_registry(id, version, &sha, tarball).await;
+    seed_skill_manifest(&project, id, version);
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--pakx-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--mcp-base-url",
+            &server.uri(),
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let body = stdout.trim_end_matches('\n');
+    assert!(
+        !body.contains('\n'),
+        "json output must be single-line: {body:?}"
+    );
+    let v: Value = serde_json::from_str(body).expect("stdout is valid json");
+    let arr = v.as_array().expect("top level is an array");
+    assert_eq!(arr.len(), 1, "expected one entry, got: {arr:?}");
+    let row = &arr[0];
+    assert_eq!(row["id"], "alice/json-install");
+    assert_eq!(row["status"], "ok");
+    assert_eq!(row["kind"], "skills");
+    assert_eq!(row["version"], "0.1.0");
+    assert!(row.get("error").is_none(), "no error on success rows");
+}
+
+/// `pakx install --json` failure rows: integrity mismatch produces a
+/// `status: "failed"` row with the rendered reason in `error`, and
+/// the command still exits non-zero (matches the human path).
+#[tokio::test]
+async fn install_json_emits_failed_row_on_integrity_mismatch() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let id = "alice/json-fail";
+    let version = "0.1.0";
+
+    let (tarball, _real_sha) = build_test_tarball(&[TarEntry::file("SKILL.md", b"hi")]);
+    let bogus_sha = "deadbeef".repeat(8);
+    let server = mock_pakx_skill_registry(id, version, &bogus_sha, tarball).await;
+    seed_skill_manifest(&project, id, version);
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--pakx-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--mcp-base-url",
+            &server.uri(),
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let body = stdout.trim_end_matches('\n');
+    let v: Value = serde_json::from_str(body).expect("stdout is valid json");
+    let arr = v.as_array().expect("top level is an array");
+    assert_eq!(arr.len(), 1);
+    let row = &arr[0];
+    assert_eq!(row["status"], "failed");
+    assert_eq!(row["kind"], "skills");
+    let err = row["error"]
+        .as_str()
+        .expect("error string present on failed row");
+    assert!(
+        err.contains("integrity mismatch"),
+        "error should mention integrity mismatch: {err}"
+    );
+}
+
+/// `--no-cache` flag must parse + thread through to the runner's
+/// cache builders. Pin the surface so the flag stays advertised even
+/// if a future refactor moves the cache wiring.
+#[tokio::test]
+async fn install_accepts_no_cache_flag() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let id = "alice/no-cache";
+    let version = "0.1.0";
+
+    let (tarball, sha) = build_test_tarball(&[TarEntry::file(
+        "SKILL.md",
+        b"---\nname: no-cache\nversion: 0.1.0\n---\n# hi\n",
+    )]);
+    let server = mock_pakx_skill_registry(id, version, &sha, tarball).await;
+    seed_skill_manifest(&project, id, version);
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--pakx-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--mcp-base-url",
+            &server.uri(),
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+            "--no-cache",
+        ])
+        .assert()
+        .success();
+}
+
 /// Decompressed-bomb guard: a tarball where the **decompressed** sum
 /// of payloads exceeds 50 MiB must error. We build the tarball with
 /// gzip-default compression over an incompressible (random) payload

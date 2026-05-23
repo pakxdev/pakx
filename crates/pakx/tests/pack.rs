@@ -405,6 +405,135 @@ fn pack_json_carries_warnings_alongside_stderr() {
     );
 }
 
+/// `--output` is the canonical long form (round 39 unification). The
+/// historical `--out` is still accepted as an alias for one release;
+/// pin both so a future removal of the alias trips this test
+/// loudly + documents the breaking change.
+#[test]
+fn pack_accepts_output_long_form() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_min_skill(src.path(), "demo", "0.1.0");
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(out.path().join("demo-0.1.0.tgz").is_file());
+}
+
+#[test]
+fn pack_accepts_out_alias() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_min_skill(src.path(), "demo", "0.1.0");
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(out.path().join("demo-0.1.0.tgz").is_file());
+}
+
+/// `pakx pack --dry-run --json` must enumerate every would-be tarball
+/// entry on stdout WITHOUT writing the `.tgz` to disk. The contract:
+///   - `dryRun: true` discriminator,
+///   - `files: [{path, sizeBytes}]` array,
+///   - exit 0 on success,
+///   - no `.tgz` written.
+#[test]
+fn pack_dry_run_json_lists_files_without_writing_tarball() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: demo\nversion: 0.1.0\ndescription: tidy.\n",
+    );
+    std::fs::create_dir_all(src.path().join("reference")).unwrap();
+    std::fs::write(src.path().join("reference").join("notes.md"), b"# Notes\n").unwrap();
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let body = stdout.trim_end_matches('\n');
+    let v: Value = serde_json::from_str(body).expect("stdout is valid json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["name"], "demo");
+    assert_eq!(v["version"], "0.1.0");
+    assert_eq!(v["dryRun"], true);
+    let files = v["files"].as_array().expect("files array");
+    // Two regular files: SKILL.md + reference/notes.md.
+    assert_eq!(files.len(), 2);
+    let paths: Vec<_> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert!(paths.contains(&"SKILL.md"), "files: {paths:?}");
+    assert!(paths.contains(&"reference/notes.md"), "files: {paths:?}");
+    for f in files {
+        let size = f["sizeBytes"].as_u64().expect("sizeBytes integer");
+        assert!(size > 0, "every entry should have a non-zero size: {f}");
+    }
+    assert!(
+        !out.path().join("demo-0.1.0.tgz").exists(),
+        "dry-run must not write the .tgz to disk"
+    );
+}
+
+/// `pakx pack --dry-run` (no `--json`) prints a short human summary on
+/// stderr and writes nothing. Pinning the stderr text matters because
+/// the `→ next:` hint is the user's discoverability path back to a
+/// real pack.
+#[test]
+fn pack_dry_run_human_prints_summary_without_writing() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: demo\nversion: 0.1.0\ndescription: tidy.\n",
+    );
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("would pack"), "got stderr: {stderr}");
+    assert!(
+        stderr.contains("pakx pack"),
+        "next-step hint should reference `pakx pack`: {stderr}",
+    );
+    assert!(
+        !out.path().join("demo-0.1.0.tgz").exists(),
+        "dry-run must not write the .tgz to disk"
+    );
+}
+
 /// Windows-equivalent: symlinks require elevation to create on Windows,
 /// so this only runs when the test harness has the privilege. Skipped
 /// otherwise (returning early keeps CI green on developer machines that

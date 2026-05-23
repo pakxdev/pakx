@@ -6,4 +6,4 @@ pub mod mcp_translate;
 pub mod runner;
 pub mod skill;
 
-pub use runner::{run, InstallOpts, ADAPTER_WIRED_KINDS};
+pub use runner::{run, InstallOpts, InstallReportEntry, InstallStatus, ADAPTER_WIRED_KINDS};

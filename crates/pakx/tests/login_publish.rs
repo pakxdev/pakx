@@ -524,7 +524,7 @@ async fn unpublish_calls_delete() {
         ])
         .assert()
         .success();
-    Command::cargo_bin(BIN)
+    let assertion = Command::cargo_bin(BIN)
         .unwrap()
         .args([
             "unpublish",
@@ -537,6 +537,20 @@ async fn unpublish_calls_delete() {
         .assert()
         .success()
         .stderr(predicate::str::contains("unpublished alice/pdf@1.0.0"));
+    // Round 39 copy correction: the post-unpublish hint must NOT
+    // promise the aspirational "30-day soft-delete grace; resolves to
+    // 404" semantics (no hard-delete cron exists on the registry), and
+    // MUST explain the real behaviour ("still resolvable for existing
+    // pins but hidden from list endpoints").
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stderr.contains("30-day soft-delete grace"),
+        "old aspirational copy must be gone: {stderr}",
+    );
+    assert!(
+        stderr.contains("still resolvable for existing pins"),
+        "new accurate copy must be present: {stderr}",
+    );
 }
 
 /// Publish-emit shape: when the manifest declares sponsors, the POST

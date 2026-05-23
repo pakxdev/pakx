@@ -86,6 +86,13 @@ pub struct AddArgs {
     /// classified by the local `infer_kind` heuristic.
     #[arg(long, hide = true)]
     pub pakx_base_url: Option<String>,
+
+    /// Bypass the federated-source cache for this invocation. Drops
+    /// the per-call cache TTL to zero so the kind-probe and MCP
+    /// validation paths re-query their upstreams rather than serving
+    /// a stale "not found" response.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 /// Resolved positional/flag combination after parsing the dual-form
@@ -191,7 +198,7 @@ pub async fn run(args: AddArgs) -> Result<()> {
         if local == PackageType::Skills {
             (local, false)
         } else {
-            match probe_pakx_kind(&id, args.pakx_base_url.as_deref()).await {
+            match probe_pakx_kind(&id, args.pakx_base_url.as_deref(), args.no_cache).await {
                 Ok(Some(remote_kind)) => (remote_kind, false),
                 Ok(None) => (PackageType::Mcp, true),
                 Err(e) => {
@@ -211,7 +218,7 @@ pub async fn run(args: AddArgs) -> Result<()> {
     let mut manifest = load_or_init(&target)?;
 
     if !args.no_validate && kind == PackageType::Mcp {
-        match validate_mcp(&id, args.mcp_base_url.as_deref()).await {
+        match validate_mcp(&id, args.mcp_base_url.as_deref(), args.no_cache).await {
             Ok(version) => {
                 eprintln!(
                     "{} {} v{} via official MCP Registry",
@@ -335,6 +342,7 @@ fn load_or_init(target: &Path) -> Result<Manifest> {
 async fn probe_pakx_kind(
     id: &str,
     base_url_override: Option<&str>,
+    no_cache: bool,
 ) -> Result<Option<PackageType>, RegistryError> {
     // pakx-registry ids are exactly `<owner>/<name>` with one slash.
     // Anything else (e.g. `io.github.acme/foo` MCP-shape, free-form
@@ -353,7 +361,11 @@ async fn probe_pakx_kind(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    let cache = CacheDir::with_root(&cache_root);
+    let cache = if no_cache {
+        CacheDir::with_root(&cache_root).with_ttl(std::time::Duration::ZERO)
+    } else {
+        CacheDir::with_root(&cache_root)
+    };
     let source = PakxSource::with_parts(http_client(), base, cache);
     match source.fetch(id).await {
         Ok(pkg) => Ok(pkg
@@ -391,7 +403,11 @@ fn parse_registry_kind(s: &str) -> Option<PackageType> {
     }
 }
 
-async fn validate_mcp(id: &str, base_url_override: Option<&str>) -> Result<String, RegistryError> {
+async fn validate_mcp(
+    id: &str,
+    base_url_override: Option<&str>,
+    no_cache: bool,
+) -> Result<String, RegistryError> {
     let base = base_url_override.unwrap_or(DEFAULT_MCP_BASE);
     // Per-call cache root — see `outdated::build_clients` for rationale.
     let cache_root = env::temp_dir().join(format!(
@@ -401,7 +417,11 @@ async fn validate_mcp(id: &str, base_url_override: Option<&str>) -> Result<Strin
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    let cache = CacheDir::with_root(&cache_root);
+    let cache = if no_cache {
+        CacheDir::with_root(&cache_root).with_ttl(std::time::Duration::ZERO)
+    } else {
+        CacheDir::with_root(&cache_root)
+    };
     let source = OfficialMcpSource::with_parts(http_client(), base, cache);
     let client = RegistryClient::new().with_source(Box::new(source));
     let pkg = client.fetch(RegistrySource::OfficialMcp, id).await?;

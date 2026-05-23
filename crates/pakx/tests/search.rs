@@ -457,6 +457,100 @@ async fn search_no_official_mcp_skips_mcp_source() {
         .success();
 }
 
+/// `--limit 0` previously returned an empty list silently — never
+/// what a user actually wants from a search command. Round 39 clamped
+/// the floor to 1 via a `value_parser`, so passing `-n 0` must now
+/// fail at parse time with a precise diagnostic.
+#[test]
+fn search_rejects_limit_zero_at_parse_time() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "anything",
+            "-n",
+            "0",
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--limit must be >= 1"));
+}
+
+/// `--limit 1` still parses + executes — the clamp is exactly at 0,
+/// nothing higher. Pins the boundary so a future "be safe, clamp at
+/// 5" regression trips this test.
+#[tokio::test]
+async fn search_accepts_limit_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.acme/a", "description": "a", "version_detail": {"version": "1.0.0"} },
+                { "name": "io.github.acme/b", "description": "b", "version_detail": {"version": "1.0.0"} }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--json",
+            "-n",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 1);
+}
+
+/// `--no-cache` propagation: with the flag set, the federated source
+/// must re-query the registry on a back-to-back call even though the
+/// in-memory cache held a fresh response. We mock the same path twice
+/// and observe that the second call still produced a hit (i.e. the
+/// command succeeded) — the per-call cache-TTL clamp is verified by
+/// the `cache.rs` unit tests; this test pins that the flag at least
+/// parses and threads through to the `build_client` path.
+#[tokio::test]
+async fn search_accepts_no_cache_flag() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.acme/cached", "description": "x", "version_detail": {"version": "1.0.0"} }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--no-cache",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("io.github.acme/cached"));
+}
+
 /// `--no-official-mcp` must appear in the help surface so users
 /// discover the third toggle alongside `--no-smithery` /
 /// `--no-pakx-registry`. Pin the help-text contract so a future

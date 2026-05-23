@@ -99,6 +99,49 @@ pub fn pack_dir(src_dir: &Path, out_dir: &Path) -> Result<PackOutput> {
     })
 }
 
+/// Per-entry summary for `pakx pack --dry-run --json`. Mirrors what
+/// would end up in the tarball but without compressing / writing the
+/// `.tgz`. The `path` is the relative-in-archive form (always forward
+/// slashes); `size_bytes` is the **uncompressed** payload length so a
+/// pipeline can sum the total decompressed size without reading the
+/// tarball back.
+#[derive(Debug, Clone)]
+pub struct DryRunEntry {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DryRunOutput {
+    pub manifest: Manifest,
+    pub warnings: Vec<String>,
+    pub entries: Vec<DryRunEntry>,
+}
+
+/// Read the SKILL.md frontmatter + enumerate every file that would be
+/// packed, WITHOUT building or writing the tarball. The entry list is
+/// sorted alphabetically by path so two dry-runs over the same source
+/// produce identical output — same discipline `build_tarball` uses for
+/// its own tar entries.
+pub fn dry_run_dir(src_dir: &Path) -> Result<DryRunOutput> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (manifest, warnings) = read_manifest(src_dir, &cwd)?;
+    let mut files = collect_files(src_dir, &cwd)?;
+    files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    let entries = files
+        .into_iter()
+        .map(|f| DryRunEntry {
+            size_bytes: f.contents.len() as u64,
+            path: f.relative,
+        })
+        .collect();
+    Ok(DryRunOutput {
+        manifest,
+        warnings,
+        entries,
+    })
+}
+
 fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<(Manifest, Vec<String>)> {
     let skill_md = src_dir.join(SKILL_MD);
     let text = std::fs::read_to_string(&skill_md)
