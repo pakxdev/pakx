@@ -174,6 +174,13 @@ pub async fn run(args: PublishArgs) -> Result<()> {
     // older manifest that hasn't been re-edited.
     let sponsors_payload =
         (!pack.manifest.sponsors.is_empty()).then_some(pack.manifest.sponsors.as_slice());
+    // README captured at pack-time from the bundle's `README.md`.
+    // Forwarded on publish when present so the registry's omit-vs-
+    // explicit semantics fire — a bundle without a README on republish
+    // never wipes a previously-stored README. `readme` is `None` for
+    // bundles that ship no README; we forward as `None`, which the
+    // serializer skips entirely (see `CreatePackageRequest::readme`).
+    let readme_payload = pack.manifest.readme.as_deref();
     let pkg = backend
         .create_package(
             &entry.token,
@@ -182,6 +189,7 @@ pub async fn run(args: PublishArgs) -> Result<()> {
                 kind: args.kind.as_str(),
                 description: args.description.as_deref(),
                 sponsors: sponsors_payload,
+                readme: readme_payload,
             },
         )
         .await
@@ -203,6 +211,7 @@ pub async fn run(args: PublishArgs) -> Result<()> {
             &pkg.name,
             &pack.manifest.version,
             pack.bytes,
+            readme_payload,
         )
         .await
         .map_err(map_backend_err)?;

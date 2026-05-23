@@ -22,7 +22,14 @@ use serde::Deserialize;
 use crate::redact::redact_path;
 
 const SKILL_MD: &str = "SKILL.md";
+const README_MD: &str = "README.md";
 const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
+/// Hard cap on the README markdown captured from the bundle's
+/// `README.md`. 256 KiB matches the registry-side `PublishBody.readme`
+/// cap (`packages.readme` in pakx-registry); a larger source is
+/// truncated with a warning rather than packed. NOT a hard error: the
+/// publisher can ship the bundle regardless and trim later.
+const README_MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Manifest {
@@ -41,6 +48,13 @@ pub struct Manifest {
     /// missing; never `None` so downstream callers don't need to branch
     /// between "no field" and "empty list".
     pub sponsors: Vec<Sponsor>,
+    /// Long-form README markdown captured at pack time from
+    /// `<src>/README.md` when present. `None` when the bundle omits a
+    /// README. Forwarded by `pakx publish` to the registry so the
+    /// pakx-web `/p/*` detail page can render it. Capped at
+    /// `README_MAX_BYTES` (256 KiB) — oversize sources are truncated
+    /// with a warning so the publish itself still succeeds.
+    pub readme: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,15 +205,75 @@ fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<(Manifest, Vec<S
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "skills".to_string());
+    // Optionally capture the bundle's `README.md`. Absent file → `None`
+    // (every bundle prior to this round shipped without one, and the
+    // registry column is nullable). Oversize source → truncate to
+    // `README_MAX_BYTES` and emit a non-fatal warning so the publisher
+    // notices but the publish still goes through. Read failures (other
+    // than "not found") bail — a permission error on README.md is the
+    // kind of surprise the publisher needs to see immediately, not
+    // silently dropped.
+    let readme = load_readme(src_dir, project_root, &mut warnings)?;
     Ok((
         Manifest {
             name,
             version,
             kind,
             sponsors,
+            readme,
         },
         warnings,
     ))
+}
+
+/// Read `<src_dir>/README.md`, truncate to `README_MAX_BYTES` if needed,
+/// and surface a warning on truncation. Returns `Ok(None)` when the
+/// file does not exist (the historical zero-README behavior) and `Err`
+/// on any other I/O failure (permission denied, unreadable bytes) so
+/// the publisher sees the problem before upload instead of silently
+/// shipping a no-README bundle.
+fn load_readme(
+    src_dir: &Path,
+    project_root: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<Option<String>> {
+    let path = src_dir.join(README_MD);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("read {}", redact_path(&path, project_root)));
+        }
+    };
+    // Decode as UTF-8 with `from_utf8_lossy` — a README with invalid
+    // bytes (a stray BOM-less Latin-1 paste, a binary file mistakenly
+    // named README.md) becomes a string with replacement chars rather
+    // than a hard failure. The registry stores text anyway, so this
+    // keeps the publish surface friendly while the publisher fixes
+    // the source. `into_owned` so we don't carry a Cow through the
+    // Manifest.
+    let decoded = String::from_utf8_lossy(&bytes).into_owned();
+    if decoded.len() > README_MAX_BYTES {
+        warnings.push(format!(
+            "{README_MD} is {} bytes; truncating to {README_MAX_BYTES} bytes (registry cap)",
+            decoded.len()
+        ));
+        // Truncate at a char boundary so the truncated string remains
+        // valid UTF-8 even if the cap lands inside a multi-byte
+        // codepoint. `char_indices` gives us the byte offset of every
+        // char start; pick the largest start ≤ cap.
+        let cap = decoded
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= README_MAX_BYTES)
+            .last()
+            .unwrap_or(0);
+        // Trim at the char boundary, then clone so the returned String
+        // owns its bytes. `String::truncate` would also work but
+        // requires `mut`; this expresses the intent cleaner.
+        return Ok(Some(decoded[..cap].to_owned()));
+    }
+    Ok(Some(decoded))
 }
 
 /// Strongly-typed view of the SKILL.md YAML frontmatter we consume at
@@ -418,4 +492,136 @@ fn collect_files(src_dir: &Path, project_root: &Path) -> Result<Vec<PackedFile>>
         );
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod readme_capture_tests {
+    //! Pack-time README capture is the publisher-facing wire path that
+    //! carries `README.md` from a bundle to the registry's `packages.readme`
+    //! column. These tests pin the capture / truncation / absent
+    //! semantics that `pakx publish` relies on. They live alongside the
+    //! production code (instead of `tests/pack.rs`) because the binary
+    //! crate doesn't expose `pack_dir` to integration tests.
+    use super::{pack_dir, README_MAX_BYTES};
+    use tempfile::TempDir;
+
+    fn write_skill(dir: &std::path::Path, frontmatter: &str) {
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\n{frontmatter}---\n# Hi\n"),
+        )
+        .unwrap();
+    }
+
+    /// A bundle that ships a `README.md` alongside `SKILL.md` must have
+    /// its README captured verbatim in `Manifest.readme` so `pakx
+    /// publish` can forward the markdown to the registry.
+    #[test]
+    fn captures_readme_when_present() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_skill(
+            src.path(),
+            "name: demo\nversion: 0.1.0\ndescription: tidy.\n",
+        );
+        let body = "# demo\n\nLong-form usage docs that the registry will store.\n";
+        std::fs::write(src.path().join("README.md"), body).unwrap();
+
+        let result = pack_dir(src.path(), out.path()).expect("pack succeeds");
+        assert_eq!(result.manifest.readme.as_deref(), Some(body));
+        assert!(
+            result.warnings.is_empty(),
+            "no warnings expected when README fits and description is present: {:?}",
+            result.warnings
+        );
+    }
+
+    /// Bundles without a `README.md` must surface `Manifest.readme` as
+    /// `None`. The CLI uses `None` (omit) vs `Some` (set) to drive the
+    /// registry's omit-vs-explicit semantics on republish — `None` means
+    /// "no change", which is what a publisher with no README expects.
+    #[test]
+    fn readme_is_none_when_absent() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_skill(
+            src.path(),
+            "name: demo\nversion: 0.1.0\ndescription: tidy.\n",
+        );
+
+        let result = pack_dir(src.path(), out.path()).expect("pack succeeds");
+        assert!(result.manifest.readme.is_none());
+    }
+
+    /// An oversized README (>256 KiB) must be truncated at pack time —
+    /// non-fatally — so the publish itself still succeeds and the wire
+    /// payload stays under the registry cap. Truncation must land on a
+    /// UTF-8 char boundary; the warning text must mention README and
+    /// truncation so the publisher notices.
+    #[test]
+    fn truncates_oversize_readme_with_warning() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_skill(
+            src.path(),
+            "name: demo\nversion: 0.1.0\ndescription: tidy.\n",
+        );
+        let oversized = "x".repeat(README_MAX_BYTES + (50 * 1024));
+        std::fs::write(src.path().join("README.md"), &oversized).unwrap();
+
+        let result = pack_dir(src.path(), out.path()).expect("pack succeeds");
+        let readme = result
+            .manifest
+            .readme
+            .as_deref()
+            .expect("manifest still captures README (truncated)");
+        assert!(
+            readme.len() <= README_MAX_BYTES,
+            "truncated README must fit under the cap: got {} bytes (cap {README_MAX_BYTES})",
+            readme.len()
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("README.md") && w.contains("truncating")),
+            "a truncation warning must surface: warnings={:?}",
+            result.warnings
+        );
+    }
+
+    /// A README with multi-byte UTF-8 right at the truncation boundary
+    /// must not produce a torn codepoint. The cap is in bytes, but the
+    /// result must always be valid UTF-8 — otherwise downstream
+    /// `serde_json::to_string` on the publish body would refuse the
+    /// string. Synthesise a README with a multi-byte char straddling
+    /// the cap and confirm the truncated string is still well-formed.
+    #[test]
+    fn truncation_respects_utf8_char_boundaries() {
+        let src = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_skill(
+            src.path(),
+            "name: demo\nversion: 0.1.0\ndescription: tidy.\n",
+        );
+        // Build a string whose byte length crosses the cap inside a
+        // 3-byte codepoint (`€` = U+20AC, 3 bytes). The exact offset
+        // doesn't matter — what matters is that we have multi-byte
+        // content past the cap so the naive `[..N]` slice would panic.
+        let head = "a".repeat(README_MAX_BYTES - 1);
+        let body = format!("{head}€{}", "b".repeat(1024));
+        std::fs::write(src.path().join("README.md"), &body).unwrap();
+
+        let result = pack_dir(src.path(), out.path()).expect("pack succeeds");
+        let readme = result.manifest.readme.expect("readme captured");
+        // The slice must be valid UTF-8 by construction (String
+        // guarantees it) — assert the byte length is at or below cap
+        // and that the trailing multi-byte char was dropped, not torn.
+        assert!(readme.len() <= README_MAX_BYTES);
+        assert!(
+            !readme.ends_with(char::REPLACEMENT_CHARACTER),
+            "truncation must not leave a replacement char tail: {:?}",
+            &readme[readme.len().saturating_sub(4)..]
+        );
+    }
 }

@@ -709,6 +709,163 @@ async fn post_packages_bodies(server: &MockServer) -> Vec<Value> {
         .collect()
 }
 
+/// Pull every `PUT /api/v1/packages/...` (version upload) request the
+/// server received. Returns the raw `Request` so callers can inspect
+/// both the binary tarball body and headers like `x-pakx-readme-b64`.
+async fn put_version_requests(server: &MockServer) -> Vec<Request> {
+    server
+        .received_requests()
+        .await
+        .expect("wiremock recorder enabled")
+        .into_iter()
+        .filter(|r: &Request| {
+            // `/api/v1/packages/<owner>/<name>/<version>` —
+            // `.split('/')` on the leading-slash path yields 7 segments
+            // (leading empty + "api" + "v1" + "packages" + 3 dynamic
+            // parts). Match exactly so the PATCH/GET on
+            // `/api/v1/packages/<owner>/<name>` (6 segments) never gets
+            // counted here.
+            r.method == wiremock::http::Method::PUT
+                && r.url.path().starts_with("/api/v1/packages/")
+                && r.url.path().split('/').count() == 7
+        })
+        .collect()
+}
+
+/// A bundle that ships a `README.md` alongside `SKILL.md` must forward
+/// the markdown to the registry on both the POST upsert (JSON body
+/// `readme` field) and the PUT version upload (`x-pakx-readme-b64`
+/// header). The split exists because the PUT body is the raw tarball;
+/// the README rides as a base64-encoded header so it can travel
+/// alongside the binary payload without moving to multipart.
+#[tokio::test]
+async fn publish_forwards_readme_in_post_body_and_put_header() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = mock_registry("alice").await;
+
+    // Same minimal skill the other publish tests use, plus a README.
+    write_skill(&src, "pdf", "1.0.0");
+    let readme_body = "# pdf\n\nLong-form usage docs.\n\n```\npakx add alice/pdf\n```\n";
+    std::fs::write(src.path().join("README.md"), readme_body).unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "publish",
+            src.path().to_str().unwrap(),
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // POST body must carry the README verbatim — the upsert path is
+    // the canonical store for `packages.readme`.
+    let posts = post_packages_bodies(&server).await;
+    assert_eq!(posts.len(), 1, "expected exactly one POST /api/v1/packages");
+    let body = &posts[0];
+    let posted_readme = body
+        .get("readme")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("expected `readme` string in POST body, got: {body}"));
+    assert_eq!(posted_readme, readme_body);
+
+    // PUT must carry the README via the base64 header. The binary
+    // body is still the raw tarball so the registry's Content-Length
+    // pre-check keeps working; the header is the only practical
+    // piggyback path.
+    let puts = put_version_requests(&server).await;
+    assert_eq!(puts.len(), 1, "expected exactly one PUT version request");
+    let header_b64 = puts[0]
+        .headers
+        .get("x-pakx-readme-b64")
+        .unwrap_or_else(|| panic!("expected x-pakx-readme-b64 header on PUT"))
+        .to_str()
+        .expect("header is ascii base64");
+    let decoded = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        header_b64.as_bytes(),
+    )
+    .expect("header value decodes as base64");
+    let decoded_text = String::from_utf8(decoded).expect("decoded readme is utf-8");
+    assert_eq!(decoded_text, readme_body);
+}
+
+/// A bundle without a `README.md` must NOT send `readme` in the POST
+/// body and NOT send the `x-pakx-readme-b64` header. The registry
+/// treats omission as "no change", so silently sending an empty string
+/// would wipe a previously-published README on republish.
+#[tokio::test]
+async fn publish_omits_readme_when_bundle_has_none() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = mock_registry("alice").await;
+
+    write_skill(&src, "pdf", "1.0.0");
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "publish",
+            src.path().to_str().unwrap(),
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let posts = post_packages_bodies(&server).await;
+    assert_eq!(posts.len(), 1);
+    assert!(
+        posts[0].get("readme").is_none(),
+        "readme must be omitted (not null, not empty) when bundle has no README.md — \
+         the registry treats absent as no-change; got body: {body}",
+        body = posts[0]
+    );
+
+    let puts = put_version_requests(&server).await;
+    assert_eq!(puts.len(), 1);
+    assert!(
+        puts[0].headers.get("x-pakx-readme-b64").is_none(),
+        "x-pakx-readme-b64 header must be absent when bundle has no README.md"
+    );
+}
+
 #[test]
 fn unpublish_rejects_bad_spec() {
     let temp = TempDir::new().unwrap();
