@@ -291,7 +291,20 @@ fn build_clients(
     // platform that lacks `CacheDir::default_path()`. The check is
     // read-only and the cache is incidental — a fresh cache per
     // invocation is fine.
-    let cache_root = std::env::temp_dir().join("pakx-outdated-cache");
+    //
+    // The dir name is keyed on pid + nanos so parallel integration
+    // tests cannot share cache entries when their `wiremock` mock
+    // servers happen to land on the same loopback port (Linux releases
+    // ports aggressively; on a hot CI runner two sequential tests
+    // routinely see a port collision). With per-call dirs the cache
+    // key collision window goes to zero.
+    let cache_root = std::env::temp_dir().join(format!(
+        "pakx-outdated-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
     let http = Client::new();
     Ok(Clients {
         pakx: PakxSource::with_parts(http.clone(), pakx_url, CacheDir::with_root(&cache_root)),
