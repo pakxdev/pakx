@@ -13,7 +13,9 @@ use pakx_core::manifest::{
     add_shorthand, read_from, write_to, AddOutcome, Dependencies, Manifest, PackageType,
 };
 use pakx_core::{http_client, RegistrySource};
-use pakx_registry_client::{CacheDir, OfficialMcpSource, RegistryClient, RegistryError};
+use pakx_registry_client::{
+    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, RegistryError, Source, PAKX_BASE_URL,
+};
 use tracing::{debug, warn};
 
 use crate::redact::{project_root_for, redact_path};
@@ -77,6 +79,13 @@ pub struct AddArgs {
     /// Override the official MCP Registry base URL (testing).
     #[arg(long, hide = true)]
     pub mcp_base_url: Option<String>,
+
+    /// Override the pakx-registry base URL (testing). Used by the
+    /// kind-probe path that fires when the user supplied neither a
+    /// `<kind>` positional nor `-t/--type` and the id has not been
+    /// classified by the local `infer_kind` heuristic.
+    #[arg(long, hide = true)]
+    pub pakx_base_url: Option<String>,
 }
 
 /// Resolved positional/flag combination after parsing the dual-form
@@ -148,22 +157,60 @@ pub async fn run(args: AddArgs) -> Result<()> {
 
     let resolved = resolve_positional_form(&args)?;
     let id = resolved.id;
-    let kind = resolved
-        .explicit_kind
-        .map_or_else(|| infer_kind(&id), AddType::to_core);
 
-    debug!(target: "pakx::add", %id, ?kind, "resolved package kind");
+    // Validate any user-supplied base URLs BEFORE any HTTP work fires.
+    // Mirrors `pakx install` + `pakx test` + `pakx outdated` so a
+    // userinfo-smuggled override (`http://localhost@evil.com/`) is
+    // rejected before the kind probe or MCP validation hits the wire.
+    if let Some(u) = args.mcp_base_url.as_deref() {
+        validate_base_url(u)?;
+    }
+    if let Some(u) = args.pakx_base_url.as_deref() {
+        validate_base_url(u)?;
+    }
+
+    // Resolve kind:
+    //   1. Explicit `<kind>` positional or `-t/--type` wins outright.
+    //   2. Local `infer_kind` heuristic catches obvious shapes
+    //      (`<owner>/skills/<name>`).
+    //   3. Otherwise probe pakx-registry: it is the source of truth for
+    //      first-party packages and will tell us `kind: "skills"` /
+    //      `"mcp"` / etc. directly.
+    //   4. If the probe 404s (or fails), fall back to MCP as the
+    //      historical default — `pakx add` predates pakx-registry and
+    //      almost every published id used to be an MCP server.
+    //
+    // `probed_pakx_404` records that step 3 fired AND found nothing,
+    // which lets the MCP-registry validation produce a softened warn
+    // ("not found in pakx-registry or the official MCP Registry") that
+    // is honest about both sources having been consulted.
+    let (kind, probed_pakx_404) = if let Some(k) = resolved.explicit_kind {
+        (k.to_core(), false)
+    } else {
+        let local = infer_kind(&id);
+        if local == PackageType::Skills {
+            (local, false)
+        } else {
+            match probe_pakx_kind(&id, args.pakx_base_url.as_deref()).await {
+                Ok(Some(remote_kind)) => (remote_kind, false),
+                Ok(None) => (PackageType::Mcp, true),
+                Err(e) => {
+                    // Network / decode error on the probe is non-fatal:
+                    // keep the historical MCP-default behavior but log
+                    // so users can see why their skill landed under
+                    // `mcp:` if the registry was unreachable.
+                    debug!(target: "pakx::add", %id, error = %e, "pakx-registry kind probe failed; falling back to MCP default");
+                    (PackageType::Mcp, false)
+                }
+            }
+        }
+    };
+
+    debug!(target: "pakx::add", %id, ?kind, probed_pakx_404, "resolved package kind");
 
     let mut manifest = load_or_init(&target)?;
 
     if !args.no_validate && kind == PackageType::Mcp {
-        // Vet any user-supplied `--mcp-base-url` BEFORE any HTTP work.
-        // Mirrors `pakx install` + `pakx test` + `pakx outdated` so a
-        // userinfo-smuggled override (`http://localhost@evil.com/`) is
-        // rejected before the registry probe fires.
-        if let Some(u) = args.mcp_base_url.as_deref() {
-            validate_base_url(u)?;
-        }
         match validate_mcp(&id, args.mcp_base_url.as_deref()).await {
             Ok(version) => {
                 eprintln!(
@@ -175,12 +222,22 @@ pub async fn run(args: AddArgs) -> Result<()> {
             }
             Err(e) => match e {
                 RegistryError::NotFound { .. } => {
-                    warn!(target: "pakx::add", %id, "not in official MCP Registry; adding anyway");
-                    eprintln!(
-                        "{} {} not in the official MCP Registry; adding to manifest anyway (use --no-validate to silence)",
-                        ui::glyph_warn_err(),
-                        id
-                    );
+                    warn!(target: "pakx::add", %id, probed_pakx_404, "not in registry; adding anyway");
+                    if probed_pakx_404 {
+                        eprintln!(
+                            "{} {} not found in pakx-registry or the official MCP Registry; \
+                             adding to manifest anyway as kind=mcp \
+                             (override with -t skills if this is a pakx skill, or --no-validate to silence)",
+                            ui::glyph_warn_err(),
+                            id
+                        );
+                    } else {
+                        eprintln!(
+                            "{} {} not in the official MCP Registry; adding to manifest anyway (use --no-validate to silence)",
+                            ui::glyph_warn_err(),
+                            id
+                        );
+                    }
                 }
                 other => bail!("registry validation failed: {other}"),
             },
@@ -252,6 +309,80 @@ fn load_or_init(target: &Path) -> Result<Manifest> {
         agents: None,
         dependencies: Dependencies::default(),
     })
+}
+
+/// Probe pakx-registry for `<owner>/<name>` and, if the package is
+/// known, return its declared `kind` mapped onto [`PackageType`].
+///
+/// Returns:
+///   * `Ok(Some(kind))` — package exists, kind known.
+///   * `Ok(None)` — package does not exist (404) **or** exists but
+///     reports an unknown/missing `kind` value (we prefer the safe
+///     MCP default over guessing).
+///   * `Err(_)` — transport / decode failure. Caller decides whether
+///     to fall back silently or surface.
+///
+/// The id is rejected up front if it does not look like the
+/// `<owner>/<name>` shape pakx-registry requires; in that case the
+/// probe simply reports `Ok(None)` so callers fall through to the
+/// historical default without firing a doomed HTTP request.
+async fn probe_pakx_kind(
+    id: &str,
+    base_url_override: Option<&str>,
+) -> Result<Option<PackageType>, RegistryError> {
+    // pakx-registry ids are exactly `<owner>/<name>` with one slash.
+    // Anything else (e.g. `io.github.acme/foo` MCP-shape, free-form
+    // strings) cannot exist there — skip the round-trip.
+    if !is_pakx_shaped_id(id) {
+        return Ok(None);
+    }
+    let base = base_url_override.unwrap_or(PAKX_BASE_URL);
+    // Per-call cache root keyed by pid + nanos so parallel integration
+    // tests cannot collide. Mirrors `outdated::build_clients` and
+    // `validate_mcp` below.
+    let cache_root = std::env::temp_dir().join(format!(
+        "pakx-add-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let cache = CacheDir::with_root(&cache_root);
+    let source = PakxSource::with_parts(http_client(), base, cache);
+    match source.fetch(id).await {
+        Ok(pkg) => Ok(pkg
+            .install_hints
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .and_then(parse_registry_kind)),
+        Err(RegistryError::NotFound { .. }) => Ok(None),
+        Err(other) => Err(other),
+    }
+}
+
+/// Cheap shape check matching `pakx_source::split_owner_name`: exactly
+/// one `/`, both halves non-empty. We can't import the private helper,
+/// and the rule is stable enough to mirror here verbatim.
+fn is_pakx_shaped_id(id: &str) -> bool {
+    match id.split_once('/') {
+        Some((owner, rest)) => !owner.is_empty() && !rest.is_empty() && !rest.contains('/'),
+        None => false,
+    }
+}
+
+/// Map the registry's `kind` JSON string onto [`PackageType`].
+/// Unknown / future kinds return `None` so the caller falls back to the
+/// historical default rather than guessing.
+fn parse_registry_kind(s: &str) -> Option<PackageType> {
+    match s {
+        "skills" => Some(PackageType::Skills),
+        "mcp" => Some(PackageType::Mcp),
+        "subagents" => Some(PackageType::Subagents),
+        "prompts" => Some(PackageType::Prompts),
+        "commands" => Some(PackageType::Commands),
+        "hooks" => Some(PackageType::Hooks),
+        _ => None,
+    }
 }
 
 async fn validate_mcp(id: &str, base_url_override: Option<&str>) -> Result<String, RegistryError> {
