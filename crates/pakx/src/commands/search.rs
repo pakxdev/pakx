@@ -7,13 +7,14 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use comfy_table::Cell;
+use pakx_core::http_client;
 use pakx_registry_client::{
     CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
-use reqwest::Client;
 use serde::Serialize;
 
+use crate::registry_url::validate_base_url;
 use crate::ui;
 
 #[derive(Debug, Clone, Args)]
@@ -82,7 +83,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         args.pakx_base_url.as_deref(),
         args.no_smithery,
         args.no_pakx_registry,
-    );
+    )?;
     let query = args.query.unwrap_or_default();
     let results = client.search(&query).await;
 
@@ -144,7 +145,7 @@ fn build_client(
     pakx_base: Option<&str>,
     no_smithery: bool,
     no_pakx_registry: bool,
-) -> RegistryClient {
+) -> Result<RegistryClient> {
     // Per-call cache root so parallel integration tests can't share
     // cache entries when their `wiremock` mock servers happen to land
     // on the same loopback port (Linux releases ports aggressively).
@@ -156,26 +157,49 @@ fn build_client(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    let mcp_url = mcp_base.unwrap_or(OFFICIAL_MCP_BASE_URL);
+    // Vet every user-supplied base URL BEFORE the federated search
+    // fires. Mirrors `pakx outdated::build_clients` — even though the
+    // search payload is anonymous, a userinfo-smuggled override would
+    // hand a network observer the query string the user typed (which
+    // commonly carries the package name they were about to install).
+    let mcp_url = match mcp_base {
+        Some(u) => {
+            validate_base_url(u)?;
+            u
+        }
+        None => OFFICIAL_MCP_BASE_URL,
+    };
     let mcp =
-        OfficialMcpSource::with_parts(Client::new(), mcp_url, CacheDir::with_root(&cache_root));
+        OfficialMcpSource::with_parts(http_client(), mcp_url, CacheDir::with_root(&cache_root));
     let mut client = RegistryClient::new().with_source(Box::new(mcp));
     if !no_smithery {
-        let smithery_url = smithery_base.unwrap_or(SMITHERY_BASE_URL);
+        let smithery_url = match smithery_base {
+            Some(u) => {
+                validate_base_url(u)?;
+                u
+            }
+            None => SMITHERY_BASE_URL,
+        };
         let sm = SmitherySource::with_parts(
-            Client::new(),
+            http_client(),
             smithery_url,
             CacheDir::with_root(&cache_root),
         );
         client = client.with_source(Box::new(sm));
     }
     if !no_pakx_registry {
-        let pakx_url = pakx_base.unwrap_or(PAKX_BASE_URL);
+        let pakx_url = match pakx_base {
+            Some(u) => {
+                validate_base_url(u)?;
+                u
+            }
+            None => PAKX_BASE_URL,
+        };
         let pakx =
-            PakxSource::with_parts(Client::new(), pakx_url, CacheDir::with_root(&cache_root));
+            PakxSource::with_parts(http_client(), pakx_url, CacheDir::with_root(&cache_root));
         client = client.with_source(Box::new(pakx));
     }
-    client
+    Ok(client)
 }
 
 fn truncate(s: &str, max: usize) -> String {

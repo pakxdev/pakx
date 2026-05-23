@@ -17,14 +17,13 @@ use anyhow::{Context, Result};
 use pakx_agents::{Adapter, AdapterError, ClaudeCodeAdapter};
 use pakx_core::manifest::{DepSpec, PackageType};
 use pakx_core::{
-    compute_integrity, read_manifest_from, write_lockfile_to, AgentId, Integrity, LockEntry,
-    Lockfile, Manifest, McpServer, RegistrySource, SkillFile, LOCKFILE_VERSION,
+    compute_integrity, http_client, read_manifest_from, write_lockfile_to, AgentId, Integrity,
+    LockEntry, Lockfile, Manifest, McpServer, RegistrySource, SkillFile, LOCKFILE_VERSION,
 };
 use pakx_registry_client::{
     CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
-use reqwest::Client;
 use tracing::{debug, warn};
 
 use super::bundle::{install_bundle_from_pakx, ResolvedBundle};
@@ -118,7 +117,7 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
             .clone()
             .unwrap_or_else(|| PAKX_BASE_URL.to_owned());
         let cache_root = std::env::temp_dir().join("pakx-install-cache");
-        let src = PakxSource::with_parts(Client::new(), &url, CacheDir::with_root(&cache_root));
+        let src = PakxSource::with_parts(http_client(), &url, CacheDir::with_root(&cache_root));
         Some((src, url))
     };
 
@@ -141,7 +140,7 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
     // a contradiction).
     if let Some(deps) = &manifest.dependencies.skills {
         if let Some((source, base_url)) = pakx_source_with_url.as_ref() {
-            let http = Client::new();
+            let http = http_client();
             for dep in deps {
                 install_skill_dep(
                     dep,
@@ -246,7 +245,7 @@ fn build_registry_client(
 
     let cache_root = std::env::temp_dir().join("pakx-install-cache");
     let mcp =
-        OfficialMcpSource::with_parts(Client::new(), mcp_url, CacheDir::with_root(&cache_root));
+        OfficialMcpSource::with_parts(http_client(), mcp_url, CacheDir::with_root(&cache_root));
     let mut client = RegistryClient::new().with_source(Box::new(mcp));
 
     if !no_smithery {
@@ -257,7 +256,7 @@ fn build_registry_client(
             }
             None => SMITHERY_BASE_URL,
         };
-        let sm = SmitherySource::with_parts(Client::new(), url, CacheDir::with_root(&cache_root));
+        let sm = SmitherySource::with_parts(http_client(), url, CacheDir::with_root(&cache_root));
         client = client.with_source(Box::new(sm));
     }
 
@@ -269,7 +268,7 @@ fn build_registry_client(
             }
             None => PAKX_BASE_URL,
         };
-        let pakx = PakxSource::with_parts(Client::new(), url, CacheDir::with_root(&cache_root));
+        let pakx = PakxSource::with_parts(http_client(), url, CacheDir::with_root(&cache_root));
         client = client.with_source(Box::new(pakx));
     }
 
@@ -494,7 +493,7 @@ async fn install_all_bundle_deps(
     for (kind, deps) in bundle_deps(manifest) {
         let Some(deps) = deps else { continue };
         if let Some((source, base_url)) = pakx_source_with_url {
-            let http = Client::new();
+            let http = http_client();
             for dep in deps {
                 install_bundle_dep(kind, dep, source, &http, base_url, claude, report, entries)
                     .await;

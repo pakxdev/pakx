@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use pakx_core::install::compute_integrity;
 use pakx_core::manifest::PackageType;
-use pakx_core::{McpServer, McpTransport, Skill};
+use pakx_core::{atomic_write, McpServer, McpTransport, Skill};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -473,8 +473,21 @@ async fn write_mcp_config(path: &Path, file: &McpConfigFile) -> Result<(), Adapt
         path: Some(path.to_path_buf()),
     })?;
     body.push('\n');
-    fs::write(path, body).await.map_err(|e| AdapterError::Io {
-        source: e,
-        path: Some(path.to_path_buf()),
-    })
+    // Route the `.mcp.json` write through `atomic_write` so a crash
+    // mid-flush cannot leave a half-serialised JSON file on disk —
+    // matches the discipline applied to `agents.lock`, `agents.yml`,
+    // and the federated cache. `atomic_write` is sync, so wrap in
+    // `spawn_blocking` to keep the async caller non-blocking.
+    let path_buf = path.to_path_buf();
+    let bytes = body.into_bytes();
+    tokio::task::spawn_blocking(move || atomic_write(&path_buf, &bytes))
+        .await
+        .map_err(|e| AdapterError::Io {
+            source: io::Error::other(e),
+            path: Some(path.to_path_buf()),
+        })?
+        .map_err(|e| AdapterError::Io {
+            source: e,
+            path: Some(path.to_path_buf()),
+        })
 }

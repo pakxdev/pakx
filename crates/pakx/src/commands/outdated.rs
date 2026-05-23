@@ -37,12 +37,11 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use comfy_table::{Cell, CellAlignment};
-use pakx_core::{read_lockfile_from, LockEntry, RegistrySource};
+use pakx_core::{http_client, read_lockfile_from, LockEntry, RegistrySource};
 use pakx_registry_client::{
     CacheDir, OfficialMcpSource, PakxSource, SmitherySource, Source, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
-use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -305,7 +304,7 @@ fn build_clients(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos())
     ));
-    let http = Client::new();
+    let http = http_client();
     Ok(Clients {
         pakx: PakxSource::with_parts(http.clone(), pakx_url, CacheDir::with_root(&cache_root)),
         mcp: OfficialMcpSource::with_parts(http.clone(), mcp_url, CacheDir::with_root(&cache_root)),

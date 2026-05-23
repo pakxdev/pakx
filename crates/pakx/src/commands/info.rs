@@ -12,11 +12,11 @@
 use anyhow::{anyhow, Result};
 use clap::Args;
 use comfy_table::{Cell, CellAlignment};
-use pakx_core::Sponsor;
+use pakx_core::{http_client, Sponsor};
 use pakx_registry_client::{CacheDir, PackageVersion, PakxSource};
-use reqwest::Client;
 use serde::Deserialize;
 
+use crate::registry_url::validate_base_url;
 use crate::ui;
 
 const DEFAULT_REGISTRY: &str = "https://registry.pakx.dev";
@@ -69,6 +69,14 @@ struct VersionEntry {
 #[allow(clippy::too_many_lines)] // linear branches; helpers would obscure shape
 pub async fn run(args: InfoArgs) -> Result<()> {
     let (owner, name) = split_id(&args.id)?;
+    // Vet any user-supplied `--registry` BEFORE any HTTP work. Even
+    // though this command is read-only, leaking the queried `<owner>/
+    // <name>` over plaintext HTTP would still hand a network observer
+    // the user's package-of-interest. Mirrors `pakx install` / `pakx
+    // outdated` discipline.
+    if args.registry != DEFAULT_REGISTRY {
+        validate_base_url(&args.registry)?;
+    }
     if let Some(version) = args.version.as_deref() {
         return run_version(&args, &owner, &name, version).await;
     }
@@ -82,7 +90,7 @@ pub async fn run(args: InfoArgs) -> Result<()> {
     // / DNS failure shows the registry URL the user gave us, not the
     // full reqwest error chain (which leaks the userinfo-stripped URL
     // and a 3-level cause stack that confuses adopters).
-    let response = Client::new()
+    let response = http_client()
         .get(&url)
         .header("user-agent", USER_AGENT)
         .header("accept", "application/json")
@@ -201,7 +209,7 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
     let cache_root =
         tempfile::tempdir().map_err(|e| anyhow!("could not create temp cache dir: {e}"))?;
     let cache = CacheDir::with_root(cache_root.path());
-    let source = PakxSource::with_parts(Client::new(), &args.registry, cache);
+    let source = PakxSource::with_parts(http_client(), &args.registry, cache);
     let meta = source
         .fetch_version(owner, name, version)
         .await

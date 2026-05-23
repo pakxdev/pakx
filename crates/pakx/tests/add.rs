@@ -266,3 +266,27 @@ fn add_dual_positional_invalid_kind_rejected() {
         .failure()
         .stderr(predicate::str::contains("is not a valid kind"));
 }
+
+/// `--mcp-base-url` must vet via `validate_base_url` BEFORE the
+/// validation probe fires. Mirrors `pakx install` / `pakx test` —
+/// a userinfo-smuggled URL must never see an HTTP request, even
+/// though the validation probe itself is anonymous.
+#[test]
+fn add_rejects_plaintext_http_mcp_base_url() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args([
+            "add",
+            "mcp",
+            "io.github.acme/cool",
+            "--mcp-base-url",
+            "http://evil.com",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}

@@ -224,3 +224,21 @@ async fn info_with_version_handles_missing_tarball_url() {
         "expiry footer must be gated on tarballUrl presence; stdout:\n{stdout}"
     );
 }
+
+/// `pakx info --registry` must vet user-supplied base URLs via
+/// `validate_base_url` BEFORE the HTTP probe fires. Even though `info`
+/// is read-only, leaking the queried `<owner>/<name>` over plaintext
+/// would still hand a network observer the package the user is
+/// inspecting (and on a userinfo-smuggled URL, the request body would
+/// go to an attacker-controlled host entirely).
+#[test]
+fn info_rejects_plaintext_http_registry() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args(["info", "alice/hello", "--registry", "http://evil.com"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}

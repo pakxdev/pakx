@@ -26,6 +26,7 @@
 //!   never prints to stdout/stderr — it goes from the HTTP response
 //!   straight into the credentials file.
 
+use pakx_core::http_client;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -106,7 +107,7 @@ pub struct DeviceAuthClient {
 impl DeviceAuthClient {
     #[must_use]
     pub fn new(base_url: &str) -> Self {
-        Self::with_client(Client::new(), base_url)
+        Self::with_client(http_client(), base_url)
     }
 
     #[must_use]
