@@ -22,12 +22,37 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   **Added** section for the new `pakx update` semantics (rewrite
   package pins in `agents.yml`).
 
+- **`pakx login` defaults to the device authorization grant flow.**
+  Previously, running `pakx login` with no `--token` argument dropped
+  into an interactive token-paste prompt. It now runs the new
+  `--device` flow against `POST /api/v1/auth/device` and prints a
+  user-code + verification URL for browser confirmation. The legacy
+  paste path is still reachable via `--token <pakx_v1_…>` or the
+  `PAKX_TOKEN` environment variable (the env-var path is what CI
+  runners should use). The interactive prompt is gone; scripts that
+  relied on stdin-fed `pakx login` must move to `--token` or
+  `PAKX_TOKEN`. The `--device` and `--token` flags are mutually
+  exclusive.
+
 ### Deprecated
 
 - **`--no-pakx` on `pakx search`** — use `--no-pakx-registry`. The
   alias will be removed in v0.2.
 
 ### Added
+
+- **`pakx login --device` — device authorization grant.** New default
+  login flow. `pakx login` (with no flags) prints a verification URL
+  and a short user-code, opens the URL in the system browser when
+  possible, and polls `POST /api/v1/auth/device/poll` until the
+  registry returns `success`, `denied`, or `expired`. RFC-8628-style
+  `slow_down` responses bump the poll interval by at least 5 seconds;
+  the overall window matches the server-supplied `expires_in` (600s).
+  Polling uses a monotonic `Instant`-based deadline so an NTP slew on
+  `SystemTime` cannot collapse the loop or extend it past the
+  registry's window. The token is never printed and never logged at
+  `tracing` levels above `debug` — it goes from the HTTP response
+  directly into the credentials file.
 
 - **`pakx whoami --json` — machine-readable identity payload.** Emits
   a single newline-terminated JSON object matching the `pakx list

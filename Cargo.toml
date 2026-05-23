@@ -68,6 +68,11 @@ semver = "1.0"
 # URL parsing — used to vet test-only registry base URL overrides
 # against userinfo / scheme / host smuggling.
 url = "2.5"
+# Cross-platform machine hostname for `pakx login --device` — sent to
+# the registry as `clientHostname` so the user sees a familiar label on
+# the device-approval page. Single source file, no transitive deps
+# beyond `libc`.
+gethostname = "0.5"
 # Internal crates
 pakx-core = { path = "crates/pakx-core" }
 pakx-agents = { path = "crates/pakx-agents" }
