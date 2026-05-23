@@ -348,7 +348,7 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   both pakx-registry and Smithery hits.** The 2026-05 incident report
   flagged that `pakx search hello-world --json` against production
   returned 10 Smithery hits and zero pakx-registry hits even though
-  `arwenizEr/hello-world@0.1.1` was live. Root cause turned out to
+  a known pakx-registry package was live. Root cause turned out to
   be upstream of the CLI — the registry list endpoint's
   `latestVersion` subquery was returning `null`. With that fixed
   server-side, the CLI now surfaces pakx-registry hits correctly,
@@ -453,11 +453,9 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   — the list/detail endpoint, which deliberately omits the signed
   `tarballUrl` (signed URLs are short-TTL; the backend doesn't mint one
   per `versions[]` entry). Live install against the first published
-  package `arwenizEr/hello-world@0.1.1` therefore always failed. The
-  resolver now calls `GET /api/v1/packages/{owner}/{name}/{version}`
-  (per-version endpoint, see backend route
-  `app/api/v1/packages/[owner]/[name]/[version]/route.ts:57-65`) which
-  returns the fresh signed `tarballUrl` alongside the per-version
+  package therefore always failed. The resolver now calls
+  `GET /api/v1/packages/{owner}/{name}/{version}` (per-version
+  endpoint) which returns the fresh signed `tarballUrl` alongside the per-version
   `sha256`, `sizeBytes`, `publishedAt`, and `deprecatedAt`. Pinned
   deps skip the list call entirely and go straight to the per-version
   endpoint; unpinned deps still hit the list endpoint to enumerate
@@ -615,7 +613,7 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   install loop only handled `mcp:` deps; skills were silently
   classified as `not yet supported`, leaving every published skill
   uninstallable (no consumer flow existed for the first published
-  package, `arwenizEr/hello-world@0.1.1`). The new path:
+  package). The new path:
   - Resolves the manifest shorthand `<owner>/<name>[@<version>]`
     against `GET /api/v1/packages/{owner}/{name}` on pakx-registry.
     Pinned versions are honoured; unpinned deps fall back to the

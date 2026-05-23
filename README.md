@@ -57,7 +57,7 @@ Prebuilt binaries plus matching `.sha256` files for `darwin / linux / windows ×
 
 ```sh
 pakx init                                                        # scaffold agents.yml
-pakx add skills arwenizEr/hello-world                            # add a skill
+pakx add skills example/hello-world                              # add a skill
 pakx install                                                     # resolve, verify, write lockfile
 pakx list                                                        # show what's pinned
 ```
@@ -118,7 +118,7 @@ agents:
 
 dependencies:
   skills:
-    - arwenizEr/hello-world@0.1.2
+    - example/hello-world@0.1.2
   mcp:
     - io.github.modelcontextprotocol/server-filesystem@latest
   subagents: []
@@ -128,7 +128,7 @@ dependencies:
 
 sponsors:
   - kind: github
-    url: https://github.com/sponsors/arwenizEr
+    url: https://github.com/sponsors/<owner>
 ```
 
 A runnable starter is at [`examples/agents-yml-starter/`](./examples/agents-yml-starter). A minimal publishable skill is at [`examples/hello-world/`](./examples/hello-world).

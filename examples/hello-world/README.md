@@ -58,11 +58,11 @@ server-side. Sponsor links render on the package's public page on
 
 ## what the registry does
 
-`pakx publish` uploads the tarball to Vercel Blob storage and records
-the sha256, manifest, and metadata in the pakx-registry database — every
-download is sha256-verified by the CLI on install. Once published, the
-package is discoverable via `pakx search`, `pakx info`, and the public
-browse UI at [pakx.dev/explore](https://pakx.dev/explore).
+`pakx publish` uploads the tarball to the pakx-registry, which records
+the sha256, manifest, and metadata — every download is sha256-verified
+by the CLI on install. Once published, the package is discoverable via
+`pakx search`, `pakx info`, and the public browse UI at
+[pakx.dev/explore](https://pakx.dev/explore).
 
 ## updating an existing publish
 
