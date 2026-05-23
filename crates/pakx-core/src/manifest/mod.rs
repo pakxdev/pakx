@@ -3,6 +3,7 @@
 pub mod io;
 pub mod mutate;
 pub mod parse;
+pub mod path;
 pub mod schema;
 pub mod sponsors;
 pub mod write;
@@ -13,6 +14,7 @@ pub use mutate::{
     split_shorthand, update_shorthand, AddOutcome, RemoveOutcome, UpdateOutcome,
 };
 pub use parse::parse_manifest;
+pub use path::{delete_value, get_value, parse_path, set_value, DeleteOutcome, PathError, PathSeg};
 pub use schema::{
     AgentId, DepSpec, Dependencies, GitSpec, Manifest, PackageType, RegistrySpec, Sponsor,
     SponsorKind, StringSpec, KNOWN_AGENT_IDS, PACKAGE_TYPES,

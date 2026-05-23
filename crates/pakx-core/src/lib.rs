@@ -26,10 +26,12 @@ pub use lockfile::{
     Integrity, LockEntry, Lockfile, RegistrySource, LOCKFILE_VERSION, REGISTRY_SOURCES,
 };
 pub use manifest::{
-    add_dep, add_shorthand, parse_manifest, read_from as read_manifest_from, remove_shorthand,
-    sections_containing, sections_containing_id, split_shorthand, update_shorthand,
-    validate_sponsors, write_manifest, write_to as write_manifest_to, AddOutcome, AgentId, DepSpec,
-    Dependencies, GitSpec, Manifest, PackageType, RegistrySpec, RemoveOutcome, Sponsor,
-    SponsorError, SponsorKind, StringSpec, UpdateOutcome, KNOWN_AGENT_IDS, MAX_SPONSORS,
-    PACKAGE_TYPES,
+    add_dep, add_shorthand, delete_value as manifest_delete_value, get_value as manifest_get_value,
+    parse_manifest, parse_path as manifest_parse_path, read_from as read_manifest_from,
+    remove_shorthand, sections_containing, sections_containing_id, set_value as manifest_set_value,
+    split_shorthand, update_shorthand, validate_sponsors, write_manifest,
+    write_to as write_manifest_to, AddOutcome, AgentId, DeleteOutcome, DepSpec, Dependencies,
+    GitSpec, Manifest, PackageType, PathError as ManifestPathError, PathSeg as ManifestPathSeg,
+    RegistrySpec, RemoveOutcome, Sponsor, SponsorError, SponsorKind, StringSpec, UpdateOutcome,
+    KNOWN_AGENT_IDS, MAX_SPONSORS, PACKAGE_TYPES,
 };

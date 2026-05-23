@@ -10,6 +10,7 @@ pub mod init;
 pub mod install;
 pub mod list;
 pub mod login;
+pub mod manifest;
 pub mod outdated;
 pub mod pack;
 pub mod publish;
