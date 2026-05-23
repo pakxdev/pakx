@@ -19,13 +19,42 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use pakx_core::{Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::{BackendError, CreatePackageRequest, PakxBackend};
 
 use crate::pack::pack_dir;
 use crate::registry_url::validate_base_url;
 use crate::ui;
+
+/// Closed set of package kinds the registry accepts. Constraining the
+/// flag at clap-parse time means a typo (`--kind banan`) fails *before*
+/// we pack the bundle + upload it — previously the wasted work
+/// surfaced only as a registry-side 400 after the tarball round-trip.
+/// Variant order + names mirror `pakx_core::manifest::PackageType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum PublishKind {
+    Skills,
+    Mcp,
+    Subagents,
+    Prompts,
+    Commands,
+    Hooks,
+}
+
+impl PublishKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skills => "skills",
+            Self::Mcp => "mcp",
+            Self::Subagents => "subagents",
+            Self::Prompts => "prompts",
+            Self::Commands => "commands",
+            Self::Hooks => "hooks",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Args)]
 pub struct PublishArgs {
@@ -37,8 +66,18 @@ pub struct PublishArgs {
     pub registry: String,
 
     /// Package kind. Defaults to "skills" (the v0 use-case).
-    #[arg(short = 'k', long = "kind", default_value = "skills")]
-    pub kind: String,
+    ///
+    /// Constrained to the six registry-known kinds (skills, mcp,
+    /// subagents, prompts, commands, hooks) so a typo fails at flag
+    /// parse — *before* we pack + upload — instead of bubbling up as
+    /// a registry-side 400 after the tarball round-trip.
+    #[arg(
+        short = 'k',
+        long = "kind",
+        value_enum,
+        default_value_t = PublishKind::Skills,
+    )]
+    pub kind: PublishKind,
 
     /// Optional one-line description.
     #[arg(short = 'd', long = "description")]
@@ -69,6 +108,12 @@ pub async fn run(args: PublishArgs) -> Result<()> {
     // `crate::registry_url::validate_base_url`.
     if args.registry != DEFAULT_REGISTRY_URL {
         validate_base_url(&args.registry)?;
+    }
+    if args.json {
+        // Keep stdout byte-clean for `--json | jq`. Spinners + progress
+        // lines still color on stderr — only the machine-readable
+        // payload route on stdout is flattened.
+        ui::force_stdout_no_color();
     }
     let src = args.source.clone().unwrap_or_else(|| PathBuf::from("."));
     let creds_path = match args.credentials_file.clone() {
@@ -134,7 +179,7 @@ pub async fn run(args: PublishArgs) -> Result<()> {
             &entry.token,
             &CreatePackageRequest {
                 name: &pack.manifest.name,
-                kind: &args.kind,
+                kind: args.kind.as_str(),
                 description: args.description.as_deref(),
                 sponsors: sponsors_payload,
             },

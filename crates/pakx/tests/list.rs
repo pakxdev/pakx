@@ -300,3 +300,31 @@ fn list_json_empty_lockfile_emits_empty_array() {
     let stdout = String::from_utf8(output).unwrap();
     assert_eq!(stdout.trim_end(), "[]");
 }
+
+/// Regression for the `--color always --json` ANSI bleed: stdout must
+/// be ANSI-free in JSON mode regardless of the resolved color setting.
+/// ESC (0x1B) is the canonical leading byte for every CSI sequence, so
+/// asserting its absence on stdout is the tight invariant. Stderr is
+/// allowed to color (still a TTY-style human stream).
+#[test]
+fn list_json_with_color_always_keeps_stdout_ansi_free() {
+    let project = TempDir::new().unwrap();
+    std::fs::write(project.path().join("agents.lock"), ONE_ENTRY_LOCKFILE).unwrap();
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["--color", "always", "list", "--no-check", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !output.contains(&0x1Bu8),
+        "stdout must be ANSI-free in --json mode even with --color always: stdout={:?}",
+        String::from_utf8_lossy(&output)
+    );
+    // Still must parse as valid JSON — the no-color guard mustn't
+    // corrupt the structured output.
+    let _v: Value = serde_json::from_slice(&output).expect("json must remain valid");
+}

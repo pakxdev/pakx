@@ -575,3 +575,86 @@ async fn update_missing_id_in_lockfile_errors_loudly() {
         .failure()
         .stderr(predicate::str::contains("missing/dep"));
 }
+
+/// Regression for the `--directory` propagation gap in the `--no-install`
+/// `→ next:` hint. When the user passes `--directory <subdir>`, the
+/// printed hint must include `--directory <subdir>` so the user can
+/// copy-paste it verbatim — previously the hint dropped the directory
+/// flag, leaving the user to remember to re-thread it.
+#[tokio::test]
+async fn update_no_install_hint_propagates_directory_arg() {
+    let project = TempDir::new().unwrap();
+    let subdir = project.path().join("sub");
+    std::fs::create_dir_all(&subdir).unwrap();
+
+    let pakx_registry = MockServer::start().await;
+    mount_pakx_detail(&pakx_registry, &[("0.1.2", false), ("0.1.0", false)]).await;
+
+    write_manifest(
+        &subdir,
+        "name: demo\nversion: 0.1.0\ndependencies:\n  skills:\n    - arwenizEr/hello-world@0.1.0\n",
+    );
+    write_lockfile(&subdir, &pakx_lockfile("0.1.0"));
+
+    let subdir_str = subdir.to_string_lossy().to_string();
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "update",
+            "--yes",
+            "--no-install",
+            "--directory",
+            &subdir_str,
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!("\u{2192} next: pakx install --directory {subdir_str}");
+    assert!(
+        stdout.contains(&expected),
+        "→ next hint must propagate --directory; expected {expected:?}, got stdout:\n{stdout}"
+    );
+}
+
+/// Inverse: without `--directory`, the hint stays in its original
+/// `→ next: pakx install` shape (no spurious trailing flag).
+#[tokio::test]
+async fn update_no_install_hint_omits_directory_when_unset() {
+    let project = TempDir::new().unwrap();
+    let pakx_registry = MockServer::start().await;
+    mount_pakx_detail(&pakx_registry, &[("0.1.2", false), ("0.1.0", false)]).await;
+
+    write_manifest(
+        project.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  skills:\n    - arwenizEr/hello-world@0.1.0\n",
+    );
+    write_lockfile(project.path(), &pakx_lockfile("0.1.0"));
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "update",
+            "--yes",
+            "--no-install",
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\u{2192} next: pakx install"),
+        "→ next hint expected; got stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("--directory"),
+        "→ next hint must not carry --directory when unset; got stdout:\n{stdout}"
+    );
+}

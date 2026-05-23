@@ -299,6 +299,71 @@ fn pack_json_emits_stable_shape_on_stdout() {
     );
 }
 
+/// Regression: prior to the fix, `pakx pack --json` hardcoded
+/// `"kind": "skills"` regardless of what the SKILL.md frontmatter
+/// declared. Add an explicit `kind: mcp` and assert it threads through
+/// the wire contract — and the bundle still packs successfully (we
+/// don't constrain the kind value at pack time; the registry validates
+/// it server-side on `pakx publish`).
+#[test]
+fn pack_json_emits_declared_kind_not_hardcoded_skills() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: demo\nversion: 0.1.0\nkind: mcp\ndescription: tidy.\n",
+    );
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("stdout is valid json");
+    assert_eq!(
+        v["kind"], "mcp",
+        "pack --json must echo the declared frontmatter kind, not a hardcoded default: {v}"
+    );
+}
+
+/// Inverse: when the SKILL.md frontmatter has no explicit `kind:` key,
+/// the JSON shape must still default to `"skills"` so the historical
+/// wire contract holds for existing publishers.
+#[test]
+fn pack_json_defaults_kind_to_skills_when_omitted() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    // `write_min_skill` only sets name + version — kind is absent.
+    write_min_skill(src.path(), "demo", "0.1.0");
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("stdout is valid json");
+    assert_eq!(
+        v["kind"], "skills",
+        "absent frontmatter `kind:` must default to skills on the wire: {v}"
+    );
+}
+
 /// When the SKILL.md is missing `description:`, the warning still flows
 /// to stderr **and** lands in the JSON `warnings[]` array. Exit code
 /// stays 0 — warnings are non-fatal.

@@ -66,6 +66,22 @@ fn color_mode() -> ColorMode {
 static STDOUT_COLOR: OnceLock<bool> = OnceLock::new();
 static STDERR_COLOR: OnceLock<bool> = OnceLock::new();
 
+/// Force stdout to no-color regardless of the resolved `--color` mode.
+/// Called by JSON-emitting commands before any paint helper runs so a
+/// caller writing `pakx list --color always --json | jq` doesn't have
+/// ANSI escapes injected into the machine-readable stdout. The matching
+/// stderr stream is **untouched** — human progress + spinner output on
+/// stderr can still color when the user asked for it.
+///
+/// `OnceLock` semantics: the first call wins. Commands that internally
+/// emit human output to stdout (i.e. not in JSON mode) must therefore
+/// avoid calling this helper, or stdout will be flat for the rest of
+/// the process. The dispatch path in each `--json`-supporting command
+/// only invokes this when `args.json` is set.
+pub fn force_stdout_no_color() {
+    let _ = STDOUT_COLOR.set(false);
+}
+
 fn stdout_color() -> bool {
     *STDOUT_COLOR.get_or_init(|| resolve_stream_color(std::io::stdout().is_terminal()))
 }

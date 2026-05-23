@@ -299,7 +299,16 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
     if args.no_install {
         // Mirror the `→ next:` hint cadence the other action commands
         // use. The user opted out so we point at the rest of the loop.
-        println!("{}", ui::dim("\u{2192} next: pakx install"));
+        // Propagate `--directory <dir>` into the hint when set so the
+        // user can copy-paste the suggested command verbatim — without
+        // this, a `pakx update --directory subdir/ --no-install` user
+        // saw `→ next: pakx install` and had to remember to re-thread
+        // the directory flag themselves.
+        let hint = args.directory.as_deref().map_or_else(
+            || String::from("\u{2192} next: pakx install"),
+            |dir| format!("\u{2192} next: pakx install --directory {}", dir.display()),
+        );
+        println!("{}", ui::dim(&hint));
         return Ok(ExitCode::SUCCESS);
     }
 

@@ -431,3 +431,57 @@ fn search_rejects_plaintext_http_pakx_base_url() {
             "refusing to use registry base URL",
         ));
 }
+
+/// `--no-official-mcp` mirrors the existing `--no-smithery` /
+/// `--no-pakx-registry` flags for the third federated source. With
+/// every source toggled off, the search must succeed (empty hits) and
+/// must NOT have contacted the mocked MCP base URL — i.e. an
+/// unreachable `127.0.0.1:1` sink that would otherwise refuse + fail
+/// the test proves the flag actually skipped the source.
+#[tokio::test]
+async fn search_no_official_mcp_skips_mcp_source() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "needle",
+            "--no-official-mcp",
+            "--no-smithery",
+            "--no-pakx-registry",
+            // If the flag didn't gate the source, this would attempt
+            // a connection and the test would either hang or fail.
+            "--mcp-base-url",
+            "http://127.0.0.1:1",
+        ])
+        .assert()
+        .success();
+}
+
+/// `--no-official-mcp` must appear in the help surface so users
+/// discover the third toggle alongside `--no-smithery` /
+/// `--no-pakx-registry`. Pin the help-text contract so a future
+/// `#[arg(hide = true)]` regression trips the test.
+#[test]
+fn search_help_advertises_all_three_source_toggles() {
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args(["search", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    assert!(
+        help.contains("--no-smithery"),
+        "help missing --no-smithery: {help}"
+    );
+    assert!(
+        help.contains("--no-pakx-registry"),
+        "help missing --no-pakx-registry: {help}"
+    );
+    assert!(
+        help.contains("--no-official-mcp"),
+        "help missing --no-official-mcp: {help}"
+    );
+}

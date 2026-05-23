@@ -202,6 +202,12 @@ pub async fn gather_outdated(
 }
 
 pub async fn run(args: OutdatedArgs) -> Result<ExitCode> {
+    if args.json {
+        // Force stdout to no-color so `--color always --json | jq`
+        // stays byte-clean. Stderr (the "no lockfile" / "no entries"
+        // human notes below) remains color-able.
+        crate::ui::force_stdout_no_color();
+    }
     let project_root = match args.directory.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,

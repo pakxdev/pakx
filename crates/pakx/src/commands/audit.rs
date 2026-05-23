@@ -145,6 +145,10 @@ struct Row {
 }
 
 pub async fn run(args: AuditArgs) -> Result<ExitCode> {
+    if args.json {
+        // `--json | jq` discipline — keep stdout byte-clean.
+        crate::ui::force_stdout_no_color();
+    }
     let project_root = match args.directory.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,

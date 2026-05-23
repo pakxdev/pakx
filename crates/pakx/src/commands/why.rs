@@ -125,6 +125,11 @@ struct Match<'a> {
 
 #[allow(clippy::unused_async)] // matches every other `commands::*::run` signature
 pub async fn run(args: WhyArgs) -> Result<ExitCode> {
+    if args.json {
+        // `--json | jq` discipline: keep stdout byte-clean. Stderr
+        // remains color-able (the "not found" hint, etc.).
+        crate::ui::force_stdout_no_color();
+    }
     let project_root = match args.directory.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,

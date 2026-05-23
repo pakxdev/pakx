@@ -60,7 +60,15 @@ struct JsonEntry<'a> {
     status: &'static str,
 }
 
+#[allow(clippy::too_many_lines)] // linear branches; helpers would obscure shape
 pub async fn run(args: ListArgs) -> Result<()> {
+    if args.json {
+        // Force stdout to no-color before any paint helper memoises a
+        // decision — `pakx list --color always --json | jq` must yield
+        // byte-clean stdout. Stderr remains color-able (the
+        // empty-lockfile / no-entries hints there still color).
+        ui::force_stdout_no_color();
+    }
     let project_root = match args.directory.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,

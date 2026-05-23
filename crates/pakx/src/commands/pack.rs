@@ -49,11 +49,17 @@ pub async fn run(args: PackArgs) -> Result<()> {
     }
 
     if args.json {
+        // Force stdout to no-color BEFORE any paint helper memoises a
+        // stream decision (the `[warn]` glyphs above already wrote to
+        // stderr, which we leave colour-able). Keeps `pakx pack
+        // --color always --json | jq` byte-clean.
+        crate::ui::force_stdout_no_color();
         // Single newline-terminated JSON object on stdout — same shape
         // discipline as `pakx list --json` / `pakx outdated --json`.
-        // `kind` is hard-coded to "skills" because `pack_dir` only
-        // operates on SKILL.md bundles today; bumping the JSON shape
-        // when we ship a second pack target is forward-compatible.
+        // `kind` mirrors whatever the SKILL.md frontmatter declared
+        // (defaulting to `"skills"` when omitted), so a publisher who
+        // packs a non-skills bundle no longer sees the misleading
+        // hardcoded `"kind": "skills"` on the wire.
         let mut hasher = Sha256::new();
         hasher.update(&result.bytes);
         let sha256_hex = hex_lower(&hasher.finalize());
@@ -61,7 +67,7 @@ pub async fn run(args: PackArgs) -> Result<()> {
             "ok": true,
             "name": result.manifest.name,
             "version": result.manifest.version,
-            "kind": "skills",
+            "kind": result.manifest.kind,
             "sha256": sha256_hex,
             "sizeBytes": result.bytes.len(),
             "tarballPath": result.tarball_path.display().to_string(),

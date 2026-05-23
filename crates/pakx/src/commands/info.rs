@@ -77,6 +77,13 @@ pub async fn run(args: InfoArgs) -> Result<()> {
     if args.registry != DEFAULT_REGISTRY {
         validate_base_url(&args.registry)?;
     }
+    if args.json {
+        // JSON output must never carry ANSI escapes — even though the
+        // current render path doesn't actively inject any, the future
+        // contract for `--json | jq` is "byte-clean stdout". Mirrors
+        // the other `--json` subcommands (search, list, outdated, ...).
+        ui::force_stdout_no_color();
+    }
     if let Some(version) = args.version.as_deref() {
         return run_version(&args, &owner, &name, version).await;
     }
@@ -199,6 +206,14 @@ pub async fn run(args: InfoArgs) -> Result<()> {
 /// block. The signed `tarballUrl` is short-TTL so the human render
 /// includes an expiry note; the JSON render emits the raw URL plus the
 /// rest of the per-version fields verbatim.
+///
+/// `kind` is **not** part of the per-version endpoint shape — it lives
+/// on the package-level row — so we additionally fire a best-effort
+/// GET to `/api/v1/packages/{owner}/{name}` to thread the kind through
+/// to the install-hint footer (so `pakx info <id> --version <ver>` no
+/// longer prints `-t skills` for an mcp / hooks / commands package).
+/// The kind lookup is best-effort: a 404 or transport error degrades
+/// gracefully — the install hint just omits the `-t <kind>` flag.
 async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) -> Result<()> {
     // `PakxSource::fetch_version` does **not** cache (signed URLs are
     // short-TTL), but the constructor still requires a `CacheDir` for
@@ -219,11 +234,13 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
             }
             other => anyhow!("could not reach {}: {other}", args.registry),
         })?;
+    let kind = fetch_package_kind(&args.registry, owner, name).await;
 
     if args.json {
         let raw = serde_json::to_string_pretty(&serde_json::json!({
             "id": meta.id.clone().unwrap_or_else(|| format!("{owner}/{name}")),
             "version": meta.version,
+            "kind": kind,
             "sha256": meta.sha256,
             "sizeBytes": meta.size_bytes,
             "publishedAt": meta.published_at,
@@ -234,18 +251,59 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
         return Ok(());
     }
 
-    render_version_human(args, owner, name, &meta);
+    render_version_human(args, owner, name, &meta, kind.as_deref());
     Ok(())
+}
+
+/// Best-effort fetch of the package-level `kind` discriminator from
+/// `/api/v1/packages/{owner}/{name}`. Returns `None` on any failure
+/// path — 404, transport error, malformed JSON, or a missing / unknown
+/// kind value. Callers fall back to an install hint without `-t <kind>`
+/// rather than guessing.
+async fn fetch_package_kind(registry: &str, owner: &str, name: &str) -> Option<String> {
+    let url = format!(
+        "{}/api/v1/packages/{}/{}",
+        registry.trim_end_matches('/'),
+        owner,
+        name,
+    );
+    let response = http_client()
+        .get(&url)
+        .header("user-agent", USER_AGENT)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let detail: PackageDetail = response.json().await.ok()?;
+    detail.kind.filter(|k| !k.is_empty())
 }
 
 /// Human-friendly render of a single per-version detail block. Matches
 /// the indentation / label-width cadence used by the package-level
 /// render above (`kind:` / `description:` / `created:`) so both views
 /// look like the same command's output.
-fn render_version_human(args: &InfoArgs, owner: &str, name: &str, meta: &PackageVersion) {
+///
+/// `kind` threads through from the package-level fetch (best-effort —
+/// `None` when the lookup 404s or fails). When known, the install hint
+/// becomes `pakx add <id>@<ver> -t <kind>`; when unknown the `-t`
+/// suffix is omitted entirely so the user sees a runnable command
+/// rather than a wrong-kind one.
+fn render_version_human(
+    args: &InfoArgs,
+    owner: &str,
+    name: &str,
+    meta: &PackageVersion,
+    kind: Option<&str>,
+) {
     let id_label = meta.id.clone().unwrap_or_else(|| format!("{owner}/{name}"));
     println!("{}", ui::heading(&id_label));
     println!("  {} {}", ui::dim("version:    "), meta.version);
+    if let Some(k) = kind {
+        println!("  {} {}", ui::dim("kind:       "), k);
+    }
     if let Some(sha) = &meta.sha256 {
         println!("  {} {}", ui::dim("sha256:     "), sha);
     }
@@ -275,13 +333,29 @@ fn render_version_human(args: &InfoArgs, owner: &str, name: &str, meta: &Package
         );
     }
     println!();
-    println!(
-        "{} pakx add {}/{}@{} -t skills",
-        ui::dim("\u{2192} install:"),
-        owner,
-        name,
-        meta.version
-    );
+    // Install hint: include `-t <kind>` only when we resolved a
+    // package kind from the registry. Hardcoding `-t skills` (the
+    // pre-fix behaviour) shipped a wrong-kind command for any mcp /
+    // hooks / commands / subagents / prompts package; omitting the
+    // flag entirely lets `pakx add` re-probe the kind itself.
+    if let Some(k) = kind {
+        println!(
+            "{} pakx add {}/{}@{} -t {}",
+            ui::dim("\u{2192} install:"),
+            owner,
+            name,
+            meta.version,
+            k,
+        );
+    } else {
+        println!(
+            "{} pakx add {}/{}@{}",
+            ui::dim("\u{2192} install:"),
+            owner,
+            name,
+            meta.version,
+        );
+    }
     // `args` is reserved for the future render of `args.registry` —
     // currently the registry-base is already implicit in the id label,
     // but keeping the param shape stable avoids a churn-churn churn if

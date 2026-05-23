@@ -155,6 +155,11 @@ impl Report {
 }
 
 pub async fn run(args: DoctorArgs) -> Result<ExitCode> {
+    if args.json {
+        // `--json | jq` discipline — keep stdout byte-clean. Stderr
+        // (the streaming per-check render below) still colors.
+        ui::force_stdout_no_color();
+    }
     let project_root = match args.directory.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,

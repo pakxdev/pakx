@@ -28,6 +28,13 @@ const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
 pub struct Manifest {
     pub name: String,
     pub version: String,
+    /// Declared package kind (`skills`, `mcp`, `subagents`, `prompts`,
+    /// `commands`, `hooks`). When the SKILL.md frontmatter omits the
+    /// field, defaults to `"skills"` — the historical implicit kind for
+    /// every SKILL.md bundle. Surfacing it here lets `pakx pack --json`
+    /// emit the actual declared kind on the stable wire-contract instead
+    /// of unconditionally claiming `"skills"`.
+    pub kind: String,
     /// Sponsor links declared in the SKILL.md frontmatter, validated at
     /// pack-time against the shape in
     /// `pakx-registry/SPONSOR_LINKS_SPEC.md`. Empty when the field is
@@ -129,10 +136,23 @@ fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<(Manifest, Vec<S
             "{SKILL_MD} is missing `description:` \u{2014} Claude Code uses this field to decide when to load the skill; consider adding one."
         ));
     }
+    // Default to `"skills"` when the SKILL.md frontmatter omits an
+    // explicit `kind:` — historically every SKILL.md bundle is a
+    // skills package and the existing JSON contract is `"kind": "skills"`.
+    // A publisher who packs a non-skills bundle can override by adding
+    // `kind: mcp` (or one of the other five known kinds) to the
+    // frontmatter; unrecognised strings fall through verbatim so the
+    // registry validates them server-side.
+    let kind = frontmatter
+        .kind
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "skills".to_string());
     Ok((
         Manifest {
             name,
             version,
+            kind,
             sponsors,
         },
         warnings,
@@ -152,6 +172,13 @@ struct FrontmatterRaw {
     version: Option<serde_yaml_ng::Value>,
     #[serde(default)]
     sponsors: Option<Vec<Sponsor>>,
+    /// Optional declared package kind. Most SKILL.md files omit it (it
+    /// defaults to `"skills"` because the file is a SKILL.md); a
+    /// publisher who packs a non-skills bundle can override it here so
+    /// the JSON wire contract emitted by `pakx pack --json` reflects
+    /// the actual kind instead of the historical hardcode.
+    #[serde(default)]
+    kind: Option<serde_yaml_ng::Value>,
     /// Free-form description Claude Code uses at skill-load decision
     /// time (see <https://code.claude.com/docs/en/skills>). Pulled out
     /// at pack-time so we can warn — non-fatally — when it's absent.
@@ -164,6 +191,7 @@ struct Frontmatter {
     name: Option<String>,
     version: Option<String>,
     sponsors: Option<Vec<Sponsor>>,
+    kind: Option<String>,
     description: Option<String>,
 }
 
@@ -226,6 +254,7 @@ fn extract_frontmatter(text: &str) -> Result<Frontmatter> {
         name: raw.name.and_then(scalar_to_string),
         version: raw.version.and_then(scalar_to_string),
         sponsors: raw.sponsors,
+        kind: raw.kind.and_then(scalar_to_string),
         description: raw.description.and_then(scalar_to_string),
     })
 }
