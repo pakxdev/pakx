@@ -7,6 +7,7 @@
 
 pub mod cache;
 pub mod client;
+pub mod device_auth;
 pub mod errors;
 pub mod official_mcp;
 pub mod pakx_backend;
@@ -22,6 +23,9 @@ pub const SUPPORTED_CORE: &str = pakx_core::VERSION;
 
 pub use cache::{CacheDir, DEFAULT_TTL};
 pub use client::RegistryClient;
+pub use device_auth::{
+    DeviceAuthClient, DeviceAuthError, InitiateRequest, InitiateResponse, PollResponse, PollStatus,
+};
 pub use errors::RegistryError;
 pub use official_mcp::{OfficialMcpSource, DEFAULT_BASE_URL as OFFICIAL_MCP_BASE_URL};
 pub use pakx_backend::{
