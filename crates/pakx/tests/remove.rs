@@ -363,3 +363,37 @@ fn remove_yes_flag_skips_prompt() {
         .assert()
         .success();
 }
+
+/// Regression for the 2026-05-23 stdout/stderr alignment: the success
+/// line must remain on **stdout** (the pre-existing behaviour) and the
+/// `→ next: pakx install` hint must move to **stderr** so a script
+/// piping `pakx remove ... | grep removed` doesn't pick up the hint
+/// alongside the success line.
+#[test]
+fn remove_routes_success_line_to_stdout_and_hint_to_stderr() {
+    let temp = TempDir::new().unwrap();
+    write_manifest(
+        temp.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/cool\n",
+    );
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["remove", "io.github.acme/cool", "--yes"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assertion.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        stdout.contains("removed io.github.acme/cool (mcp)"),
+        "success line must be on stdout; got stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("\u{2192} next: pakx install"),
+        "→ next hint must NOT remain on stdout; got stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("\u{2192} next: pakx install"),
+        "→ next hint must be on stderr; got stderr:\n{stderr}"
+    );
+}

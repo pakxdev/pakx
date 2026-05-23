@@ -143,6 +143,16 @@ pub async fn run(args: ManifestArgs) -> Result<ExitCode> {
             .context("cannot read cwd")?
             .join(MANIFEST_FILENAME),
     };
+    // Only `manifest get` reads `--json`; `set` uses it as the value
+    // type discriminator (not output mode) and `delete` doesn't expose
+    // one. Force stdout to no-color only when the read path is in
+    // JSON mode so a `--color always --json | jq` pipeline stays
+    // byte-clean.
+    if let ManifestCmd::Get(g) = &args.command {
+        if g.json {
+            crate::ui::force_stdout_no_color();
+        }
+    }
     match args.command {
         ManifestCmd::Get(g) => run_get(&manifest_path, &g),
         ManifestCmd::Set(s) => run_set(&manifest_path, &s),

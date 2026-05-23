@@ -71,6 +71,12 @@ pub async fn run(args: WhoamiArgs) -> Result<ExitCode> {
     if args.registry != DEFAULT_REGISTRY_URL {
         validate_base_url(&args.registry)?;
     }
+    if args.json {
+        // Keep stdout byte-clean for `--json | jq`. Human renders on
+        // the same command (`println!("{}", ui::success(&login))`)
+        // still color when `--color always` is set without `--json`.
+        ui::force_stdout_no_color();
+    }
     let path = match args.credentials_file.clone() {
         Some(p) => p,
         None => Credentials::default_path().context("resolve credentials path")?,

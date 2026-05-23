@@ -403,3 +403,45 @@ fn add_rejects_plaintext_http_mcp_base_url() {
             "refusing to use registry base URL",
         ));
 }
+
+/// Regression for the 2026-05-23 stdout/stderr alignment: the
+/// machine-readable success line (`added <id> (<kind>)`) must land on
+/// **stdout** so a script piping `pakx add ... | grep added` actually
+/// matches. The `→ next:` hint follows on **stderr** — convention
+/// across the CLI is "success → stdout, human hint → stderr".
+#[tokio::test]
+async fn add_routes_success_line_to_stdout_and_hint_to_stderr() {
+    let temp = TempDir::new().unwrap();
+    let server = mock_mcp_server_ok("a/b").await;
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args([
+            "add",
+            "a/b",
+            "--type",
+            "mcp",
+            "--mcp-base-url",
+            &server.uri(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assertion.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        stdout.contains("added a/b (mcp)"),
+        "success line must be on stdout; got stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("added a/b (mcp)"),
+        "success line must NOT be duplicated on stderr; got stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("\u{2192} next: pakx install"),
+        "→ next hint must be on stderr; got stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("\u{2192} next: pakx install"),
+        "→ next hint must NOT be on stdout; got stdout:\n{stdout}"
+    );
+}

@@ -57,9 +57,27 @@ async fn info_without_version_renders_package_metadata_and_versions_table() {
 /// `--version <ver>` must hit the per-version endpoint and surface the
 /// human-friendly per-version block (size, sha256, published, tarball,
 /// expiry footer, install hint).
+///
+/// The install hint's `-t <kind>` flag threads through from the
+/// package-level endpoint (a second best-effort GET fired by
+/// `run_version`) so non-skills packages no longer show the wrong
+/// `-t skills` default. This mock mounts both endpoints so the test
+/// covers the happy path end-to-end.
 #[tokio::test]
 async fn info_with_version_renders_per_version_block() {
     let server = MockServer::start().await;
+    // Package-level row — supplies the `kind` for the install-hint.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "kind": "skills",
+            "description": "hi there",
+            "createdAt": "2026-05-01T00:00:00Z",
+            "versions": []
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/api/v1/packages/alice/hello/0.1.2"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -101,18 +119,131 @@ async fn info_with_version_renders_per_version_block() {
         ))
         // Expiry footer — signed URL is short-TTL.
         .stdout(predicate::str::contains("expires after 1 hour"))
-        // Install hint footer.
+        // Install hint footer threaded through from the package-level kind.
         .stdout(predicate::str::contains(
             "pakx add alice/hello@0.1.2 -t skills",
         ));
 }
 
+/// Regression for the `-t skills` hardcode: when the package-level
+/// row reports a non-skills kind (e.g. mcp), the install hint must
+/// thread the real kind through, not blindly print `-t skills`.
+#[tokio::test]
+async fn info_with_version_threads_non_skills_kind_into_install_hint() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/acme/server"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "acme/server",
+            "kind": "mcp",
+            "description": "an mcp server",
+            "versions": []
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/acme/server/1.0.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "acme/server",
+            "version": "1.0.0",
+            "sha256": "abc",
+            "sizeBytes": 100,
+            "publishedAt": "2026-05-22T00:00:00Z",
+            "deprecatedAt": null,
+            "tarballUrl": "https://example.com/t.tgz"
+        })))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "acme/server",
+            "--version",
+            "1.0.0",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("kind:"))
+        .stdout(predicate::str::contains("mcp"))
+        // The hint must echo `-t mcp`, NOT `-t skills`.
+        .stdout(predicate::str::contains(
+            "pakx add acme/server@1.0.0 -t mcp",
+        ))
+        .stdout(predicate::str::contains("-t skills").not());
+}
+
+/// When the package-level kind lookup fails (e.g. registry returns
+/// 404 for the package row even though the per-version row exists,
+/// or transport hiccup), the install hint must omit `-t <kind>`
+/// entirely rather than guessing. Prior behaviour: hardcoded
+/// `-t skills` regardless. New behaviour: bare `pakx add <id>@<ver>`.
+#[tokio::test]
+async fn info_with_version_omits_kind_when_package_lookup_fails() {
+    let server = MockServer::start().await;
+    // Package-level endpoint deliberately 404s — only the per-version
+    // row exists. This shouldn't happen on a healthy backend but the
+    // CLI must degrade gracefully when it does.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/ghost/pkg"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/ghost/pkg/0.0.1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "ghost/pkg",
+            "version": "0.0.1",
+            "sha256": "abc",
+            "sizeBytes": 100,
+            "publishedAt": "2026-05-22T00:00:00Z",
+            "deprecatedAt": null,
+            "tarballUrl": "https://example.com/t.tgz"
+        })))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "ghost/pkg",
+            "--version",
+            "0.0.1",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .success()
+        // Install hint must NOT carry a `-t <kind>` flag.
+        .stdout(predicate::str::contains("pakx add ghost/pkg@0.0.1"))
+        .stdout(predicate::str::contains("-t skills").not())
+        .stdout(predicate::str::contains("-t mcp").not());
+}
+
 /// `--version <ver> --json` must emit exactly the per-version API
-/// shape — id, version, sha256, sizeBytes, publishedAt, deprecatedAt,
-/// tarballUrl. Stable contract for piping into `jq`.
+/// shape — id, version, kind, sha256, sizeBytes, publishedAt,
+/// deprecatedAt, tarballUrl. Stable contract for piping into `jq`.
+///
+/// `kind` threads through from the best-effort package-level GET, so
+/// the test mock mounts both endpoints. When the package-level lookup
+/// fails, `kind` falls back to `null` (covered by the sibling test
+/// `info_with_version_omits_kind_when_package_lookup_fails`).
 #[tokio::test]
 async fn info_with_version_json_matches_per_version_shape() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "kind": "skills",
+            "versions": []
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/api/v1/packages/alice/hello/0.1.2"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -146,6 +277,7 @@ async fn info_with_version_json_matches_per_version_shape() {
     let body: Value = serde_json::from_slice(&out.stdout).expect("info --json must be valid JSON");
     assert_eq!(body["id"], "alice/hello");
     assert_eq!(body["version"], "0.1.2");
+    assert_eq!(body["kind"], "skills");
     assert_eq!(body["sha256"], "9ac5b75d19827964");
     assert_eq!(body["sizeBytes"], 968);
     assert_eq!(body["publishedAt"], "2026-05-22T08:06:19Z");

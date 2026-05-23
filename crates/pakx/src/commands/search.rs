@@ -18,6 +18,7 @@ use crate::registry_url::validate_base_url;
 use crate::ui;
 
 #[derive(Debug, Clone, Args)]
+#[allow(clippy::struct_excessive_bools)] // CLI flags are independent toggles; a state machine here would obscure the surface
 pub struct SearchArgs {
     /// Free-text query. Empty string returns the first page.
     pub query: Option<String>,
@@ -56,6 +57,16 @@ pub struct SearchArgs {
     /// while users migrate.
     #[arg(long, alias = "no-pakx")]
     pub no_pakx_registry: bool,
+
+    /// Skip the official MCP Registry source.
+    ///
+    /// Symmetric counterpart to `--no-smithery` / `--no-pakx-registry`
+    /// — toggles the third federated source so a user investigating
+    /// only first-party (`pakx`) hits can suppress the noise from
+    /// the public MCP Registry without resorting to a `--mcp-base-url`
+    /// pointing at a sink.
+    #[arg(long)]
+    pub no_official_mcp: bool,
 }
 
 /// Wire-format hit emitted by `--json`. Field names are a stable
@@ -77,12 +88,19 @@ struct JsonHit<'a> {
 }
 
 pub async fn run(args: SearchArgs) -> Result<()> {
+    if args.json {
+        // Force stdout to no-color before any paint helper memoises a
+        // stream decision — `pakx search --color always --json | jq`
+        // must yield byte-clean JSON. Stderr remains color-able.
+        crate::ui::force_stdout_no_color();
+    }
     let client = build_client(
         args.mcp_base_url.as_deref(),
         args.smithery_base_url.as_deref(),
         args.pakx_base_url.as_deref(),
         args.no_smithery,
         args.no_pakx_registry,
+        args.no_official_mcp,
     )?;
     let query = args.query.unwrap_or_default();
     let results = client.search(&query).await;
@@ -145,6 +163,7 @@ fn build_client(
     pakx_base: Option<&str>,
     no_smithery: bool,
     no_pakx_registry: bool,
+    no_official_mcp: bool,
 ) -> Result<RegistryClient> {
     // Per-call cache root so parallel integration tests can't share
     // cache entries when their `wiremock` mock servers happen to land
@@ -162,16 +181,19 @@ fn build_client(
     // search payload is anonymous, a userinfo-smuggled override would
     // hand a network observer the query string the user typed (which
     // commonly carries the package name they were about to install).
-    let mcp_url = match mcp_base {
-        Some(u) => {
-            validate_base_url(u)?;
-            u
-        }
-        None => OFFICIAL_MCP_BASE_URL,
-    };
-    let mcp =
-        OfficialMcpSource::with_parts(http_client(), mcp_url, CacheDir::with_root(&cache_root));
-    let mut client = RegistryClient::new().with_source(Box::new(mcp));
+    let mut client = RegistryClient::new();
+    if !no_official_mcp {
+        let mcp_url = match mcp_base {
+            Some(u) => {
+                validate_base_url(u)?;
+                u
+            }
+            None => OFFICIAL_MCP_BASE_URL,
+        };
+        let mcp =
+            OfficialMcpSource::with_parts(http_client(), mcp_url, CacheDir::with_root(&cache_root));
+        client = client.with_source(Box::new(mcp));
+    }
     if !no_smithery {
         let smithery_url = match smithery_base {
             Some(u) => {

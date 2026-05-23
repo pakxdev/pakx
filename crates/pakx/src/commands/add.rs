@@ -264,10 +264,16 @@ pub async fn run(args: AddArgs) -> Result<()> {
     write_to(&target, &manifest)
         .with_context(|| format!("write {}", redact_path(&target, &project_root)))?;
 
-    eprintln!(
+    // Convention across the CLI: machine-readable success lines go to
+    // stdout, human progress / hint lines go to stderr. `pakx remove`
+    // had this right; `pakx add` previously routed the success line
+    // to stderr alongside the progress noise, so a script grepping
+    // stdout for `added <id>` saw nothing. Aligning here keeps the
+    // surface predictable across the add/remove pair.
+    println!(
         "{} added {} ({})",
-        ui::glyph_ok_err(),
-        ui::success_err(&id),
+        ui::glyph_ok(),
+        ui::success(&id),
         kind.as_str(),
     );
     // Single next-step hint, dimmed so it sits visually behind the

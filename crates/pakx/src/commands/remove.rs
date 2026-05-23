@@ -113,6 +113,11 @@ pub async fn run(args: RemoveArgs) -> Result<()> {
     write_to(&target, &manifest)
         .with_context(|| format!("write {}", redact_path(&target, &project_root)))?;
 
+    // Machine-readable success line on stdout; the human "→ next:"
+    // hint that follows belongs on stderr so a script piping stdout
+    // through `grep removed` doesn't see the dimmed hint line too.
+    // Matches the convention `pakx add` now follows after the
+    // 2026-05-23 stdout/stderr alignment.
     println!(
         "{} removed {} ({})",
         ui::glyph_ok(),
@@ -121,7 +126,7 @@ pub async fn run(args: RemoveArgs) -> Result<()> {
     );
     // Single dimmed next-step hint — mirrors `pakx add`. U+2192
     // RIGHTWARDS ARROW written as an escape to keep source ASCII.
-    println!("{}", ui::dim("\u{2192} next: pakx install"));
+    eprintln!("{}", ui::dim_err("\u{2192} next: pakx install"));
     Ok(())
 }
 

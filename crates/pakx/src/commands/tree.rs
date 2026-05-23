@@ -77,6 +77,12 @@ struct JsonOutput<'a> {
 
 #[allow(clippy::unused_async)] // matches every other `commands::*::run` signature
 pub async fn run(args: TreeArgs) -> Result<()> {
+    if args.json {
+        // `--json | jq` discipline: keep stdout byte-clean. Stderr is
+        // unaffected so the empty-lockfile / no-entries notes can
+        // still color.
+        crate::ui::force_stdout_no_color();
+    }
     let project_root = match args.directory.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,

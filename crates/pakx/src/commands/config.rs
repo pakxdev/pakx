@@ -31,7 +31,18 @@ pub async fn run(args: ConfigArgs) -> Result<()> {
     );
 
     if args.json {
-        let raw = serde_json::to_string_pretty(&serde_json::json!({
+        // Force stdout to no-color before any future paint helper
+        // memoises a stream decision — `pakx config --color always
+        // --json | jq` must yield byte-clean stdout. The other
+        // `--json` subcommands (list, search, info, outdated, ...)
+        // follow the same discipline.
+        ui::force_stdout_no_color();
+        // Single-line newline-terminated JSON to match every other
+        // `pakx <cmd> --json` surface (list, search, outdated, info,
+        // pack, publish, whoami). Previously this one command
+        // emitted pretty-printed JSON, which broke `jq` pipelines
+        // that assume one object per line.
+        let raw = serde_json::to_string(&serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "platform": {
                 "os": std::env::consts::OS,
