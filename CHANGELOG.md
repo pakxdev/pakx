@@ -6,6 +6,10 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.1.4] — 2026-05-23
+
 ### Changed
 
 - **`pakx search --no-pakx` renamed to `--no-pakx-registry`** so the
@@ -209,6 +213,77 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
     `Package.install_hints["sponsors"]` for downstream consumers (the
     Phase 2c `pakx-web` package-detail page is the next user).
 
+- **`pakx doctor --json` — machine-readable health report.** Emits a
+  single newline-terminated JSON object with `ok`, `checks`,
+  `warnings`, and `errors`. `checks` is a BTreeMap so wire order is
+  deterministic. Errors flip `ok: false` and exit 1; warnings stay
+  `ok: true` and exit 0. Closes the `--json` contract across every
+  read-only subcommand.
+
+- **`pakx pack --json` and `pakx publish --json`.** Single JSON line
+  per invocation with `name`, `version`, `kind`, `sha256`,
+  `sizeBytes`, `tarballPath`, `warnings` (pack) plus `registryUrl`,
+  `tarballUrl`, `publishedAt` (publish). All progress + warnings
+  stay on stderr so consumers can `pakx publish --json | jq
+  .tarballUrl` end-to-end. `--dry-run` adds `dryRun: true` and omits
+  the post-upload fields.
+
+- **`pakx pack` warns on missing SKILL.md `description:`.** Non-fatal
+  — the pack still produces a tarball, but the warning surfaces
+  before publish so registry detail pages aren't shipped with empty
+  descriptions. Claude Code uses the `description:` field to decide
+  when to load a skill, so an empty one ships dead-on-arrival.
+
+- **`pakx audit` — flag deprecated lockfile entries.** Reads
+  `agents.lock`, queries the per-version registry endpoint for each
+  pakx entry, and surfaces any with non-null `deprecatedAt`.
+  Federated MCP / Smithery / glama / github / git entries are
+  reported as `status: skip` (no deprecation signal). `--json` emits
+  `[{id, version, registry, status, deprecatedAt, error?}]`. Exit 1
+  on any deprecated entry, 0 otherwise.
+
+- **`pakx tree` and `pakx why <id>`.** Tree pivots flat lockfile data
+  into a grouped (kind, registry) tree with wired/skipped adapter
+  status per row. Why does reverse lookup over `agents.yml` +
+  `agents.lock` for a single id; multi-kind matches render every
+  hit; `--kind <type>` filters. Both ship `--json` with stable
+  shapes — `{kinds: {<kind>: {<registry>: [...]}}}` for tree and
+  `[{id, kind, manifestSource, lockedVersion, registry, ...}]` for
+  why. Exit code 0 in `--json` mode with `[]` on miss so jq
+  pipelines don't break.
+
+- **`pakx manifest get | set | delete <dot.path>`.** Scriptable
+  read/write over `agents.yml` with `[N]` index syntax matching `npm
+  pkg`. Built on a new `pakx_core::manifest::path` module that walks
+  raw `serde_yaml_ng::Value` (separate from the typed
+  `manifest::mutate` used by `pakx update`'s shorthand rewrites).
+  `--json` mode emits/accepts JSON for non-string values. Atomic
+  write via the existing `pakx_core::atomic_write` helper. Idempotent
+  delete. Comment preservation deferred to a later release.
+
+- **`pakx update --kind <type>` and `pakx remove --kind <type>`.**
+  New flag on both subcommands disambiguates when the same id
+  appears under multiple sections of `agents.yml` (e.g. `mcp:` and
+  `skills:`). Without `--kind`, the prior auto-pick behaviour is
+  preserved; with `--kind`, only entries of that kind are
+  considered. Resolves the in-tree TODO at `update.rs:483-486`
+  that promised this flag in a comment.
+
+- **Sub-adapter installs for `commands`, `subagents`, `prompts`,
+  `hooks`.** Previously `pakx install` silently `skipped` these
+  kinds with a comment; declared deps under those sections of
+  `agents.yml` were inert. New generic bundle installer in
+  `crates/pakx/src/install/bundle.rs` routes each kind to its
+  Claude Code directory: commands → `~/.claude/commands/<id>/`,
+  subagents → `~/.claude/agents/<id>/`, prompts →
+  `~/.claude/prompts/<id>/`, hooks → `~/.claude/hooks/<id>/`. The
+  `--project` flag mirrors each into the project-local
+  `.claude/<kind>/<id>/`. Per-kind validation is intentionally
+  relaxed at v0 — no public AGENT.md or prompt frontmatter spec yet
+  — so the installer accepts any well-formed tarball and logs an
+  info-level "validation is best-effort" line. `pakx tree` and
+  `pakx why` now report `adapter: wired` for all six kinds.
+
 ### Tests
 
 - **Regression coverage for federated `pakx search --json` surfacing
@@ -332,6 +407,20 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   response is **never cached** — signed URLs would expire while the
   cache TTL is still valid, breaking subsequent installs with a 403
   from blob storage.
+
+- **Federated-source cache isolation in `outdated` / `search` /
+  `add`.** Previously every invocation shared
+  `std::env::temp_dir().join("pakx-<cmd>-cache")`. On Linux runners
+  with aggressive port reuse, two sequential integration tests could
+  share a cache entry seeded by an earlier test's wiremock server,
+  surfacing as flaky CI failures. Cache root now carries `pid` plus
+  `SystemTime` nanos so two invocations cannot collide.
+
+- **Rust 1.95 `clippy::similar_names` compat.** Renamed `tmp` →
+  `tmp_path` in `crates/pakx-core/tests/credentials.rs` so it no
+  longer collides with the nearby `temp: TempDir`. Tightened lint
+  was tripping the `-D warnings` ratchet against the existing pair.
+  Test semantics unchanged.
 
 ### Added
 
