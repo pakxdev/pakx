@@ -145,7 +145,17 @@ fn build_client(
     no_smithery: bool,
     no_pakx_registry: bool,
 ) -> RegistryClient {
-    let cache_root = std::env::temp_dir().join("pakx-search-cache");
+    // Per-call cache root so parallel integration tests can't share
+    // cache entries when their `wiremock` mock servers happen to land
+    // on the same loopback port (Linux releases ports aggressively).
+    // See the matching note on `outdated::build_clients`.
+    let cache_root = std::env::temp_dir().join(format!(
+        "pakx-search-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
     let mcp_url = mcp_base.unwrap_or(OFFICIAL_MCP_BASE_URL);
     let mcp =
         OfficialMcpSource::with_parts(Client::new(), mcp_url, CacheDir::with_root(&cache_root));

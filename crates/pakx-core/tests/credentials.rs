@@ -136,14 +136,14 @@ fn write_to_overwrites_pre_planted_tmp_at_wrong_mode() {
 
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("c.json");
-    let tmp = temp.path().join("c.json.tmp");
+    let tmp_path = temp.path().join("c.json.tmp");
 
     // Plant a stale `.tmp` at the wrong (group/world-readable) mode —
     // simulating a prior crash or a hostile co-process.
-    std::fs::write(&tmp, b"stale garbage from a prior crash").unwrap();
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(&tmp_path, b"stale garbage from a prior crash").unwrap();
+    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(
-        std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777,
+        std::fs::metadata(&tmp_path).unwrap().permissions().mode() & 0o777,
         0o644,
         "test setup: stale tmp must start at 0o644",
     );
@@ -162,5 +162,8 @@ fn write_to_overwrites_pre_planted_tmp_at_wrong_mode() {
         mode & 0o777,
     );
     // No tmp leftover after a successful rename.
-    assert!(!tmp.exists(), "stale tmp must be cleared after success");
+    assert!(
+        !tmp_path.exists(),
+        "stale tmp must be cleared after success"
+    );
 }

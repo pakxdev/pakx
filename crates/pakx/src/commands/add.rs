@@ -249,7 +249,14 @@ fn load_or_init(target: &Path) -> Result<Manifest> {
 
 async fn validate_mcp(id: &str, base_url_override: Option<&str>) -> Result<String, RegistryError> {
     let base = base_url_override.unwrap_or(DEFAULT_MCP_BASE);
-    let cache_root = env::temp_dir().join("pakx-add-cache");
+    // Per-call cache root — see `outdated::build_clients` for rationale.
+    let cache_root = env::temp_dir().join(format!(
+        "pakx-add-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
     let cache = CacheDir::with_root(&cache_root);
     let source = OfficialMcpSource::with_parts(Client::new(), base, cache);
     let client = RegistryClient::new().with_source(Box::new(source));

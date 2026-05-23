@@ -1,4 +1,5 @@
 /target/
+/target-test/
 **/*.rs.bk
 *.pdb
 
@@ -9,6 +10,7 @@
 .idea/
 .vscode/
 !.vscode/extensions.json
+.claude/
 
 # OS
 .DS_Store
@@ -18,3 +20,6 @@ Thumbs.db
 *.log
 .env
 .env.local
+
+# Stray Windows temp paths captured into repo root by accident
+UsersarwenAppDataLocalTemp*
