@@ -141,7 +141,7 @@ async fn dispatch(cmd: Command) -> Result<ExitCode> {
         Command::Install(args) => install_cmd::run_cmd(args).await.map(|()| ExitCode::SUCCESS),
         Command::List(args) => list_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Outdated(args) => outdated_cmd::run(args).await,
-        Command::Doctor(args) => doctor::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Doctor(args) => doctor::run(args).await,
         Command::Search(args) => search::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Test(args) => test_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Info(args) => info_cmd::run(args).await.map(|()| ExitCode::SUCCESS),

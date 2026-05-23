@@ -141,6 +141,59 @@ fn pack_succeeds_on_plain_directory() {
     assert!(out.path().join("demo-0.1.0.tgz").is_file());
 }
 
+/// Claude Code reads the SKILL.md frontmatter `description:` at
+/// discovery time to decide whether to load the skill at all (see
+/// <https://code.claude.com/docs/en/skills>). A SKILL.md without it
+/// ships effectively dead-on-arrival, so `pakx pack` must warn —
+/// non-fatally, exit 0 still — when it's absent.
+#[test]
+fn pack_warns_when_skill_md_missing_description() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_min_skill(src.path(), "demo", "0.1.0");
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("missing `description:`"))
+        .stderr(predicate::str::contains("Claude Code"));
+    assert!(out.path().join("demo-0.1.0.tgz").is_file());
+}
+
+/// Inverse: a SKILL.md that does declare `description:` must NOT
+/// trigger the warning. Locks in the scope guard so we don't spam
+/// publishers that already follow the convention.
+#[test]
+fn pack_quiet_when_description_present() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: demo\nversion: 0.1.0\ndescription: A tidy little skill.\n",
+    );
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stderr.contains("missing `description:`"),
+        "warning must not fire when description is present — got stderr:\n{stderr}"
+    );
+}
+
 /// A skill template author could include a symlink to `~/.ssh/id_rsa` or
 /// `/etc/shadow` in the source tree. `pakx pack` must refuse — silently
 /// skipping would hide the surprise; following the link would exfiltrate

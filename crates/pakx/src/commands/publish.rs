@@ -55,6 +55,9 @@ pub async fn run(args: PublishArgs) -> Result<()> {
     let pb = ui::spinner("packing");
     let pack = pack_dir(&src, std::env::temp_dir().as_path())?;
     pb.finish_and_clear();
+    for warning in &pack.warnings {
+        eprintln!("{} {warning}", ui::glyph_warn_err());
+    }
     eprintln!(
         "{} packed {} ({} bytes)",
         ui::glyph_ok_err(),
