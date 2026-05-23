@@ -357,6 +357,299 @@ async fn info_with_version_handles_missing_tarball_url() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Field-query mode — `pakx info <id> <field>` (npm-view parity).
+// ---------------------------------------------------------------------------
+
+/// Compound field-query → compact single-line JSON. `versions` resolves
+/// to an array; the output discipline is "object / array → compact
+/// JSON" so the result must parse back into the same structure.
+#[tokio::test]
+async fn info_field_query_versions_returns_json_array() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "kind": "skills",
+            "description": "hi there",
+            "createdAt": "2026-05-01T00:00:00Z",
+            "versions": [
+                {
+                    "version": "0.1.2",
+                    "sha256": "9ac5b75d19827964",
+                    "sizeBytes": 968,
+                    "publishedAt": "2026-05-22T00:00:00Z",
+                    "deprecatedAt": null
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "alice/hello",
+            "versions",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON array, got `{stdout}`: {e}"));
+    assert!(parsed.is_array(), "expected array, got {parsed}");
+    assert_eq!(parsed.as_array().unwrap().len(), 1);
+    assert_eq!(parsed[0]["version"], "0.1.2");
+    // Output discipline: arrays render as a single line so the shape
+    // composes with line-oriented tooling.
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "compound values must emit on one line; got:\n{stdout}"
+    );
+}
+
+/// Scalar string field — `description` → unquoted text. Matches
+/// `npm view react description` (no quotes, no JSON escaping).
+#[tokio::test]
+async fn info_field_query_scalar_string_is_unquoted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "kind": "skills",
+            "description": "hi there",
+            "versions": []
+        })))
+        .mount(&server)
+        .await;
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "alice/hello",
+            "description",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim(), "hi there");
+    // The unquoted scalar must NOT carry surrounding JSON quotes.
+    assert!(
+        !stdout.contains('"'),
+        "scalar string field must print unquoted; got `{stdout}`"
+    );
+}
+
+/// Nested scalar field — `versions[0].sha256` → unquoted hex. Confirms
+/// the parser walks `[N].key` correctly (reusing the manifest path
+/// module the round-34 work landed).
+#[tokio::test]
+async fn info_field_query_nested_scalar_walks_index_and_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "kind": "skills",
+            "versions": [
+                {"version": "0.1.0", "sha256": "deadbeef"},
+                {"version": "0.1.1", "sha256": "cafef00d"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "alice/hello",
+            "versions[1].sha256",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim(), "cafef00d");
+}
+
+/// Field-query with `--json` → every value, including scalars, emits
+/// as valid JSON. This is the "pipe to jq" contract: a caller doing
+/// `pakx info <id> description --json | jq -r '.'` shouldn't have to
+/// branch on whether the value was a scalar.
+#[tokio::test]
+async fn info_field_query_with_json_flag_emits_quoted_string() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "description": "hi there",
+            "versions": []
+        })))
+        .mount(&server)
+        .await;
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "alice/hello",
+            "description",
+            "--json",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // JSON-mode scalars MUST be quoted (parseable as JSON).
+    let parsed: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON, got `{stdout}`: {e}"));
+    assert_eq!(parsed.as_str(), Some("hi there"));
+}
+
+/// Missing field (human mode) → exit 1, error on stderr. Nothing on
+/// stdout — the caller's `>/dev/null` redirect should be silent.
+#[tokio::test]
+async fn info_field_query_missing_field_errors_with_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "description": "hi there",
+            "versions": []
+        })))
+        .mount(&server)
+        .await;
+
+    let assert = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "alice/hello",
+            "nope.not.here",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .failure();
+    let out = assert.get_output();
+    assert!(
+        out.stdout.is_empty(),
+        "missing-field stdout must be empty in human mode; got `{}`",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("field 'nope.not.here' not found"),
+        "expected 'field not found' message; got `{stderr}`"
+    );
+}
+
+/// Missing field (`--json` mode) → exit 1, `null` on stdout. The
+/// `--json` contract is "stdout is always parseable JSON", so even a
+/// miss has to emit `null` rather than nothing.
+#[tokio::test]
+async fn info_field_query_missing_field_with_json_emits_null() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "description": "hi there",
+            "versions": []
+        })))
+        .mount(&server)
+        .await;
+
+    let assert = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "alice/hello",
+            "nope",
+            "--json",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .failure();
+    let out = assert.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim(), "null");
+    // Must still be valid JSON for the `| jq` contract.
+    let parsed: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(parsed.is_null());
+}
+
+/// Field-query composed with `--version` → per-version field. Confirms
+/// the field-query layer walks the per-version JSON shape (not just
+/// the package-level shape).
+#[tokio::test]
+async fn info_field_query_with_version_returns_per_version_field() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "kind": "skills",
+            "versions": []
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/alice/hello/0.1.2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/hello",
+            "version": "0.1.2",
+            "sha256": "9ac5b75d19827964",
+            "sizeBytes": 968,
+            "publishedAt": "2026-05-22T08:06:19Z",
+            "deprecatedAt": null,
+            "tarballUrl": "https://example.com/t.tgz"
+        })))
+        .mount(&server)
+        .await;
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "info",
+            "alice/hello",
+            "sha256",
+            "--version",
+            "0.1.2",
+            "--registry",
+            &server.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim(), "9ac5b75d19827964");
+}
+
 /// `pakx info --registry` must vet user-supplied base URLs via
 /// `validate_base_url` BEFORE the HTTP probe fires. Even though `info`
 /// is read-only, leaking the queried `<owner>/<name>` over plaintext
