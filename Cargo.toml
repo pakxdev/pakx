@@ -74,9 +74,9 @@ url = "2.5"
 # beyond `libc`.
 gethostname = "0.5"
 # Internal crates
-pakx-core = { path = "crates/pakx-core" }
-pakx-agents = { path = "crates/pakx-agents" }
-pakx-registry-client = { path = "crates/pakx-registry-client" }
+pakx-core = { path = "crates/pakx-core", version = "0.1.4" }
+pakx-agents = { path = "crates/pakx-agents", version = "0.1.4" }
+pakx-registry-client = { path = "crates/pakx-registry-client", version = "0.1.4" }
 
 [workspace.dependencies.assert_cmd]
 version = "2.0"
