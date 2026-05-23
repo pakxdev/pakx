@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Args;
 use inquire::{Confirm, MultiSelect, Text};
 use pakx_core::manifest::{AgentId, KNOWN_AGENT_IDS};
-use pakx_core::{write_manifest, Dependencies, Manifest};
+use pakx_core::{atomic_write, write_manifest, Dependencies, Manifest};
 
 use crate::redact::{project_root_for, redact_path};
 use crate::ui;
@@ -85,8 +85,16 @@ pub async fn run(args: InitArgs) -> Result<()> {
     }
 
     let project_root = project_root_for(&target);
-    tokio::fs::write(&target, serialized.as_bytes())
+    // Route the fresh `agents.yml` write through `atomic_write` so a
+    // crash mid-flush cannot leave a half-written manifest that the
+    // very next `pakx install` would then refuse to parse. The helper
+    // is sync, so move the write to `spawn_blocking` to keep the
+    // async caller non-blocking.
+    let target_for_write = target.clone();
+    let bytes = serialized.into_bytes();
+    tokio::task::spawn_blocking(move || atomic_write(&target_for_write, &bytes))
         .await
+        .map_err(|e| anyhow!("init writer join failed: {e}"))?
         .with_context(|| format!("write {}", redact_path(&target, &project_root)))?;
     eprintln!(
         "{} wrote {}",

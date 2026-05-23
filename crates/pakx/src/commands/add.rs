@@ -12,12 +12,12 @@ use clap::{Args, ValueEnum};
 use pakx_core::manifest::{
     add_shorthand, read_from, write_to, AddOutcome, Dependencies, Manifest, PackageType,
 };
-use pakx_core::RegistrySource;
+use pakx_core::{http_client, RegistrySource};
 use pakx_registry_client::{CacheDir, OfficialMcpSource, RegistryClient, RegistryError};
-use reqwest::Client;
 use tracing::{debug, warn};
 
 use crate::redact::{project_root_for, redact_path};
+use crate::registry_url::validate_base_url;
 use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
@@ -157,6 +157,13 @@ pub async fn run(args: AddArgs) -> Result<()> {
     let mut manifest = load_or_init(&target)?;
 
     if !args.no_validate && kind == PackageType::Mcp {
+        // Vet any user-supplied `--mcp-base-url` BEFORE any HTTP work.
+        // Mirrors `pakx install` + `pakx test` + `pakx outdated` so a
+        // userinfo-smuggled override (`http://localhost@evil.com/`) is
+        // rejected before the registry probe fires.
+        if let Some(u) = args.mcp_base_url.as_deref() {
+            validate_base_url(u)?;
+        }
         match validate_mcp(&id, args.mcp_base_url.as_deref()).await {
             Ok(version) => {
                 eprintln!(
@@ -258,7 +265,7 @@ async fn validate_mcp(id: &str, base_url_override: Option<&str>) -> Result<Strin
             .map_or(0, |d| d.as_nanos())
     ));
     let cache = CacheDir::with_root(&cache_root);
-    let source = OfficialMcpSource::with_parts(Client::new(), base, cache);
+    let source = OfficialMcpSource::with_parts(http_client(), base, cache);
     let client = RegistryClient::new().with_source(Box::new(source));
     let pkg = client.fetch(RegistrySource::OfficialMcp, id).await?;
     Ok(pkg.version)

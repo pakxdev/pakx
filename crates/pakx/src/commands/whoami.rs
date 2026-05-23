@@ -26,6 +26,7 @@ use pakx_core::{CredentialEntry, Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::PakxBackend;
 use serde::Serialize;
 
+use crate::registry_url::validate_base_url;
 use crate::ui;
 
 #[derive(Debug, Clone, Args)]
@@ -63,6 +64,13 @@ struct JsonPayload<'a> {
 }
 
 pub async fn run(args: WhoamiArgs) -> Result<ExitCode> {
+    // Vet any user-supplied `--registry` BEFORE any HTTP work. The
+    // bearer token would be sent to whatever host the URL resolves to;
+    // a userinfo-smuggled override would exfiltrate it. Mirrors `pakx
+    // login` / `pakx install` discipline.
+    if args.registry != DEFAULT_REGISTRY_URL {
+        validate_base_url(&args.registry)?;
+    }
     let path = match args.credentials_file.clone() {
         Some(p) => p,
         None => Credentials::default_path().context("resolve credentials path")?,

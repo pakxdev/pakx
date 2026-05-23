@@ -13,7 +13,7 @@
 //!   GET /api/v1/packages/{owner}/{name}/{version}     -> per-version detail (includes signed tarballUrl)
 
 use async_trait::async_trait;
-use pakx_core::RegistrySource;
+use pakx_core::{http_client, RegistrySource};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,7 +42,7 @@ impl PakxSource {
     #[must_use]
     pub fn new() -> Option<Self> {
         let cache = CacheDir::default_path()?;
-        Some(Self::with_parts(Client::new(), DEFAULT_BASE_URL, cache))
+        Some(Self::with_parts(http_client(), DEFAULT_BASE_URL, cache))
     }
 
     /// Explicit constructor for tests + bespoke deployments.

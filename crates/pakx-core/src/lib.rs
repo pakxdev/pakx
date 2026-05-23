@@ -7,6 +7,7 @@
 pub mod atomic_write;
 pub mod credentials;
 pub mod errors;
+pub mod http_client;
 pub mod install;
 pub mod lockfile;
 pub mod manifest;
@@ -18,6 +19,10 @@ pub use credentials::{
     Credentials, CredentialsError, Entry as CredentialEntry, DEFAULT_REGISTRY_URL,
 };
 pub use errors::{LockfileError, ManifestError};
+pub use http_client::{
+    http_client, http_client_with_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
+    UPLOAD_REQUEST_TIMEOUT,
+};
 pub use install::{
     compute_integrity, Command, Hook, McpServer, McpTransport, Prompt, Skill, SkillFile, Subagent,
 };

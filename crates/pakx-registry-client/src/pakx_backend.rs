@@ -12,7 +12,7 @@
 //! query pakx-registry; that lands when we wire `pakx search` to
 //! aggregate public packages alongside MCP/Smithery.
 
-use pakx_core::Sponsor;
+use pakx_core::{http_client_with_timeout, Sponsor, UPLOAD_REQUEST_TIMEOUT};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -86,9 +86,15 @@ pub struct PakxBackend {
 }
 
 impl PakxBackend {
+    /// Construct a backend client using the project-wide upload-friendly
+    /// request timeout (`UPLOAD_REQUEST_TIMEOUT`, 5 minutes) and the
+    /// default 15s connect timeout. The 5-minute request budget covers
+    /// `pakx publish`'s tarball PUT; small calls (`whoami`, `create
+    /// package`) still fail fast on connect via the same client because
+    /// the connect timeout is independent of the request timeout.
     #[must_use]
     pub fn new(base_url: &str) -> Self {
-        Self::with_client(Client::new(), base_url)
+        Self::with_client(http_client_with_timeout(UPLOAD_REQUEST_TIMEOUT), base_url)
     }
 
     #[must_use]

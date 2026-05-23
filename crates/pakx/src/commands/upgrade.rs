@@ -8,9 +8,10 @@
 
 use anyhow::{anyhow, Result};
 use clap::Args;
-use reqwest::Client;
+use pakx_core::http_client;
 use serde::Deserialize;
 
+use crate::registry_url::validate_base_url;
 use crate::ui;
 
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -39,7 +40,16 @@ pub async fn run(args: UpgradeArgs) -> Result<()> {
     let url = args.releases_url.as_deref().unwrap_or(LATEST_URL);
     let ua = args.user_agent.as_deref().unwrap_or(USER_AGENT);
 
-    let release: Release = Client::new()
+    // Vet any user-supplied `--releases-url` override BEFORE the HTTP
+    // call. The default is hardcoded https so it cannot smuggle, but
+    // the hidden test override exists, and applying the validator
+    // uniformly across every command keeps the contract simple: every
+    // user-supplied base URL goes through `validate_base_url`.
+    if args.releases_url.is_some() {
+        validate_base_url(url)?;
+    }
+
+    let release: Release = http_client()
         .get(url)
         .header("user-agent", ua)
         .header("accept", "application/vnd.github+json")

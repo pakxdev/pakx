@@ -109,3 +109,18 @@ async fn surfaces_http_error_when_releases_api_is_5xx() {
         .assert()
         .failure();
 }
+
+/// `--releases-url` is a hidden test override but still user-supplied:
+/// route it through `validate_base_url` so a plaintext `http://evil.com`
+/// override cannot quietly exfiltrate the upgrade probe over the wire.
+#[test]
+fn upgrade_rejects_plaintext_http_releases_url() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args(["upgrade", "--releases-url", "http://evil.com/latest"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}

@@ -368,3 +368,66 @@ async fn search_json_respects_limit() {
     let parsed: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(parsed.as_array().unwrap().len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Negative tests: every `--*-base-url` override must vet via
+// `validate_base_url` BEFORE the federated search fires. Even though
+// the search payload is anonymous, a userinfo-smuggled override would
+// hand a network observer the query string the user typed (which
+// commonly carries the name of a package about to be installed).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn search_rejects_plaintext_http_mcp_base_url() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "anything",
+            "--mcp-base-url",
+            "http://evil.com",
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}
+
+#[test]
+fn search_rejects_plaintext_http_smithery_base_url() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "anything",
+            "--smithery-base-url",
+            "http://evil.com",
+            "--no-pakx-registry",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}
+
+#[test]
+fn search_rejects_plaintext_http_pakx_base_url() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "anything",
+            "--pakx-base-url",
+            "http://evil.com",
+            "--no-smithery",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}

@@ -24,6 +24,7 @@ use pakx_core::{Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::{BackendError, CreatePackageRequest, PakxBackend};
 
 use crate::pack::pack_dir;
+use crate::registry_url::validate_base_url;
 use crate::ui;
 
 #[derive(Debug, Clone, Args)]
@@ -60,6 +61,15 @@ pub struct PublishArgs {
 
 #[allow(clippy::too_many_lines)] // linear flow; helpers would obscure shape
 pub async fn run(args: PublishArgs) -> Result<()> {
+    // Vet any user-supplied `--registry` BEFORE the credentials lookup
+    // or any HTTP work. The publish flow sends the bearer token + the
+    // tarball bytes; a userinfo-smuggled override would exfiltrate
+    // both. Mirrors `pakx login` / `pakx install` discipline — the
+    // single source of truth for the validator is
+    // `crate::registry_url::validate_base_url`.
+    if args.registry != DEFAULT_REGISTRY_URL {
+        validate_base_url(&args.registry)?;
+    }
     let src = args.source.clone().unwrap_or_else(|| PathBuf::from("."));
     let creds_path = match args.credentials_file.clone() {
         Some(p) => p,

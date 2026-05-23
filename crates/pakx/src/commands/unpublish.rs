@@ -7,6 +7,7 @@ use clap::Args;
 use pakx_core::{Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::PakxBackend;
 
+use crate::registry_url::validate_base_url;
 use crate::ui;
 
 #[derive(Debug, Clone, Args)]
@@ -23,6 +24,13 @@ pub struct UnpublishArgs {
 }
 
 pub async fn run(args: UnpublishArgs) -> Result<()> {
+    // Vet any user-supplied `--registry` BEFORE the credentials lookup
+    // or any HTTP work. `unpublish` sends a bearer-authed DELETE; a
+    // userinfo-smuggled override would exfiltrate the token. Mirrors
+    // `pakx publish` / `pakx login` discipline.
+    if args.registry != DEFAULT_REGISTRY_URL {
+        validate_base_url(&args.registry)?;
+    }
     let (owner, name, version) = parse_spec(&args.spec)?;
     let creds_path = match args.credentials_file {
         Some(p) => p,

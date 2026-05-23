@@ -74,6 +74,11 @@ pub fn pack_dir(src_dir: &Path, out_dir: &Path) -> Result<PackOutput> {
         );
     }
 
+    // Direct `File::create` (not `atomic_write`) — pack always writes a
+    // fresh tarball into a caller-supplied out_dir; there is no prior
+    // version to lose on crash, and atomic_write's `<name>.tmp` side
+    // channel collides under parallel `cargo test` when multiple test
+    // fixtures share the same `<name>-<version>` shorthand.
     let mut out = File::create(&tarball_path)
         .with_context(|| format!("create {}", redact_path(&tarball_path, &cwd)))?;
     out.write_all(&bytes)

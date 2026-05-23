@@ -8,7 +8,7 @@
 //! when the Phase A→C `SaaS` roadmap reaches Smithery-side install.
 
 use async_trait::async_trait;
-use pakx_core::RegistrySource;
+use pakx_core::{http_client, RegistrySource};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -37,7 +37,7 @@ impl SmitherySource {
     #[must_use]
     pub fn new() -> Option<Self> {
         let cache = CacheDir::default_path()?;
-        Some(Self::with_parts(Client::new(), DEFAULT_BASE_URL, cache))
+        Some(Self::with_parts(http_client(), DEFAULT_BASE_URL, cache))
     }
 
     /// Explicit constructor for tests + bespoke deployments.

@@ -859,3 +859,129 @@ async fn publish_json_dry_run_emits_dry_run_flag() {
         "warnings array must always be present"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Negative tests: token-sending subcommands must reject plaintext-HTTP /
+// userinfo-smuggled `--registry` overrides BEFORE any HTTP work fires.
+// The contract is enforced by `crate::registry_url::validate_base_url`,
+// shared with `pakx install` / `pakx test` / `pakx outdated` / `pakx
+// audit` / `pakx login`. A regression here means a token / package id /
+// bearer-authed payload could leak over a network observer's wire.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn publish_rejects_plaintext_http_registry() {
+    let temp = TempDir::new().unwrap();
+    let src = TempDir::new().unwrap();
+    write_skill(&src, "pdf", "1.0.0");
+    let creds_path = temp.path().join("creds.json");
+    // Seed a credentials file pointed at the same plaintext URL so the
+    // command doesn't short-circuit on a missing entry — the URL check
+    // must reject BEFORE the credentials lookup.
+    std::fs::write(
+        &creds_path,
+        r#"{"registries":{"http://evil.com":{"token":"pakx_v1_x"}}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "publish",
+            src.path().to_str().unwrap(),
+            "--registry",
+            "http://evil.com",
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}
+
+#[test]
+fn unpublish_rejects_plaintext_http_registry() {
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("creds.json");
+    std::fs::write(
+        &creds_path,
+        r#"{"registries":{"http://evil.com":{"token":"pakx_v1_x"}}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "unpublish",
+            "alice/pdf@1.0.0",
+            "--registry",
+            "http://evil.com",
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}
+
+#[test]
+fn whoami_rejects_plaintext_http_registry() {
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("creds.json");
+    std::fs::write(
+        &creds_path,
+        r#"{"registries":{"http://evil.com":{"token":"pakx_v1_x"}}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "whoami",
+            "--registry",
+            "http://evil.com",
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}
+
+#[test]
+fn publish_rejects_userinfo_smuggling_registry() {
+    let temp = TempDir::new().unwrap();
+    let src = TempDir::new().unwrap();
+    write_skill(&src, "pdf", "1.0.0");
+    let creds_path = temp.path().join("creds.json");
+    let smuggled = "http://localhost:8080@evil.com/";
+    std::fs::write(
+        &creds_path,
+        format!(r#"{{"registries":{{"{smuggled}":{{"token":"pakx_v1_x"}}}}}}"#),
+    )
+    .unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "publish",
+            src.path().to_str().unwrap(),
+            "--registry",
+            smuggled,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to use registry base URL",
+        ));
+}

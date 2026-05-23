@@ -10,12 +10,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 use pakx_core::manifest::{DepSpec, PackageType};
-use pakx_core::{read_lockfile_from, read_manifest_from, Lockfile, Manifest};
+use pakx_core::{http_client, read_lockfile_from, read_manifest_from, Lockfile, Manifest};
 use pakx_registry_client::{
     CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
-use reqwest::Client;
 use tempfile::TempDir;
 
 use crate::redact::redact_path;
@@ -312,7 +311,7 @@ fn build_registry_client(
     let cache_root = cache_dir.path();
 
     let mcp =
-        OfficialMcpSource::with_parts(Client::new(), mcp_base_url, CacheDir::with_root(cache_root));
+        OfficialMcpSource::with_parts(http_client(), mcp_base_url, CacheDir::with_root(cache_root));
     let mut client = RegistryClient::new().with_source(Box::new(mcp));
 
     if !no_smithery {
@@ -323,7 +322,7 @@ fn build_registry_client(
             }
             None => SMITHERY_BASE_URL,
         };
-        let sm = SmitherySource::with_parts(Client::new(), url, CacheDir::with_root(cache_root));
+        let sm = SmitherySource::with_parts(http_client(), url, CacheDir::with_root(cache_root));
         client = client.with_source(Box::new(sm));
     }
 
@@ -335,7 +334,7 @@ fn build_registry_client(
             }
             None => PAKX_BASE_URL,
         };
-        let pakx = PakxSource::with_parts(Client::new(), url, CacheDir::with_root(cache_root));
+        let pakx = PakxSource::with_parts(http_client(), url, CacheDir::with_root(cache_root));
         client = client.with_source(Box::new(pakx));
     }
 

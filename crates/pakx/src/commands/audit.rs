@@ -25,9 +25,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use comfy_table::{Cell, CellAlignment};
-use pakx_core::{read_lockfile_from, LockEntry, RegistrySource};
+use pakx_core::{http_client, read_lockfile_from, LockEntry, RegistrySource};
 use pakx_registry_client::{CacheDir, PakxSource, RegistryError, PAKX_BASE_URL};
-use reqwest::Client;
 use serde::Serialize;
 use tracing::debug;
 
@@ -233,7 +232,7 @@ fn build_pakx_source(pakx_base_url: Option<&str>) -> Result<PakxSource> {
             .map_or(0, |d| d.as_nanos())
     ));
     Ok(PakxSource::with_parts(
-        Client::new(),
+        http_client(),
         pakx_url,
         CacheDir::with_root(&cache_root),
     ))
