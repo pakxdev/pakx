@@ -1,0 +1,46 @@
+name: release-dispatch
+
+# On every published GitHub Release, notify pakx-web so it can
+# regenerate public/install.sh + public/install.ps1 pinned version +
+# sha256 table and open a PR against its main. The PR is reviewed and
+# merged by a human — this workflow does not touch pakx-web's main
+# directly.
+#
+# OPERATOR SETUP (one-time):
+#   1. Create a GitHub fine-scoped PAT or app token with
+#      `contents: write` and `workflows: write` on pakxdev/pakx-web.
+#   2. Add it as a secret named PAKX_WEB_DISPATCH_TOKEN on this repo
+#      (pakxdev/pakx). The default GITHUB_TOKEN cannot dispatch
+#      events into a sibling repository.
+#
+# If the secret is absent the workflow logs a clear message and
+# exits 0; it does not block the release itself.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  notify-pakx-web:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PAKX_WEB_DISPATCH_TOKEN: ${{ secrets.PAKX_WEB_DISPATCH_TOKEN }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Dispatch pakx-release to pakx-web
+        run: |
+          set -euo pipefail
+          if [ -z "${PAKX_WEB_DISPATCH_TOKEN:-}" ]; then
+            echo "PAKX_WEB_DISPATCH_TOKEN secret is not configured." >&2
+            echo "Skipping pakx-web dispatch. See workflow header for setup." >&2
+            exit 0
+          fi
+          echo "Dispatching pakx-release for tag $TAG"
+          GH_TOKEN="$PAKX_WEB_DISPATCH_TOKEN" gh api \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/pakxdev/pakx-web/dispatches \
+            -f event_type=pakx-release \
+            -f client_payload[tag]="$TAG"

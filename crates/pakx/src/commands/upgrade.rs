@@ -75,7 +75,7 @@ pub async fn run(args: UpgradeArgs) -> Result<()> {
             println!("  brew                brew upgrade pakx");
             println!("  scoop               scoop update pakx");
             println!(
-                "  cargo               cargo install --git https://github.com/pakxdev/pakx --tag v{latest} --locked pakx"
+                "  cargo               cargo install --git https://github.com/pakxdev/pakx --tag v{latest} --locked pakx-cli"
             );
         }
     }
