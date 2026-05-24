@@ -272,9 +272,30 @@ impl Source for PakxSource {
     }
 }
 
+/// Split a federated id into `(owner, name)` at the **first** `/`.
+///
+/// Historically this helper rejected any id containing more than one
+/// `/` — the rule existed to keep the pakx-registry routes (which
+/// canonically take `<owner>/<name>` with single-segment names)
+/// well-formed. That single-slash hard-cap is too strict in practice:
+/// `pakx add io.github.acme/srv-name` is a valid id shape on the
+/// federated MCP registry, and the upstream caller in
+/// `commands::add::probe_pakx_kind` short-circuits on `NotFound` from
+/// the pakx source before falling back to MCP. Returning `NotFound`
+/// for the `io.github.acme/srv-name` shape silently broke that
+/// fallback whenever a pakx-side `404` would have been the right
+/// "skip me" signal.
+///
+/// The relaxed split takes everything before the first `/` as the
+/// owner and everything after as the name. The pakx-registry's own
+/// `ownerLogin` validation regex restricts owners to
+/// alphanumeric+dash, so a real pakx package can never collide with
+/// dotted MCP-style owner segments — the relaxation is unambiguous
+/// for actually-pakx ids and harmless for federated ones (the
+/// registry will just `404`).
 fn split_owner_name(id: &str) -> Option<(&str, &str)> {
     let (owner, rest) = id.split_once('/')?;
-    if owner.is_empty() || rest.is_empty() || rest.contains('/') {
+    if owner.is_empty() || rest.is_empty() {
         return None;
     }
     Some((owner, rest))

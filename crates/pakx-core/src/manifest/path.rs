@@ -264,11 +264,17 @@ fn set_inner(
                 map.insert(Value::String(k.clone()), value);
                 return Ok(());
             }
-            // Recurse — create an empty mapping on a missing
-            // intermediate so deep paths work on a fresh manifest.
+            // Recurse — create the right empty intermediate based on
+            // the **next** segment so deep paths work on a fresh
+            // manifest. If the next segment is an `Index`, scaffold
+            // an empty sequence; otherwise (the next segment is a
+            // `Key`) scaffold an empty mapping. Always scaffolding a
+            // mapping would force a follow-up `Index` recursion to
+            // bottom out in `IndexOnMapping`, breaking ergonomic deep
+            // sets like `foo[0]` on a fresh manifest.
             let key = Value::String(k.clone());
             if !map.contains_key(&key) {
-                map.insert(key.clone(), Value::Mapping(serde_yaml_ng::Mapping::new()));
+                map.insert(key.clone(), empty_for_next(tail));
             }
             let next = map.get_mut(&key).expect("just inserted");
             set_inner(next, tail, value, breadcrumb)
@@ -296,13 +302,34 @@ fn set_inner(
                 return Ok(());
             }
             if *i == len {
-                // Auto-extend with an empty mapping so a deep set on a
-                // fresh sequence still works. Symmetry with the
-                // missing-mapping-key branch above.
-                seq.push(Value::Mapping(serde_yaml_ng::Mapping::new()));
+                // Auto-extend with the shape the **next** segment
+                // demands. Same reasoning as the mapping branch above
+                // — picking `Mapping` unconditionally breaks
+                // `foo[0][0]` style paths because the inner `[0]`
+                // would land on a mapping and fail with
+                // `IndexOnMapping`. Pick the empty container by
+                // peeking at the next segment.
+                seq.push(empty_for_next(tail));
             }
             set_inner(&mut seq[*i], tail, value, breadcrumb)
         }
+    }
+}
+
+/// Pick the right empty intermediate container to scaffold when a
+/// `set` path passes through a missing segment.
+///
+/// `tail` is the remaining path past the current segment. The first
+/// element of `tail` tells us what shape the next recursion expects:
+/// a `PathSeg::Index` recursion needs a `Value::Sequence`, a
+/// `PathSeg::Key` recursion needs a `Value::Mapping`. Empty `tail`
+/// (i.e. the current segment is the last one) never reaches this
+/// helper — the leaf branches insert the user-supplied value
+/// directly.
+fn empty_for_next(tail: &[PathSeg]) -> Value {
+    match tail.first() {
+        Some(PathSeg::Index(_)) => Value::Sequence(serde_yaml_ng::Sequence::new()),
+        _ => Value::Mapping(serde_yaml_ng::Mapping::new()),
     }
 }
 
@@ -585,6 +612,62 @@ mod tests {
             get_value(&root, &path).unwrap().as_str(),
             Some("https://example.test")
         );
+    }
+
+    /// Round-47 regression: `set_value` used to scaffold every missing
+    /// intermediate as an empty mapping. When the **next** path
+    /// segment was an `Index` (e.g. `foo[0]` where `foo` is missing,
+    /// or `foo[0][0]` where the auto-pushed sequence element is also
+    /// missing), the recursion bottomed out in
+    /// `PathError::IndexOnMapping` and the user got a confusing error
+    /// for a path that ought to "just work" on a fresh manifest.
+    ///
+    /// The fix: peek the next segment when scaffolding and pick a
+    /// `Value::Sequence` instead of a `Value::Mapping` whenever the
+    /// next recursion will expect an index.
+    #[test]
+    fn set_value_scaffolds_sequences_when_next_segment_is_index() {
+        // Fresh empty manifest — every intermediate is missing.
+        let mut root: Value = serde_yaml_ng::from_str("name: demo\n").unwrap();
+        let path = parse_path("foo[0][0]").unwrap();
+        set_value(&mut root, &path, Value::String("bar".into())).unwrap();
+
+        // Expected shape:  foo: [[bar]]
+        let foo = root
+            .as_mapping()
+            .unwrap()
+            .get(Value::String("foo".into()))
+            .unwrap();
+        let outer = foo.as_sequence().expect("foo must be a sequence");
+        assert_eq!(outer.len(), 1);
+        let inner = outer[0]
+            .as_sequence()
+            .expect("foo[0] must be a sequence (auto-extended on Index recursion)");
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].as_str(), Some("bar"));
+    }
+
+    /// Sibling pin: `foo[0].name = bar` on a fresh manifest must
+    /// still scaffold `foo` as a sequence and `foo[0]` as a mapping
+    /// (because the next-after-the-index segment is a `Key`). Makes
+    /// sure the empty-for-next heuristic flips correctly when the
+    /// shape switches mid-path.
+    #[test]
+    fn set_value_scaffolds_mapping_after_index_when_next_is_key() {
+        let mut root: Value = serde_yaml_ng::from_str("name: demo\n").unwrap();
+        let path = parse_path("foo[0].name").unwrap();
+        set_value(&mut root, &path, Value::String("bar".into())).unwrap();
+
+        let foo = root
+            .as_mapping()
+            .unwrap()
+            .get(Value::String("foo".into()))
+            .unwrap();
+        let outer = foo.as_sequence().expect("foo must be a sequence");
+        assert_eq!(outer.len(), 1);
+        let elem = outer[0].as_mapping().expect("foo[0] must be a mapping");
+        let name = elem.get(Value::String("name".into())).unwrap();
+        assert_eq!(name.as_str(), Some("bar"));
     }
 
     #[test]

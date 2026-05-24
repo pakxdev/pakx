@@ -554,10 +554,20 @@ pub(super) fn extract_tarball(
         // name, then check `starts_with(canonical_root)`. We can't
         // canonicalize `dest_path` itself because the file doesn't
         // exist yet.
-        let parent_canonical = dest_path.parent().map_or_else(
-            || canonical_root.clone(),
-            |p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()),
-        );
+        //
+        // We MUST bail on canonicalize failure rather than fall back
+        // to the unfiltered parent path: a transient FS hiccup (NFS
+        // glitch, race with a co-process renaming a parent dir) could
+        // otherwise let a symlink the canonicalize would have
+        // unmasked slip through the `starts_with(canonical_root)`
+        // check. Fail loud is the only safe move when the symlink
+        // unmask itself flakes.
+        let parent_canonical = match dest_path.parent() {
+            Some(p) => p
+                .canonicalize()
+                .with_context(|| format!("canonicalize extracted parent {}", p.display()))?,
+            None => canonical_root.clone(),
+        };
         if !parent_canonical.starts_with(&canonical_root) {
             bail!("entry in {id} tarball: entry escapes destination root after canonicalize");
         }
@@ -801,5 +811,84 @@ mod tests {
     #[test]
     fn bytes_to_hex_pads_correctly() {
         assert_eq!(bytes_to_hex(&[0x0a, 0xff]), "0aff");
+    }
+
+    /// Build a gzipped tar in memory with the given `(path, contents)`
+    /// entries and return it as a `NamedTempFile`. Used by the
+    /// extract-tarball tests to spin up minimal fixtures without
+    /// touching the network.
+    fn build_targz(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Seek;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let enc = GzEncoder::new(tmp.as_file_mut(), Compression::default());
+            let mut builder = tar::Builder::new(enc);
+            for (name, body) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, name, *body).unwrap();
+            }
+            let enc = builder.into_inner().unwrap();
+            enc.finish().unwrap();
+        }
+        tmp.as_file_mut().seek(std::io::SeekFrom::Start(0)).unwrap();
+        tmp
+    }
+
+    /// Happy-path regression: extracting a tarball with deeply nested
+    /// directories still works after the round-47 change that swapped
+    /// the parent-canonicalize fallback (`.unwrap_or_else(|_|
+    /// p.to_path_buf())`) for a propagating `?`. The fallback used to
+    /// hide a transient FS hiccup as a silently-unfiltered parent
+    /// path; the new code surfaces any canonicalize failure as a hard
+    /// extract error. This test pins that the change does NOT break
+    /// the ordinary success path (deeply nested entries, multi-level
+    /// `create_dir_all`, then a successful canonicalize of each parent
+    /// against the canonical dest root).
+    #[test]
+    fn extract_tarball_nested_dirs_happy_path() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let dest = tmp_dir.path().join("dest");
+        let mut tar_tmp = build_targz(&[
+            ("SKILL.md", b"# skill"),
+            ("reference/notes.md", b"hi"),
+            ("reference/deep/nested/example.txt", b"deep"),
+        ]);
+        extract_tarball(&mut tar_tmp, &dest, "alice/demo").unwrap();
+        assert!(dest.join("SKILL.md").is_file());
+        assert!(dest.join("reference/notes.md").is_file());
+        assert!(dest.join("reference/deep/nested/example.txt").is_file());
+    }
+
+    /// Pin the canonicalize-failure surface: feed `extract_tarball` a
+    /// `dest_root` whose own canonicalize will fail (the parent dir
+    /// doesn't exist and can't be created — we pass a path with a
+    /// `\0` byte which `create_dir_all` will reject on every
+    /// platform). The function must error out cleanly, never panic
+    /// or fall back to an unfiltered path.
+    ///
+    /// This catches the family of regressions the round-47 fix
+    /// guards against — any future code change that re-introduces a
+    /// silent canonicalize fallback would let this test slip back to
+    /// success, which is exactly the security-relevant degradation
+    /// we want to keep blocked.
+    #[test]
+    fn extract_tarball_errors_when_dest_canonicalize_fails() {
+        let mut tar_tmp = build_targz(&[("a.txt", b"x")]);
+        // A path containing a NUL byte fails `create_dir_all` on
+        // every platform with `InvalidInput`. The subsequent
+        // canonicalize would also fail — either way `extract_tarball`
+        // must surface the error.
+        let bad_dest = std::path::PathBuf::from("/tmp/pakx-extract-nul-\0-test");
+        let err = extract_tarball(&mut tar_tmp, &bad_dest, "alice/demo").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("create") || msg.contains("canonicalize"),
+            "expected create/canonicalize error, got: {msg}"
+        );
     }
 }

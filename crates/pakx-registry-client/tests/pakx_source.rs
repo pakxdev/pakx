@@ -349,7 +349,14 @@ async fn fetch_rejects_malformed_id() {
     let cache = TempDir::new().unwrap();
     let src = source_against(&server, &cache);
 
-    for bad in ["", "no-slash", "/leading", "trailing/", "a/b/c"] {
+    // Note: `a/b/c` (multi-slash) is no longer rejected pre-network.
+    // The split takes everything before the first `/` as owner; the
+    // remainder is the name. See the `split_owner_name` doc comment
+    // for the rationale — short-circuiting multi-slash ids broke the
+    // `pakx add` federated MCP fallback for dotted owner shapes like
+    // `io.github.acme/srv-name`. Multi-slash ids are forwarded to the
+    // registry which `404`s them naturally.
+    for bad in ["", "no-slash", "/leading", "trailing/"] {
         let err = src.fetch(bad).await.unwrap_err();
         assert!(
             matches!(
@@ -364,6 +371,50 @@ async fn fetch_rejects_malformed_id() {
     }
     // No request should have been made to the mock server.
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// Regression test for the round-47 split-owner-name relaxation.
+///
+/// Ids with more than one `/` (e.g. `io.github.acme/srv-name`) used
+/// to be rejected pre-network as malformed, which caused
+/// `commands::add::probe_pakx_kind` to short-circuit and skip the
+/// MCP-fallback fire. The relaxation forwards the request and lets
+/// the registry return its own `404` (or `200` if the id happens to
+/// match a real pakx package — but the registry's owner-login
+/// validation regex makes that impossible for dotted owners).
+///
+/// Asserts:
+///   - The request actually reaches the mock server with the full id
+///     percent-encoded into the URL.
+///   - The `404` response surfaces as `RegistryError::NotFound` so
+///     the upstream `Ok(None)` mapping fires unchanged.
+#[tokio::test]
+async fn fetch_forwards_multi_slash_id_and_surfaces_registry_404() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    // The first `/` splits owner from name; the rest of the id is the
+    // name (which gets percent-encoded for the URL — `/` → `%2F`).
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages/io.github.acme/srv-name%2Fextra"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let err = src
+        .fetch("io.github.acme/srv-name/extra")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        RegistryError::NotFound {
+            source_tag: "pakx",
+            ..
+        }
+    ));
+    // The request must have actually fired — that is the whole point
+    // of the relaxation.
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 /// `fetch_version` must shape-guard the `<version>` URL segment BEFORE
