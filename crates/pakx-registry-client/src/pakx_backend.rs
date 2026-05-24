@@ -184,6 +184,14 @@ impl PakxBackend {
         // literal `..` path segment that HTTP routers normalize away —
         // silently re-routing the `PUT` to a different endpoint. The
         // encoder is correct; we need a separate shape guard on top.
+        // The `<owner>` half of the path is subject to the same threat
+        // model — a malicious manifest with `owner: ".."` percent-encodes
+        // to `PUT /api/v1/packages/../<name>/<version>` which a
+        // normalising CDN collapses upward. The bearer-token /
+        // package-ownership check on the registry side stops the
+        // cross-namespace publish, but defense-in-depth says the CLI
+        // shouldn't be a willing accomplice to traversal probes.
+        validate_package_name(owner)?;
         validate_package_name(name)?;
         // Same threat model applies to the `<version>` segment — a
         // `version` of `..` percent-encodes to a literal `..` segment
@@ -251,7 +259,9 @@ impl PakxBackend {
         version: &str,
     ) -> Result<(), BackendError> {
         // Same shape guard + percent-encoding contract as
-        // `upload_version`; see that method for the rationale.
+        // `upload_version`; see that method for the rationale (covers
+        // the `<owner>` traversal probe too).
+        validate_package_name(owner)?;
         validate_package_name(name)?;
         validate_version(version)?;
         let url = self.package_version_url(owner, name, version);
@@ -519,5 +529,110 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BackendError::InvalidVersion { .. }));
+    }
+
+    // ---------------------------------------------------------------
+    // Owner-half guard — defense-in-depth against a manifest with a
+    // hostile `owner:` field. The encoder leaves `.` unreserved so a
+    // literal `..` segment would otherwise reach the wire and a
+    // normalising CDN would collapse it upward. The bearer-token
+    // ownership check on the registry stops the cross-namespace publish
+    // attempt; we refuse to be the willing accomplice on the CLI side.
+    // No mock server is stood up — a fall-through to the HTTP layer
+    // would hang on TCP and fail the test by timeout, making
+    // "validator fired pre-network" the only passing path.
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn upload_version_rejects_hostile_owner_double_dot() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .upload_version("tok", "..", "demo", "1.0.0", vec![], None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidName { ref name, .. } if name == ".."),
+            "expected InvalidName for owner `..`, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_version_rejects_hostile_owner_embedded_traversal() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .upload_version("tok", "../escape", "demo", "1.0.0", vec![], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidName { .. }));
+    }
+
+    #[tokio::test]
+    async fn upload_version_rejects_hostile_owner_leading_dot() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .upload_version("tok", ".hidden", "demo", "1.0.0", vec![], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidName { .. }));
+    }
+
+    #[tokio::test]
+    async fn upload_version_rejects_hostile_owner_slash() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .upload_version("tok", "a/b", "demo", "1.0.0", vec![], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidName { .. }));
+    }
+
+    #[tokio::test]
+    async fn upload_version_rejects_hostile_owner_backslash() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .upload_version("tok", "a\\b", "demo", "1.0.0", vec![], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidName { .. }));
+    }
+
+    #[tokio::test]
+    async fn upload_version_rejects_hostile_owner_control_char() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .upload_version("tok", "a\nb", "demo", "1.0.0", vec![], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidName { .. }));
+    }
+
+    #[tokio::test]
+    async fn unpublish_rejects_hostile_owner_double_dot() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b.unpublish("tok", "..", "demo", "1.0.0").await.unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidName { ref name, .. } if name == ".."),
+            "expected InvalidName for owner `..`, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn unpublish_rejects_hostile_owner_embedded_traversal() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .unpublish("tok", "../escape", "demo", "1.0.0")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidName { .. }));
+    }
+
+    #[tokio::test]
+    async fn unpublish_rejects_hostile_owner_slash() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .unpublish("tok", "a/b", "demo", "1.0.0")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidName { .. }));
     }
 }
