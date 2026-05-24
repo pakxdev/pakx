@@ -122,13 +122,15 @@ pub async fn run(args: InfoArgs) -> Result<()> {
     if let Some(version) = args.version.as_deref() {
         return run_version(&args, &owner, &name, version).await;
     }
-    // Shape-guard the `<name>` segment before constructing the URL —
+    // Shape-guard BOTH halves of the id before constructing the URL —
     // mirror the discipline `PakxBackend` enforces on publish /
-    // unpublish. The owner half is permitted to carry the GitHub login
-    // character set (the percent-encoder is the structural guard
-    // there); the name half is reserved for the `..`-traversal /
-    // control-char rejection. Both halves get percent-encoded into the
-    // path so a hostile segment never reaches the registry verbatim.
+    // unpublish. `urlencoding_minimal` leaves `.` unreserved per RFC
+    // 3986, so a hostile `owner` of `..` would otherwise reach the wire
+    // as `GET /api/v1/packages/../<name>` — a normalising CDN collapses
+    // the segment upward and re-routes the GET to a different endpoint.
+    // The name half has always been guarded; the owner half was missed
+    // in the original round-47 hardening.
+    validate_package_name(&owner).map_err(|e| anyhow!("invalid package id {owner}/{name}: {e}"))?;
     validate_package_name(&name).map_err(|e| anyhow!("invalid package id {owner}/{name}: {e}"))?;
     let url = format!(
         "{}/api/v1/packages/{}/{}",
@@ -269,12 +271,13 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
     // Vet the URL segments BEFORE touching the cache or any HTTP code
     // path. `validate_version` rejects `..` / leading `-` / control
     // chars / characters outside the semver-friendly set;
-    // `validate_package_name` does the same for the name half. Both
-    // mirror the pre-network discipline enforced inside
-    // `PakxSource::fetch_version` + `PakxBackend::upload_version`; we
-    // duplicate the checks here so the CLI emits a friendly error
+    // `validate_package_name` does the same for the owner and name
+    // halves. All three mirror the pre-network discipline enforced
+    // inside `PakxSource::fetch_version` + `PakxBackend::upload_version`;
+    // we duplicate the checks here so the CLI emits a friendly error
     // (with the user-supplied id labelled) instead of a stringified
     // `RegistryError::Invalid`.
+    validate_package_name(owner).map_err(|e| anyhow!("invalid package id {owner}/{name}: {e}"))?;
     validate_package_name(name).map_err(|e| anyhow!("invalid package id {owner}/{name}: {e}"))?;
     validate_version(version).map_err(|e| anyhow!("invalid --version {version:?}: {e}"))?;
     // `PakxSource::fetch_version` does **not** cache (signed URLs are
@@ -338,10 +341,10 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
 /// rather than guessing.
 async fn fetch_package_kind(registry: &str, owner: &str, name: &str) -> Option<String> {
     // Match the encoding discipline of the primary `run` path. The
-    // caller (`run_version`) has already shape-guarded these segments,
-    // so we don't re-validate here — we only encode so a benign hash /
-    // plus character in an owner login (`+` is legal in URLs) doesn't
-    // confuse a strict route matcher.
+    // caller (`run_version`) has already shape-guarded both the owner
+    // and name segments, so we don't re-validate here — we only encode
+    // so a benign hash / plus character in an owner login (`+` is legal
+    // in URLs) doesn't confuse a strict route matcher.
     let url = format!(
         "{}/api/v1/packages/{}/{}",
         registry.trim_end_matches('/'),
@@ -811,6 +814,111 @@ mod tests {
         assert!(
             msg.contains("invalid --version") && msg.contains(".."),
             "expected pre-network version rejection, got: {msg}",
+        );
+    }
+
+    /// Owner-half companion of the version guard above. `pakx info
+    /// ../foo/bar` must refuse the request BEFORE touching the network
+    /// — the encoder leaves dots unreserved, so the literal `..` segment
+    /// would otherwise reach the wire and a normalising CDN would
+    /// collapse it upward. `split_id` accepts the shape (single slash,
+    /// both halves non-empty), so the owner-half guard inside `run` is
+    /// the only thing standing between a hostile manifest and the
+    /// registry's route table. We don't stand up a mock server — a
+    /// fall-through to TCP would hang and fail by timeout, making
+    /// "validator fired pre-network" the only passing path.
+    #[tokio::test]
+    async fn run_rejects_hostile_owner_double_dot_pre_network() {
+        let args = InfoArgs {
+            id: "../bar".into(),
+            field: None,
+            version: None,
+            registry: "https://example.invalid".into(),
+            json: false,
+            no_cache: false,
+        };
+        let err = run(args).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid package id"),
+            "expected pre-network owner rejection, got: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_hostile_owner_leading_dot_pre_network() {
+        let args = InfoArgs {
+            id: ".hidden/bar".into(),
+            field: None,
+            version: None,
+            registry: "https://example.invalid".into(),
+            json: false,
+            no_cache: false,
+        };
+        let err = run(args).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid package id"),
+            "expected pre-network owner rejection, got: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_hostile_owner_backslash_pre_network() {
+        // `split_id` only splits on `/` — a backslash sneaks through to
+        // the owner half. Our new guard catches it.
+        let args = InfoArgs {
+            id: "a\\b/bar".into(),
+            field: None,
+            version: None,
+            registry: "https://example.invalid".into(),
+            json: false,
+            no_cache: false,
+        };
+        let err = run(args).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid package id"),
+            "expected pre-network owner rejection, got: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_hostile_owner_control_char_pre_network() {
+        let args = InfoArgs {
+            id: "a\nb/bar".into(),
+            field: None,
+            version: None,
+            registry: "https://example.invalid".into(),
+            json: false,
+            no_cache: false,
+        };
+        let err = run(args).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid package id"),
+            "expected pre-network owner rejection, got: {msg}",
+        );
+    }
+
+    /// Same threat model applied to the `--version` branch. Both halves
+    /// of the id are guarded inside `run_version`; here we pin the owner
+    /// guard fires before any cache / HTTP work.
+    #[tokio::test]
+    async fn run_version_rejects_hostile_owner_pre_network() {
+        let args = InfoArgs {
+            id: "../bar".into(),
+            field: None,
+            version: Some("1.0.0".into()),
+            registry: "https://example.invalid".into(),
+            json: false,
+            no_cache: false,
+        };
+        let err = run(args).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid package id"),
+            "expected pre-network owner rejection on --version branch, got: {msg}",
         );
     }
 }

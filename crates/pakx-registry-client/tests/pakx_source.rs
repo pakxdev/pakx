@@ -448,3 +448,107 @@ async fn fetch_version_rejects_hostile_version_pre_network() {
         "validator must fire before any HTTP request",
     );
 }
+
+/// Owner-half companion of the version guard above. The encoder leaves
+/// `.` unreserved per RFC 3986 so a manifest with `owner: ".."` would
+/// otherwise reach the wire as `GET /api/v1/packages/../<name>/<ver>` —
+/// a normalising CDN collapses the segment upward and silently re-routes
+/// the GET to a different endpoint. Pin the guard with a hostile input
+/// set + assert the mock server saw zero traffic.
+#[tokio::test]
+async fn fetch_version_rejects_hostile_owner_pre_network() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    let src = source_against(&server, &cache);
+
+    for bad in [
+        "", ".", "..", "../foo", ".hidden", "foo..bar", "a/b", "a\\b", "a\nb",
+    ] {
+        let err = src.fetch_version(bad, "demo", "1.0.0").await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RegistryError::Invalid {
+                    source_tag: "pakx",
+                    ..
+                }
+            ),
+            "owner {bad:?} must be rejected as invalid, got {err:?}",
+        );
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "validator must fire before any HTTP request",
+    );
+}
+
+/// Light-weight traversal guard on the NAME half of `Source::fetch`.
+/// The round-47 split-owner-name relaxation forwards multi-slash ids
+/// like `io.github.acme/srv-name/extra` to the registry so MCP fallback
+/// works — `urlencoding_minimal` encodes the embedded `/` to `%2F`, so
+/// the multi-slash name reaches the wire as a single percent-encoded
+/// segment. But `.` is RFC 3986 unreserved and survives the encoder, so
+/// a literal `..` substring in the name would still reach the wire and
+/// a normalising CDN would collapse it upward. This narrow guard rejects
+/// just the `..` shape while keeping the multi-slash relaxation intact.
+#[tokio::test]
+async fn fetch_rejects_dotdot_in_name_pre_network() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    let src = source_against(&server, &cache);
+
+    for bad in ["acme/..", "acme/.", "acme/../foo", "acme/foo..bar"] {
+        let err = src.fetch(bad).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RegistryError::Invalid {
+                    source_tag: "pakx",
+                    ..
+                }
+            ),
+            "id {bad:?} must be rejected as invalid, got {err:?}",
+        );
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "validator must fire before any HTTP request",
+    );
+}
+
+/// Same owner-half threat model applied to `Source::fetch` — the
+/// list/detail endpoint also has an `<owner>` segment that a hostile
+/// `agents.yml` shorthand pin (`pakx/../foo/bar`) could otherwise probe.
+/// The fetch path is wrapped in a cache layer so the guard must fire
+/// before the cache key is consulted (a poisoned `..` key would otherwise
+/// persist on disk).
+#[tokio::test]
+async fn fetch_rejects_hostile_owner_pre_network() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    let src = source_against(&server, &cache);
+
+    for bad in [
+        "../foo/bar",
+        "..hidden/name",
+        ".hidden/name",
+        "a\\b/demo",
+        "a\nb/demo",
+    ] {
+        let err = src.fetch(bad).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RegistryError::Invalid {
+                    source_tag: "pakx",
+                    ..
+                }
+            ),
+            "id {bad:?} must be rejected as invalid, got {err:?}",
+        );
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "validator must fire before any HTTP request",
+    );
+}

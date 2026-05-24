@@ -13,7 +13,7 @@
 //!   GET /api/v1/packages/{owner}/{name}/{version}     -> per-version detail (includes signed tarballUrl)
 
 use async_trait::async_trait;
-use pakx_core::{http_client, validate_version, RegistrySource};
+use pakx_core::{http_client, validate_package_name, validate_version, RegistrySource};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,13 +89,24 @@ impl PakxSource {
         name: &str,
         version: &str,
     ) -> Result<PackageVersion, RegistryError> {
-        // Shape-guard the `<version>` segment **before** any encoding /
+        // Shape-guard every URL path segment **before** any encoding /
         // network work. `urlencoding_minimal` follows RFC 3986 §2.3 and
-        // leaves `.` unreserved — so a version of `..` would
-        // percent-encode to a literal `..` segment that a normalising
-        // reverse proxy collapses, silently re-routing the GET to a
-        // different endpoint. See `pakx_core::validation` for the
-        // shared threat model.
+        // leaves `.` unreserved — so an `owner`, `name`, or `version` of
+        // `..` would percent-encode to a literal `..` segment that a
+        // normalising reverse proxy collapses, silently re-routing the
+        // GET to a different endpoint. The `<owner>` half is part of
+        // the same threat model: a malicious id like `../foo/bar` slipped
+        // into an `agents.yml` shorthand pin would otherwise reach the
+        // wire as `GET /api/v1/packages/../foo/bar/<ver>`. See
+        // `pakx_core::validation` for the shared threat model.
+        validate_package_name(owner).map_err(|e| RegistryError::Invalid {
+            source_tag: TAG,
+            reason: e.to_string(),
+        })?;
+        validate_package_name(name).map_err(|e| RegistryError::Invalid {
+            source_tag: TAG,
+            reason: e.to_string(),
+        })?;
         validate_version(version).map_err(|e| RegistryError::Invalid {
             source_tag: TAG,
             reason: e.to_string(),
@@ -234,6 +245,43 @@ impl Source for PakxSource {
                     source_tag: TAG,
                     id: id_owned.clone(),
                 })?;
+                // Shape-guard the OWNER half of the id BEFORE the URL is
+                // built. Without this, a hostile id like `../foo/bar`
+                // slipped into an `agents.yml` shorthand pin would
+                // percent-encode to a literal `..` owner segment that a
+                // normalising reverse proxy collapses upward. The
+                // dotted MCP-style owner shapes (`io.github.acme`) still
+                // pass because `validate_package_name` only rejects
+                // empty / `.` / `..` / leading-dot / embedded-`..` /
+                // slash / backslash / control chars — single dots
+                // anywhere mid-string are fine.
+                validate_package_name(owner).map_err(|e| RegistryError::Invalid {
+                    source_tag: TAG,
+                    reason: e.to_string(),
+                })?;
+                // Light-weight traversal guard on the NAME half. The
+                // round-47 split-owner-name relaxation forwards
+                // multi-slash ids (`io.github.acme/srv-name/extra` —
+                // name becomes `srv-name/extra` after the first-slash
+                // split) to the registry so the upstream
+                // `probe_pakx_kind` fallback can surface a clean
+                // `NotFound` for non-pakx ids. `urlencoding_minimal`
+                // encodes `/` → `%2F` so the multi-slash name reaches
+                // the wire as a single percent-encoded segment, which
+                // defangs `/` itself. BUT — `.` is RFC 3986 unreserved
+                // and survives the encoder verbatim, so `name == ".."`
+                // or `name` containing the substring `..` would still
+                // reach the wire as a literal `..` byte sequence that a
+                // normalising CDN collapses upward. Reject just that
+                // narrow shape (no full `validate_package_name` here —
+                // that would re-break the round-47 relaxation by
+                // rejecting any embedded `/`).
+                if name == "." || name == ".." || name.contains("..") {
+                    return Err(RegistryError::Invalid {
+                        source_tag: TAG,
+                        reason: format!("invalid package name {name:?}: must not contain `..`"),
+                    });
+                }
                 let url = format!(
                     "{base_url}/api/v1/packages/{}/{}",
                     urlencoding_minimal(owner),
