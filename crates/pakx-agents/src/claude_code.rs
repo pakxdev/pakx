@@ -1,7 +1,13 @@
 //! Claude Code adapter.
 //!
-//! - Skills install under `<config_dir>/skills/<owner>/<name>/` (default
-//!   `~/.claude/skills/...`).
+//! - Skills install under `<config_dir>/skills/<owner>-<name>/` (default
+//!   `~/.claude/skills/...`). The single-level dash-separated leaf
+//!   matches the install runner (`crates/pakx/src/install/skill.rs` +
+//!   `install/bundle.rs`) and Claude Code's organic "one flat dir per
+//!   skill, no version subdir" convention. A previous two-level
+//!   `<owner>/<name>` layout in this module silently diverged from the
+//!   installer, causing `Adapter::list()` to miss every installer-side
+//!   skill and `pakx list` / `pakx doctor` to report them as drift.
 //! - MCP servers are written into `<project_root>/.mcp.json` — Claude
 //!   Code's project-scoped MCP convention. `project_root` defaults to the
 //!   process cwd, but tests and callers pass an explicit path.
@@ -73,8 +79,17 @@ impl ClaudeCodeAdapter {
         self.config_dir.join("skills")
     }
 
+    /// Canonical on-disk path for a skill: `<skills_root>/<owner>-<name>/`.
+    ///
+    /// The single-level dash-separated leaf mirrors the install
+    /// runner (`install::skill::install_skill_from_pakx` →
+    /// `claude_home.join("skills").join(format!("{owner}-{name}"))`) so
+    /// the adapter's `list` / `uninstall` paths see exactly what the
+    /// installer wrote. Diverging from the installer (e.g. a two-level
+    /// `<owner>/<name>` tree) silently breaks `pakx list` + `pakx
+    /// doctor` for every Phase B skill.
     fn skill_dir(&self, owner: &str, name: &str) -> PathBuf {
-        self.skills_root().join(owner).join(name)
+        self.skills_root().join(format!("{owner}-{name}"))
     }
 
     fn mcp_config_path(&self) -> PathBuf {
@@ -197,50 +212,52 @@ impl Adapter for ClaudeCodeAdapter {
         Err(AdapterError::NotInstalled { id: id.to_owned() })
     }
 
+    /// Enumerate every installed skill under `<skills_root>/`.
+    ///
+    /// Walks one level deep — each entry is a `<owner>-<name>/`
+    /// directory matching the installer's layout (see
+    /// [`Self::skill_dir`]). Non-conforming names (no `-` separator) are
+    /// surfaced verbatim as `id = <dir_name>` so a hand-rolled / drifted
+    /// install still shows up in `pakx list` instead of disappearing.
     async fn list(&self) -> Result<Vec<Installed>, AdapterError> {
         let root = self.skills_root();
         if !root.is_dir() {
             return Ok(vec![]);
         }
         let mut out = Vec::new();
-        let mut owners = fs::read_dir(&root).await.map_err(|e| AdapterError::Io {
+        let mut entries = fs::read_dir(&root).await.map_err(|e| AdapterError::Io {
             source: e,
             path: Some(root.clone()),
         })?;
-        while let Some(owner_entry) = owners.next_entry().await.map_err(|e| AdapterError::Io {
+        while let Some(entry) = entries.next_entry().await.map_err(|e| AdapterError::Io {
             source: e,
             path: Some(root.clone()),
         })? {
-            if !owner_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+            if !entry.file_type().await.is_ok_and(|t| t.is_dir()) {
                 continue;
             }
-            let owner = owner_entry.file_name().to_string_lossy().into_owned();
-            let owner_path = owner_entry.path();
-            let mut names = fs::read_dir(&owner_path)
+            let dir_name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            // Restore the canonical `<owner>/<name>` id from the
+            // dash-flattened on-disk name. The installer always writes
+            // `<owner>-<name>` (with exactly one separator joining the
+            // two halves of the registry id), so splitting on the FIRST
+            // `-` recovers the original split — even when the `<name>`
+            // itself contains additional dashes (e.g.
+            // `arwenizer/hello-world` → `arwenizer-hello-world` →
+            // `arwenizer/hello-world`).
+            let id = dir_name
+                .split_once('-')
+                .map_or_else(|| dir_name.clone(), |(o, n)| format!("{o}/{n}"));
+            let version = read_skill_version(&path)
                 .await
-                .map_err(|e| AdapterError::Io {
-                    source: e,
-                    path: Some(owner_path.clone()),
-                })?;
-            while let Some(name_entry) = names.next_entry().await.map_err(|e| AdapterError::Io {
-                source: e,
-                path: Some(owner_path.clone()),
-            })? {
-                if !name_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-                    continue;
-                }
-                let name = name_entry.file_name().to_string_lossy().into_owned();
-                let path = name_entry.path();
-                let version = read_skill_version(&path)
-                    .await
-                    .unwrap_or_else(|| "unknown".into());
-                out.push(Installed {
-                    id: format!("{owner}/{name}"),
-                    kind: PackageType::Skills,
-                    version,
-                    path,
-                });
-            }
+                .unwrap_or_else(|| "unknown".into());
+            out.push(Installed {
+                id,
+                kind: PackageType::Skills,
+                version,
+                path,
+            });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)

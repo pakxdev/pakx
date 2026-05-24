@@ -12,7 +12,10 @@
 use anyhow::{anyhow, Result};
 use clap::Args;
 use comfy_table::{Cell, CellAlignment};
-use pakx_core::{http_client, manifest_get_value_json, manifest_parse_path, Sponsor};
+use pakx_core::{
+    http_client, manifest_get_value_json, manifest_parse_path, validate_package_name,
+    validate_version, Sponsor,
+};
 use pakx_registry_client::{CacheDir, PackageVersion, PakxSource};
 use serde::Deserialize;
 
@@ -119,11 +122,19 @@ pub async fn run(args: InfoArgs) -> Result<()> {
     if let Some(version) = args.version.as_deref() {
         return run_version(&args, &owner, &name, version).await;
     }
+    // Shape-guard the `<name>` segment before constructing the URL —
+    // mirror the discipline `PakxBackend` enforces on publish /
+    // unpublish. The owner half is permitted to carry the GitHub login
+    // character set (the percent-encoder is the structural guard
+    // there); the name half is reserved for the `..`-traversal /
+    // control-char rejection. Both halves get percent-encoded into the
+    // path so a hostile segment never reaches the registry verbatim.
+    validate_package_name(&name).map_err(|e| anyhow!("invalid package id {owner}/{name}: {e}"))?;
     let url = format!(
         "{}/api/v1/packages/{}/{}",
         args.registry.trim_end_matches('/'),
-        owner,
-        name,
+        urlencoding_minimal(&owner),
+        urlencoding_minimal(&name),
     );
     // Wrap the network call in `with_context` so a connection refused
     // / DNS failure shows the registry URL the user gave us, not the
@@ -255,6 +266,17 @@ pub async fn run(args: InfoArgs) -> Result<()> {
 /// The kind lookup is best-effort: a 404 or transport error degrades
 /// gracefully — the install hint just omits the `-t <kind>` flag.
 async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) -> Result<()> {
+    // Vet the URL segments BEFORE touching the cache or any HTTP code
+    // path. `validate_version` rejects `..` / leading `-` / control
+    // chars / characters outside the semver-friendly set;
+    // `validate_package_name` does the same for the name half. Both
+    // mirror the pre-network discipline enforced inside
+    // `PakxSource::fetch_version` + `PakxBackend::upload_version`; we
+    // duplicate the checks here so the CLI emits a friendly error
+    // (with the user-supplied id labelled) instead of a stringified
+    // `RegistryError::Invalid`.
+    validate_package_name(name).map_err(|e| anyhow!("invalid package id {owner}/{name}: {e}"))?;
+    validate_version(version).map_err(|e| anyhow!("invalid --version {version:?}: {e}"))?;
     // `PakxSource::fetch_version` does **not** cache (signed URLs are
     // short-TTL), but the constructor still requires a `CacheDir` for
     // the search/detail paths. We give it a transient tempdir so a
@@ -315,11 +337,16 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
 /// kind value. Callers fall back to an install hint without `-t <kind>`
 /// rather than guessing.
 async fn fetch_package_kind(registry: &str, owner: &str, name: &str) -> Option<String> {
+    // Match the encoding discipline of the primary `run` path. The
+    // caller (`run_version`) has already shape-guarded these segments,
+    // so we don't re-validate here — we only encode so a benign hash /
+    // plus character in an owner login (`+` is legal in URLs) doesn't
+    // confuse a strict route matcher.
     let url = format!(
         "{}/api/v1/packages/{}/{}",
         registry.trim_end_matches('/'),
-        owner,
-        name,
+        urlencoding_minimal(owner),
+        urlencoding_minimal(name),
     );
     let response = http_client()
         .get(&url)
@@ -475,6 +502,28 @@ fn emit_field(body: &serde_json::Value, field: &str, json_mode: bool) -> Result<
         _ => println!("{value}"),
     }
     Ok(())
+}
+
+/// Minimal RFC 3986 percent-encoder for URL path segments. Mirrors the
+/// helper in `pakx-registry-client` (`pakx_source` / `pakx_backend`) so
+/// the two crates emit identical wire URLs given identical input.
+/// Dots and tildes stay unreserved per the spec; the shape guards
+/// above are what catch the `..` traversal that the encoder leaves
+/// alone.
+fn urlencoding_minimal(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 fn split_id(id: &str) -> Result<(String, String)> {
@@ -724,5 +773,44 @@ mod tests {
         // 2000-01-01 == 10957 days (a constant well-pinned by the
         // POSIX cal — Hinnant's algorithm reproduces it).
         assert_eq!(days_from_civil(2000, 1, 1), 10_957);
+    }
+
+    #[test]
+    fn urlencoding_minimal_preserves_unreserved() {
+        // RFC 3986 §2.3 unreserved set + alphanumerics survive
+        // verbatim; everything else gets `%XX`-encoded. Pinning the
+        // contract here means a future refactor that swaps in a
+        // different encoder catches the regression in CI.
+        assert_eq!(
+            urlencoding_minimal("hello-world.0_1~2"),
+            "hello-world.0_1~2"
+        );
+        assert_eq!(urlencoding_minimal("foo/bar"), "foo%2Fbar");
+        assert_eq!(urlencoding_minimal("a b"), "a%20b");
+    }
+
+    #[tokio::test]
+    async fn run_version_rejects_hostile_version_pre_network() {
+        // `..` percent-encodes to literal `..` under `urlencoding_minimal`
+        // (RFC 3986 leaves dots unreserved) which a normalising reverse
+        // proxy collapses upward — silently re-routing the GET to the
+        // package-detail endpoint. The CLI must short-circuit BEFORE
+        // touching the network. We don't stand up a mock server because
+        // a connection-refused-after-validation result would be a false
+        // pass.
+        let args = InfoArgs {
+            id: "alice/hello".into(),
+            field: None,
+            version: Some("..".into()),
+            registry: "https://example.invalid".into(),
+            json: false,
+            no_cache: false,
+        };
+        let err = run(args).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid --version") && msg.contains(".."),
+            "expected pre-network version rejection, got: {msg}",
+        );
     }
 }

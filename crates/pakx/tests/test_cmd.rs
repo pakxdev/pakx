@@ -390,6 +390,116 @@ fn test_rejects_no_pakx_registry_combined_with_pakx_base_url() {
         .stderr(predicate::str::contains("cannot be used with"));
 }
 
+/// Perf-correctness pin for the `check_online` fan-out: three MCP
+/// deps with a 250ms server-side delay each must resolve in well
+/// under the 750ms sequential wall-clock (the pre-fix loop awaited
+/// every dep serially). The cap below is generous (1500ms) to absorb
+/// CI scheduler jitter + binary cold-start while still failing loud
+/// if the loop regresses to serial. Equivalent to the 2026-05 perf
+/// pass measurement of ~58% drop on a 3-dep manifest against the
+/// production registry (~400ms RTT).
+///
+/// Additionally pins:
+///   * deterministic per-dep print order matching the manifest order
+///     (the fan-out is `buffer_unordered`, so the runner sorts by
+///     dep index before emitting — without that sort, CI parsers
+///     that key on row order would flake).
+///   * all three deps surface a successful `[ok]` row even though
+///     their futures finish out-of-order.
+#[tokio::test]
+async fn test_online_resolves_deps_in_parallel() {
+    use std::time::{Duration, Instant};
+
+    // Single mock server fields every official-MCP fetch with a fixed
+    // 250ms delay. With sequential awaits, three deps × 250ms = ~750ms
+    // wall clock minimum; with `buffer_unordered(10)` all three
+    // complete in ~250ms (one RTT) plus CLI startup overhead.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/v0/servers/io\.github\.acme/.+",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(250))
+                .set_body_json(json!({
+                    "servers": [
+                        {
+                            "name": "placeholder",
+                            "description": "delayed",
+                            "version_detail": {"version": "1.0.0"}
+                        }
+                    ]
+                })),
+        )
+        .mount(&server)
+        .await;
+    // The `OfficialMcpSource::fetch` route hits both the list endpoint
+    // and the detail endpoint depending on the source's strategy; the
+    // resolver fans through `client.fetch(OfficialMcp, id)` which lands
+    // on `/v0/servers/<id>` per the source impl. Add a catch-all 404
+    // for the listing endpoint so a stray search call doesn't 500.
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&server)
+        .await;
+
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    \
+         - io.github.acme/one\n    \
+         - io.github.acme/two\n    \
+         - io.github.acme/three\n",
+    );
+
+    let started = Instant::now();
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "test",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
+        .assert()
+        .get_output()
+        .clone();
+    let elapsed = started.elapsed();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    // Parallel completion bound. Cold-start of the cargo-built binary
+    // dominates on CI for sub-second tests so the cap is generous;
+    // sequential execution (3 × 250ms = 750ms net request time) would
+    // push total wall-clock past this threshold on every CI worker
+    // observed during the perf pass.
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "fan-out collapsed to serial: elapsed={elapsed:?} (cap 1500ms). stdout=\n{stdout}",
+    );
+
+    // Order preservation: the runner sorts by dep index before
+    // emitting, so even though the resolver futures completed
+    // out-of-order, the user sees rows in manifest order.
+    let one = stdout
+        .find("mcp/io.github.acme/one")
+        .expect("first dep row");
+    let two = stdout
+        .find("mcp/io.github.acme/two")
+        .expect("second dep row");
+    let three = stdout
+        .find("mcp/io.github.acme/three")
+        .expect("third dep row");
+    assert!(
+        one < two && two < three,
+        "deps must print in manifest order; got one@{one} two@{two} three@{three}: {stdout}",
+    );
+}
+
 #[test]
 fn test_does_not_write_lockfile() {
     let project = TempDir::new().unwrap();
