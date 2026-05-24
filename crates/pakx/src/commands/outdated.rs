@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::debug;
 
+use crate::commands::cache_tempdir::make_cache_tempdir;
 use crate::registry_url::validate_base_url;
 use crate::ui;
 
@@ -281,6 +282,12 @@ struct Clients {
     pakx: PakxSource,
     mcp: OfficialMcpSource,
     smithery: SmitherySource,
+    /// Cache root tempdir guard — deleted on drop. Kept on the struct
+    /// so it lives for the lifetime of every `Source::search`/`fetch`
+    /// call that uses `pakx.cache` / `mcp.cache` / `smithery.cache`.
+    /// Without this guard the per-call `pakx-outdated-cache-*` dir
+    /// would accumulate in `/tmp` on every `pakx outdated` run.
+    _cache_guard: tempfile::TempDir,
 }
 
 fn build_clients(
@@ -322,13 +329,13 @@ fn build_clients(
     // ports aggressively; on a hot CI runner two sequential tests
     // routinely see a port collision). With per-call dirs the cache
     // key collision window goes to zero.
-    let cache_root = std::env::temp_dir().join(format!(
-        "pakx-outdated-cache-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
+    //
+    // Wrapped in a `tempfile::TempDir` (`_cache_guard` on the returned
+    // `Clients`) so the dir deletes on drop — a user who never runs
+    // `pakx doctor --clear-cache` would otherwise accumulate one
+    // `pakx-outdated-cache-*` dir per `outdated` invocation.
+    let cache_root = make_cache_tempdir("pakx-outdated-cache")
+        .with_context(|| "create outdated cache tempdir")?;
     let http = http_client();
     let cd = |root: &std::path::Path| {
         let c = CacheDir::with_root(root);
@@ -338,10 +345,14 @@ fn build_clients(
             c
         }
     };
+    let pakx = PakxSource::with_parts(http.clone(), pakx_url, cd(cache_root.path()));
+    let mcp = OfficialMcpSource::with_parts(http.clone(), mcp_url, cd(cache_root.path()));
+    let smithery = SmitherySource::with_parts(http, smithery_url, cd(cache_root.path()));
     Ok(Clients {
-        pakx: PakxSource::with_parts(http.clone(), pakx_url, cd(&cache_root)),
-        mcp: OfficialMcpSource::with_parts(http.clone(), mcp_url, cd(&cache_root)),
-        smithery: SmitherySource::with_parts(http, smithery_url, cd(&cache_root)),
+        pakx,
+        mcp,
+        smithery,
+        _cache_guard: cache_root,
     })
 }
 

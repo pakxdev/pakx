@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod audit;
+pub mod cache_tempdir;
 pub mod completion;
 pub mod config;
 pub mod doctor;

@@ -890,20 +890,25 @@ async fn outdated_marks_unsupported_source_as_skip() {
 }
 
 // ===========================================================================
-// Cache-root collision pin: per-call dirs must NOT share a name.
+// Cache-root cleanup pin: per-call dirs MUST be removed on function exit.
 // ===========================================================================
 
-/// Sanity check on the round-30 cache-root pattern. Run `pakx outdated`
-/// against a wiremock-backed registry; each invocation builds a fresh
-/// `pakx-outdated-cache-<pid>-<nanos>` directory under the system
-/// temp dir. The pid changes per child process, the nanos changes
-/// every call — so even on a hot CI runner two invocations cannot
-/// collide. We assert by snapshotting the count of matching dirs
-/// before + after the call; the after-count must be larger by at
-/// least one. The wiremock returns up-to-date so the run is fast and
-/// `build_clients` fires (it short-circuits on empty lockfiles).
+/// Round-47 cleanup pin (was: "creates per-call cache root").
+///
+/// The round-30 pattern created a fresh
+/// `pakx-outdated-cache-<pid>-<nanos>` dir per invocation; the
+/// round-47 fix wraps it in a [`tempfile::TempDir`] guard that
+/// self-deletes on drop so a user who never runs `pakx doctor
+/// --clear-cache` does not accumulate one dir per `pakx outdated`
+/// run.
+///
+/// This test was previously the inverse — it asserted the dir count
+/// **increased** after the call. After the cleanup fix, the dir
+/// count must **not** increase: any `pakx-outdated-cache-*` entries
+/// added by the invocation must self-delete before the child process
+/// returns.
 #[tokio::test]
-async fn outdated_creates_per_call_cache_root() {
+async fn outdated_cleans_up_its_per_call_cache_root() {
     let project = TempDir::new().unwrap();
     let pakx_registry = MockServer::start().await;
     Mock::given(method("GET"))
@@ -934,18 +939,17 @@ async fn outdated_creates_per_call_cache_root() {
 
     let tmp = std::env::temp_dir();
     let prefix = "pakx-outdated-cache-";
-    let count_with_prefix = |dir: &std::path::Path| -> usize {
-        std::fs::read_dir(dir).map_or(0, |it| {
-            it.filter_map(Result::ok)
-                .filter(|e| {
-                    e.file_name()
-                        .to_str()
-                        .is_some_and(|s| s.starts_with(prefix))
-                })
-                .count()
-        })
+    let snapshot = |dir: &std::path::Path| -> std::collections::HashSet<std::ffi::OsString> {
+        std::fs::read_dir(dir)
+            .map(|it| {
+                it.filter_map(Result::ok)
+                    .map(|e| e.file_name())
+                    .filter(|n| n.to_string_lossy().starts_with(prefix))
+                    .collect()
+            })
+            .unwrap_or_default()
     };
-    let count_before = count_with_prefix(&tmp);
+    let before = snapshot(&tmp);
 
     Command::cargo_bin(BIN)
         .unwrap()
@@ -954,10 +958,15 @@ async fn outdated_creates_per_call_cache_root() {
         .assert()
         .success();
 
-    let count_after = count_with_prefix(&tmp);
+    let after = snapshot(&tmp);
 
+    // Any entries present after the call but not before must have
+    // been created by `pakx outdated`. The round-47 cleanup
+    // guarantees these are removed on `TempDir` drop, so the
+    // difference must be empty.
+    let leaked: Vec<_> = after.difference(&before).collect();
     assert!(
-        count_after > count_before,
-        "pakx outdated must create a fresh per-call cache dir; before={count_before}, after={count_after}"
+        leaked.is_empty(),
+        "pakx outdated must clean up its per-call cache tempdir; leaked: {leaked:?}",
     );
 }

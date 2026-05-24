@@ -14,6 +14,7 @@ use pakx_registry_client::{
 };
 use serde::Serialize;
 
+use crate::commands::cache_tempdir::make_cache_tempdir;
 use crate::registry_url::validate_base_url;
 use crate::ui;
 
@@ -105,7 +106,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         // must yield byte-clean JSON. Stderr remains color-able.
         crate::ui::force_stdout_no_color();
     }
-    let client = build_client(
+    let (client, _cache_guard) = build_client(
         args.mcp_base_url.as_deref(),
         args.smithery_base_url.as_deref(),
         args.pakx_base_url.as_deref(),
@@ -178,18 +179,19 @@ fn build_client(
     no_pakx_registry: bool,
     no_official_mcp: bool,
     no_cache: bool,
-) -> Result<RegistryClient> {
+) -> Result<(RegistryClient, tempfile::TempDir)> {
     // Per-call cache root so parallel integration tests can't share
     // cache entries when their `wiremock` mock servers happen to land
     // on the same loopback port (Linux releases ports aggressively).
     // See the matching note on `outdated::build_clients`.
-    let cache_root = std::env::temp_dir().join(format!(
-        "pakx-search-cache-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
+    //
+    // Returned alongside the `RegistryClient` so the caller can keep
+    // the tempdir alive for the duration of `client.search(...).await`
+    // — drop is when the tempdir self-deletes, otherwise the
+    // `pakx-search-cache-*` dir would accumulate in `/tmp` on every
+    // invocation.
+    let cache_root =
+        make_cache_tempdir("pakx-search-cache").context("create search cache tempdir")?;
     // Vet every user-supplied base URL BEFORE the federated search
     // fires. Mirrors `pakx outdated::build_clients` — even though the
     // search payload is anonymous, a userinfo-smuggled override would
@@ -204,8 +206,11 @@ fn build_client(
             }
             None => OFFICIAL_MCP_BASE_URL,
         };
-        let mcp =
-            OfficialMcpSource::with_parts(http_client(), mcp_url, cache_dir(&cache_root, no_cache));
+        let mcp = OfficialMcpSource::with_parts(
+            http_client(),
+            mcp_url,
+            cache_dir(cache_root.path(), no_cache),
+        );
         client = client.with_source(Box::new(mcp));
     }
     if !no_smithery {
@@ -219,7 +224,7 @@ fn build_client(
         let sm = SmitherySource::with_parts(
             http_client(),
             smithery_url,
-            cache_dir(&cache_root, no_cache),
+            cache_dir(cache_root.path(), no_cache),
         );
         client = client.with_source(Box::new(sm));
     }
@@ -231,11 +236,14 @@ fn build_client(
             }
             None => PAKX_BASE_URL,
         };
-        let pakx =
-            PakxSource::with_parts(http_client(), pakx_url, cache_dir(&cache_root, no_cache));
+        let pakx = PakxSource::with_parts(
+            http_client(),
+            pakx_url,
+            cache_dir(cache_root.path(), no_cache),
+        );
         client = client.with_source(Box::new(pakx));
     }
-    Ok(client)
+    Ok((client, cache_root))
 }
 
 /// Per-call `CacheDir` factory. Sets TTL to zero when `no_cache` is on

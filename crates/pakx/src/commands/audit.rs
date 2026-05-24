@@ -30,6 +30,7 @@ use pakx_registry_client::{CacheDir, PakxSource, RegistryError, PAKX_BASE_URL};
 use serde::Serialize;
 use tracing::debug;
 
+use crate::commands::cache_tempdir::make_cache_tempdir;
 use crate::registry_url::validate_base_url;
 use crate::ui;
 
@@ -189,7 +190,7 @@ pub async fn run(args: AuditArgs) -> Result<ExitCode> {
     // Smithery today (those sources have no per-version deprecation
     // signal). Still validate the URLs early so a typo surfaces with a
     // clean error instead of silently being ignored.
-    let pakx = build_pakx_source(args.pakx_base_url.as_deref(), args.no_cache)?;
+    let (pakx, _cache_guard) = build_pakx_source(args.pakx_base_url.as_deref(), args.no_cache)?;
     if let Some(u) = args.mcp_base_url.as_deref() {
         validate_base_url(u)?;
     }
@@ -217,7 +218,19 @@ pub async fn run(args: AuditArgs) -> Result<ExitCode> {
     })
 }
 
-fn build_pakx_source(pakx_base_url: Option<&str>, no_cache: bool) -> Result<PakxSource> {
+/// Build the `PakxSource` + a [`tempfile::TempDir`] guard rooted at
+/// the per-call cache root.
+///
+/// Returning the guard alongside the source forces the caller to keep
+/// it alive for the lifetime of every `fetch_version` call — without
+/// it, the per-invocation `pakx-audit-cache-*` dir would accumulate
+/// in `/tmp` whenever the user skips `pakx doctor --clear-cache`.
+/// Same discipline applies in `pakx outdated`, `pakx search`,
+/// `pakx add`.
+fn build_pakx_source(
+    pakx_base_url: Option<&str>,
+    no_cache: bool,
+) -> Result<(PakxSource, tempfile::TempDir)> {
     let pakx_url = match pakx_base_url {
         Some(u) => {
             validate_base_url(u)?;
@@ -233,23 +246,22 @@ fn build_pakx_source(pakx_base_url: Option<&str>, no_cache: bool) -> Result<Pakx
     // matters only for any future helper that piggy-backs on the same
     // `PakxSource` instance.
     //
-    // The dir name is keyed on pid + nanos so parallel integration
-    // tests don't share cache entries when their `wiremock` mock
-    // servers happen to land on the same loopback port — same
-    // discipline as `pakx outdated`, `pakx search`, `pakx add`.
-    let cache_root = std::env::temp_dir().join(format!(
-        "pakx-audit-cache-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
+    // The dir name is keyed on pid + nanos (via `make_cache_tempdir`)
+    // so parallel integration tests don't share cache entries when
+    // their `wiremock` mock servers happen to land on the same
+    // loopback port. The `tempfile::TempDir` returned alongside the
+    // source self-deletes on drop.
+    let cache_root =
+        make_cache_tempdir("pakx-audit-cache").context("create audit cache tempdir")?;
     let cache = if no_cache {
-        CacheDir::with_root(&cache_root).with_ttl(std::time::Duration::ZERO)
+        CacheDir::with_root(cache_root.path()).with_ttl(std::time::Duration::ZERO)
     } else {
-        CacheDir::with_root(&cache_root)
+        CacheDir::with_root(cache_root.path())
     };
-    Ok(PakxSource::with_parts(http_client(), pakx_url, cache))
+    Ok((
+        PakxSource::with_parts(http_client(), pakx_url, cache),
+        cache_root,
+    ))
 }
 
 async fn audit_entry(entry: &LockEntry, pakx: &PakxSource) -> Row {

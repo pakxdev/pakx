@@ -131,21 +131,34 @@ impl Credentials {
             opts.mode(0o600);
         }
 
-        let mut file = match opts.open(&tmp_path) {
-            Ok(f) => f,
+        let (mut file, tmp_path) = match opts.open(&tmp_path) {
+            Ok(f) => (f, tmp_path),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Stale `.tmp` (prior crash, or a co-process). Unlink and
-                // retry exactly once — never loop, so an adversary
-                // racing us cannot cause an indefinite spin.
+                // Stale `.tmp` (prior crash, or a co-process). Unlink
+                // the predictable path and retry exactly once — never
+                // loop, so an adversary racing us cannot cause an
+                // indefinite spin.
+                //
+                // **Randomised retry suffix**: if a co-process races us
+                // between unlink and reopen of the predictable
+                // `<path>.tmp`, `opts.open(&tmp_path)` could succeed
+                // against a tmp file owned by the racing process — and
+                // the subsequent rename would install *their* bytes at
+                // `credentials.json`. Using a `<path>.tmp.<pid>.<nanos>`
+                // suffix the racer cannot predict closes that window
+                // without weakening the single-retry discipline.
                 std::fs::remove_file(&tmp_path).map_err(|source| CredentialsError::Io {
                     source,
                     path: Some(tmp_path.clone()),
                 })?;
-                opts.open(&tmp_path)
+                let retry_path = tmp_path_for_retry(path);
+                let f = opts
+                    .open(&retry_path)
                     .map_err(|source| CredentialsError::Io {
                         source,
-                        path: Some(tmp_path.clone()),
-                    })?
+                        path: Some(retry_path.clone()),
+                    })?;
+                (f, retry_path)
             }
             Err(source) => {
                 return Err(CredentialsError::Io {
@@ -213,6 +226,24 @@ fn normalise(url: &str) -> String {
 fn tmp_path_for(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".tmp");
+    PathBuf::from(s)
+}
+
+/// Randomised tmp path used by the single-retry path inside
+/// [`Credentials::write_to`].
+///
+/// The first attempt uses the predictable `<path>.tmp`. If that one
+/// races a co-process holding the same path, we unlink and retry
+/// against a `<path>.tmp.<pid>.<nanos>` shape — both halves are
+/// process-local so a racing adversary cannot predict the next tmp
+/// path and pre-create a file we'd then write our token into. Single
+/// retry remains; only the tmp path shape changes.
+fn tmp_path_for_retry(path: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let mut s = path.as_os_str().to_owned();
+    s.push(format!(".tmp.{}.{nanos}", std::process::id()));
     PathBuf::from(s)
 }
 

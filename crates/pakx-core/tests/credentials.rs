@@ -119,6 +119,58 @@ fn write_to_leaves_no_tmp_artifact_on_success() {
     );
 }
 
+/// Round-47 regression: the retry-once-on-`AlreadyExists` path used to
+/// reopen the same predictable `<path>.tmp`. That left a race window
+/// where a co-process could slip a tmp file in between our unlink and
+/// reopen, and we'd write our token bytes into a file the racer owned
+/// — then `rename` it into place as `credentials.json`. The fix uses
+/// a `<path>.tmp.<pid>.<nanos>` retry suffix the racer cannot predict.
+///
+/// Pin the new shape: after a successful retry (predictable tmp
+/// pre-planted, unlinked-and-replaced under a random suffix, then
+/// renamed away), there must be **no** `<path>.tmp.*` artefact left on
+/// disk — the rename clears it, and the random portion guarantees the
+/// retry path was distinct from the predictable one we pre-planted.
+#[test]
+fn write_to_retry_uses_unpredictable_tmp_shape() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("c.json");
+    let tmp_predictable = temp.path().join("c.json.tmp");
+
+    // Plant a stale predictable tmp — the retry path fires.
+    std::fs::write(&tmp_predictable, b"stale").unwrap();
+    assert!(tmp_predictable.exists());
+
+    let mut creds = Credentials::default();
+    creds.set("https://example.com", entry("pakx_v1_aaa", "alice"));
+    creds.write_to(&path).unwrap();
+
+    // Predictable tmp is gone (unlinked by the AlreadyExists branch).
+    assert!(
+        !tmp_predictable.exists(),
+        "predictable .tmp must be unlinked when the retry path fires",
+    );
+    // No randomised `<path>.tmp.<pid>.<nanos>` artefacts either: the
+    // retry rename swept them. Scan the dir for anything starting
+    // with `c.json.tmp` and assert zero hits.
+    let leftover: Vec<_> = std::fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name())
+        .filter(|n| {
+            n.to_string_lossy().starts_with(&format!(
+                "{}.tmp",
+                path.file_name().unwrap().to_string_lossy()
+            ))
+        })
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "no tmp artefacts must survive a successful retry, got: {leftover:?}",
+    );
+    assert!(path.is_file());
+}
+
 /// Regression: `OpenOptions::mode(0o600)` is **ignored on existing
 /// files**. If a stale `credentials.json.tmp` was left behind by a prior
 /// crash (or pre-planted by a co-process) at the default umask, the old

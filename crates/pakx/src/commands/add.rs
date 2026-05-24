@@ -18,6 +18,7 @@ use pakx_registry_client::{
 };
 use tracing::{debug, warn};
 
+use crate::commands::cache_tempdir::make_cache_tempdir;
 use crate::redact::{project_root_for, redact_path};
 use crate::registry_url::validate_base_url;
 use crate::ui;
@@ -354,20 +355,30 @@ async fn probe_pakx_kind(
     // Per-call cache root keyed by pid + nanos so parallel integration
     // tests cannot collide. Mirrors `outdated::build_clients` and
     // `validate_mcp` below.
-    let cache_root = std::env::temp_dir().join(format!(
-        "pakx-add-probe-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
+    //
+    // Wrapped in a `tempfile::TempDir` guard so the dir is removed on
+    // function exit — otherwise a user who never runs `pakx doctor
+    // --clear-cache` accumulates `pakx-add-probe-*` dirs in
+    // `/tmp` indefinitely. The cache only matters for the lifetime of
+    // this call (one fetch, no siblings), so dropping the dir at
+    // return is correct.
+    let cache_root =
+        make_cache_tempdir("pakx-add-probe").map_err(|source| RegistryError::Cache {
+            source,
+            path: Some(std::env::temp_dir()),
+        })?;
     let cache = if no_cache {
-        CacheDir::with_root(&cache_root).with_ttl(std::time::Duration::ZERO)
+        CacheDir::with_root(cache_root.path()).with_ttl(std::time::Duration::ZERO)
     } else {
-        CacheDir::with_root(&cache_root)
+        CacheDir::with_root(cache_root.path())
     };
     let source = PakxSource::with_parts(http_client(), base, cache);
-    match source.fetch(id).await {
+    let result = source.fetch(id).await;
+    // Keep `cache_root` alive until after the fetch completes — the
+    // explicit drop documents the lifetime constraint that the cache
+    // dir must outlive every cache read/write inside `source.fetch`.
+    drop(cache_root);
+    match result {
         Ok(pkg) => Ok(pkg
             .install_hints
             .get("kind")
@@ -378,12 +389,18 @@ async fn probe_pakx_kind(
     }
 }
 
-/// Cheap shape check matching `pakx_source::split_owner_name`: exactly
-/// one `/`, both halves non-empty. We can't import the private helper,
-/// and the rule is stable enough to mirror here verbatim.
+/// Cheap shape check matching `pakx_source::split_owner_name`: split at
+/// the **first** `/`, both halves non-empty. Multi-slash ids
+/// (`io.github.acme/srv-name/extra`) are forwarded to the registry —
+/// the registry's owner-login regex guarantees they can never resolve
+/// to a real pakx package, but we still let the round-trip happen so
+/// the upstream `Ok(None)` mapping in `probe_pakx_kind` fires off the
+/// registry's `404` rather than a pre-flight reject. See the matching
+/// `split_owner_name` doc comment in `pakx-registry-client` for the
+/// background on the round-47 relaxation.
 fn is_pakx_shaped_id(id: &str) -> bool {
     match id.split_once('/') {
-        Some((owner, rest)) => !owner.is_empty() && !rest.is_empty() && !rest.contains('/'),
+        Some((owner, rest)) => !owner.is_empty() && !rest.is_empty(),
         None => false,
     }
 }
@@ -409,21 +426,24 @@ async fn validate_mcp(
     no_cache: bool,
 ) -> Result<String, RegistryError> {
     let base = base_url_override.unwrap_or(DEFAULT_MCP_BASE);
-    // Per-call cache root — see `outdated::build_clients` for rationale.
-    let cache_root = env::temp_dir().join(format!(
-        "pakx-add-cache-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
+    // Per-call cache root — see `outdated::build_clients` for
+    // rationale. Wrapped in `tempfile::TempDir` so the dir is removed
+    // on function exit instead of accumulating in `/tmp`.
+    let cache_root =
+        make_cache_tempdir("pakx-add-cache").map_err(|source| RegistryError::Cache {
+            source,
+            path: Some(env::temp_dir()),
+        })?;
     let cache = if no_cache {
-        CacheDir::with_root(&cache_root).with_ttl(std::time::Duration::ZERO)
+        CacheDir::with_root(cache_root.path()).with_ttl(std::time::Duration::ZERO)
     } else {
-        CacheDir::with_root(&cache_root)
+        CacheDir::with_root(cache_root.path())
     };
     let source = OfficialMcpSource::with_parts(http_client(), base, cache);
     let client = RegistryClient::new().with_source(Box::new(source));
     let pkg = client.fetch(RegistrySource::OfficialMcp, id).await?;
+    // Drop the cache tempdir AFTER the fetch returns — the explicit
+    // drop documents the lifetime constraint.
+    drop(cache_root);
     Ok(pkg.version)
 }
