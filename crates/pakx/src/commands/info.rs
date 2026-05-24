@@ -16,9 +16,10 @@ use pakx_core::{
     http_client, manifest_get_value_json, manifest_parse_path, validate_package_name,
     validate_version, Sponsor,
 };
-use pakx_registry_client::{CacheDir, PackageVersion, PakxSource};
+use pakx_registry_client::{PackageVersion, PakxSource};
 use serde::Deserialize;
 
+use crate::commands::cache_tempdir::cache_dir_at;
 use crate::registry_url::validate_base_url;
 use crate::ui;
 
@@ -288,15 +289,10 @@ async fn run_version(args: &InfoArgs, owner: &str, name: &str, version: &str) ->
     // throwaway entry.
     let cache_root =
         tempfile::tempdir().map_err(|e| anyhow!("could not create temp cache dir: {e}"))?;
-    let cache = if args.no_cache {
-        // `--no-cache`: clamp TTL to zero so any prior entry is
-        // considered expired and `PakxSource` re-queries the
-        // registry. The cache write still happens (cheap) but the
-        // read path is bypassed.
-        CacheDir::with_root(cache_root.path()).with_ttl(std::time::Duration::ZERO)
-    } else {
-        CacheDir::with_root(cache_root.path())
-    };
+    // `--no-cache`: clamp TTL to zero so any prior entry is considered
+    // expired and `PakxSource` re-queries the registry. The cache
+    // write still happens (cheap) but the read path is bypassed.
+    let cache = cache_dir_at(cache_root.path(), args.no_cache);
     let source = PakxSource::with_parts(http_client(), &args.registry, cache);
     let meta = source
         .fetch_version(owner, name, version)

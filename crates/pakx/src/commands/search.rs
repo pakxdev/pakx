@@ -9,12 +9,12 @@ use clap::Args;
 use comfy_table::Cell;
 use pakx_core::http_client;
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
+    OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use serde::Serialize;
 
-use crate::commands::cache_tempdir::make_cache_tempdir;
+use crate::commands::cache_tempdir::{cache_dir_at, make_cache_tempdir};
 use crate::registry_url::validate_base_url;
 use crate::ui;
 
@@ -209,7 +209,7 @@ fn build_client(
         let mcp = OfficialMcpSource::with_parts(
             http_client(),
             mcp_url,
-            cache_dir(cache_root.path(), no_cache),
+            cache_dir_at(cache_root.path(), no_cache),
         );
         client = client.with_source(Box::new(mcp));
     }
@@ -224,7 +224,7 @@ fn build_client(
         let sm = SmitherySource::with_parts(
             http_client(),
             smithery_url,
-            cache_dir(cache_root.path(), no_cache),
+            cache_dir_at(cache_root.path(), no_cache),
         );
         client = client.with_source(Box::new(sm));
     }
@@ -239,24 +239,11 @@ fn build_client(
         let pakx = PakxSource::with_parts(
             http_client(),
             pakx_url,
-            cache_dir(cache_root.path(), no_cache),
+            cache_dir_at(cache_root.path(), no_cache),
         );
         client = client.with_source(Box::new(pakx));
     }
     Ok((client, cache_root))
-}
-
-/// Per-call `CacheDir` factory. Sets TTL to zero when `no_cache` is on
-/// so any previously-cached entry is considered expired and the source
-/// is re-queried. Centralised so the three source builders stay in
-/// lock-step with the `--no-cache` contract.
-fn cache_dir(root: &std::path::Path, no_cache: bool) -> CacheDir {
-    let cd = CacheDir::with_root(root);
-    if no_cache {
-        cd.with_ttl(std::time::Duration::ZERO)
-    } else {
-        cd
-    }
 }
 
 /// Clap value parser for `--limit`. Rejects `0` (which would silently
