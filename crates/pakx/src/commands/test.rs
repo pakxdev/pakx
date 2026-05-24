@@ -13,11 +13,12 @@ use futures::stream::{self, StreamExt};
 use pakx_core::manifest::{DepSpec, PackageType};
 use pakx_core::{http_client, read_lockfile_from, read_manifest_from, Lockfile, Manifest};
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
+    OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use tempfile::TempDir;
 
+use crate::commands::cache_tempdir::{cache_dir_at, make_cache_tempdir};
 use crate::redact::redact_path;
 use crate::registry_url::validate_base_url;
 use crate::resolve::{resolve_federated, Resolved};
@@ -40,6 +41,7 @@ const LOCKFILE_FILENAME: &str = "agents.lock";
 const TEST_RESOLVE_CONCURRENCY: usize = 10;
 
 #[derive(Debug, Clone, Args)]
+#[allow(clippy::struct_excessive_bools)] // CLI flags are independent toggles; a state machine here would obscure the surface
 pub struct TestArgs {
     /// Operate on a project at a path other than the cwd.
     #[arg(short = 'C', long = "directory")]
@@ -87,6 +89,14 @@ pub struct TestArgs {
     /// Skip the pakx-registry source.
     #[arg(long)]
     pub no_pakx_registry: bool,
+
+    /// Bypass the federated-source cache for this invocation. Drops
+    /// the per-call cache TTL to zero so a cached resolution is
+    /// ignored and the upstream registry is re-queried. Useful in CI
+    /// right after a publish, when the on-disk cache may still hold
+    /// the pre-publish `not found` answer.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 pub async fn run(args: TestArgs) -> Result<()> {
@@ -141,6 +151,7 @@ pub async fn run(args: TestArgs) -> Result<()> {
             args.pakx_base_url.as_deref(),
             args.no_smithery,
             args.no_pakx_registry,
+            args.no_cache,
         )?;
         check_online(&manifest, &client, &mut failures).await;
     }
@@ -357,20 +368,34 @@ fn dep_id(dep: &DepSpec) -> String {
     }
 }
 
+#[allow(clippy::fn_params_excessive_bools)] // each bool maps 1:1 to a documented CLI flag; folding into an enum would obscure the surface
 fn build_registry_client(
     mcp_base_url: &str,
     smithery_base_url: Option<&str>,
     pakx_base_url: Option<&str>,
     no_smithery: bool,
     no_pakx_registry: bool,
+    no_cache: bool,
 ) -> Result<(RegistryClient, TempDir)> {
     // Per-invocation cache dir — avoids cross-run / cross-process state.
     // Dropped (and deleted) when the caller drops the returned `TempDir`.
-    let cache_dir = TempDir::new().context("create temp cache dir for pakx test")?;
+    //
+    // Uses [`make_cache_tempdir`] (pid + nanos prefix) rather than a
+    // bare `TempDir::new()` so parallel integration tests can't share
+    // cache entries when their wiremock mock servers happen to land
+    // on the same loopback port — same regression class round 30
+    // fixed in `outdated::build_clients` for `pakx outdated` /
+    // `pakx add` / `pakx search`. The pakx-test surface had been
+    // missed by that pass; this aligns it with the rest.
+    let cache_dir =
+        make_cache_tempdir("pakx-test-cache").context("create temp cache dir for pakx test")?;
     let cache_root = cache_dir.path();
 
-    let mcp =
-        OfficialMcpSource::with_parts(http_client(), mcp_base_url, CacheDir::with_root(cache_root));
+    let mcp = OfficialMcpSource::with_parts(
+        http_client(),
+        mcp_base_url,
+        cache_dir_at(cache_root, no_cache),
+    );
     let mut client = RegistryClient::new().with_source(Box::new(mcp));
 
     if !no_smithery {
@@ -381,7 +406,7 @@ fn build_registry_client(
             }
             None => SMITHERY_BASE_URL,
         };
-        let sm = SmitherySource::with_parts(http_client(), url, CacheDir::with_root(cache_root));
+        let sm = SmitherySource::with_parts(http_client(), url, cache_dir_at(cache_root, no_cache));
         client = client.with_source(Box::new(sm));
     }
 
@@ -393,7 +418,7 @@ fn build_registry_client(
             }
             None => PAKX_BASE_URL,
         };
-        let pakx = PakxSource::with_parts(http_client(), url, CacheDir::with_root(cache_root));
+        let pakx = PakxSource::with_parts(http_client(), url, cache_dir_at(cache_root, no_cache));
         client = client.with_source(Box::new(pakx));
     }
 

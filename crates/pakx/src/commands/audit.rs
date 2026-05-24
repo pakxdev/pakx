@@ -26,11 +26,11 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use comfy_table::{Cell, CellAlignment};
 use pakx_core::{http_client, read_lockfile_from, LockEntry, RegistrySource};
-use pakx_registry_client::{CacheDir, PakxSource, RegistryError, PAKX_BASE_URL};
+use pakx_registry_client::{PakxSource, RegistryError, PAKX_BASE_URL};
 use serde::Serialize;
 use tracing::debug;
 
-use crate::commands::cache_tempdir::make_cache_tempdir;
+use crate::commands::cache_tempdir::{cache_dir_at, make_cache_tempdir};
 use crate::registry_url::validate_base_url;
 use crate::ui;
 
@@ -253,11 +253,7 @@ fn build_pakx_source(
     // source self-deletes on drop.
     let cache_root =
         make_cache_tempdir("pakx-audit-cache").context("create audit cache tempdir")?;
-    let cache = if no_cache {
-        CacheDir::with_root(cache_root.path()).with_ttl(std::time::Duration::ZERO)
-    } else {
-        CacheDir::with_root(cache_root.path())
-    };
+    let cache = cache_dir_at(cache_root.path(), no_cache);
     Ok((
         PakxSource::with_parts(http_client(), pakx_url, cache),
         cache_root,

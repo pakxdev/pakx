@@ -14,11 +14,11 @@ use pakx_core::manifest::{
 };
 use pakx_core::{http_client, RegistrySource};
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, RegistryError, Source, PAKX_BASE_URL,
+    OfficialMcpSource, PakxSource, RegistryClient, RegistryError, Source, PAKX_BASE_URL,
 };
 use tracing::{debug, warn};
 
-use crate::commands::cache_tempdir::make_cache_tempdir;
+use crate::commands::cache_tempdir::{cache_dir_at, make_cache_tempdir};
 use crate::redact::{project_root_for, redact_path};
 use crate::registry_url::validate_base_url;
 use crate::ui;
@@ -367,11 +367,7 @@ async fn probe_pakx_kind(
             source,
             path: Some(std::env::temp_dir()),
         })?;
-    let cache = if no_cache {
-        CacheDir::with_root(cache_root.path()).with_ttl(std::time::Duration::ZERO)
-    } else {
-        CacheDir::with_root(cache_root.path())
-    };
+    let cache = cache_dir_at(cache_root.path(), no_cache);
     let source = PakxSource::with_parts(http_client(), base, cache);
     let result = source.fetch(id).await;
     // Keep `cache_root` alive until after the fetch completes — the
@@ -434,11 +430,7 @@ async fn validate_mcp(
             source,
             path: Some(env::temp_dir()),
         })?;
-    let cache = if no_cache {
-        CacheDir::with_root(cache_root.path()).with_ttl(std::time::Duration::ZERO)
-    } else {
-        CacheDir::with_root(cache_root.path())
-    };
+    let cache = cache_dir_at(cache_root.path(), no_cache);
     let source = OfficialMcpSource::with_parts(http_client(), base, cache);
     let client = RegistryClient::new().with_source(Box::new(source));
     let pkg = client.fetch(RegistrySource::OfficialMcp, id).await?;

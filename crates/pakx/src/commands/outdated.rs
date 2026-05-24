@@ -39,15 +39,15 @@ use clap::{Args, ValueEnum};
 use comfy_table::{Cell, CellAlignment};
 use pakx_core::{http_client, read_lockfile_from, LockEntry, RegistrySource};
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, PakxSource, SmitherySource, Source, OFFICIAL_MCP_BASE_URL,
-    PAKX_BASE_URL, SMITHERY_BASE_URL,
+    OfficialMcpSource, PakxSource, SmitherySource, Source, OFFICIAL_MCP_BASE_URL, PAKX_BASE_URL,
+    SMITHERY_BASE_URL,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::debug;
 
-use crate::commands::cache_tempdir::make_cache_tempdir;
+use crate::commands::cache_tempdir::{cache_dir_at, make_cache_tempdir};
 use crate::registry_url::validate_base_url;
 use crate::ui;
 
@@ -337,17 +337,21 @@ fn build_clients(
     let cache_root = make_cache_tempdir("pakx-outdated-cache")
         .with_context(|| "create outdated cache tempdir")?;
     let http = http_client();
-    let cd = |root: &std::path::Path| {
-        let c = CacheDir::with_root(root);
-        if no_cache {
-            c.with_ttl(std::time::Duration::ZERO)
-        } else {
-            c
-        }
-    };
-    let pakx = PakxSource::with_parts(http.clone(), pakx_url, cd(cache_root.path()));
-    let mcp = OfficialMcpSource::with_parts(http.clone(), mcp_url, cd(cache_root.path()));
-    let smithery = SmitherySource::with_parts(http, smithery_url, cd(cache_root.path()));
+    let pakx = PakxSource::with_parts(
+        http.clone(),
+        pakx_url,
+        cache_dir_at(cache_root.path(), no_cache),
+    );
+    let mcp = OfficialMcpSource::with_parts(
+        http.clone(),
+        mcp_url,
+        cache_dir_at(cache_root.path(), no_cache),
+    );
+    let smithery = SmitherySource::with_parts(
+        http,
+        smithery_url,
+        cache_dir_at(cache_root.path(), no_cache),
+    );
     Ok(Clients {
         pakx,
         mcp,

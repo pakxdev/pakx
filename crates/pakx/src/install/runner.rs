@@ -21,7 +21,7 @@ use pakx_core::{
     LockEntry, Lockfile, Manifest, McpServer, RegistrySource, SkillFile, LOCKFILE_VERSION,
 };
 use pakx_registry_client::{
-    CacheDir, OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
+    OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use tracing::{debug, warn};
@@ -29,6 +29,7 @@ use tracing::{debug, warn};
 use super::bundle::{install_bundle_from_pakx, ResolvedBundle};
 use super::mcp_translate::{translate, TranslateError};
 use super::skill::{install_skill_from_pakx, parse_skill_shorthand, ResolvedSkill};
+use crate::commands::cache_tempdir::cache_dir_at;
 use crate::redact::redact_path;
 use crate::registry_url::validate_base_url;
 use crate::resolve::{resolve_federated, Resolved};
@@ -170,8 +171,11 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
             .clone()
             .unwrap_or_else(|| PAKX_BASE_URL.to_owned());
         let cache_root = std::env::temp_dir().join("pakx-install-cache");
-        let src =
-            PakxSource::with_parts(http_client(), &url, cache_dir(&cache_root, opts.no_cache));
+        let src = PakxSource::with_parts(
+            http_client(),
+            &url,
+            cache_dir_at(&cache_root, opts.no_cache),
+        );
         Some((src, url))
     };
 
@@ -303,7 +307,7 @@ fn build_registry_client(
 
     let cache_root = std::env::temp_dir().join("pakx-install-cache");
     let mcp =
-        OfficialMcpSource::with_parts(http_client(), mcp_url, cache_dir(&cache_root, no_cache));
+        OfficialMcpSource::with_parts(http_client(), mcp_url, cache_dir_at(&cache_root, no_cache));
     let mut client = RegistryClient::new().with_source(Box::new(mcp));
 
     if !no_smithery {
@@ -314,7 +318,8 @@ fn build_registry_client(
             }
             None => SMITHERY_BASE_URL,
         };
-        let sm = SmitherySource::with_parts(http_client(), url, cache_dir(&cache_root, no_cache));
+        let sm =
+            SmitherySource::with_parts(http_client(), url, cache_dir_at(&cache_root, no_cache));
         client = client.with_source(Box::new(sm));
     }
 
@@ -326,27 +331,11 @@ fn build_registry_client(
             }
             None => PAKX_BASE_URL,
         };
-        let pakx = PakxSource::with_parts(http_client(), url, cache_dir(&cache_root, no_cache));
+        let pakx = PakxSource::with_parts(http_client(), url, cache_dir_at(&cache_root, no_cache));
         client = client.with_source(Box::new(pakx));
     }
 
     Ok(client)
-}
-
-/// Build a `CacheDir` for the install runner. When `no_cache` is true
-/// the TTL is clamped to zero so any prior cache entry is treated as
-/// expired and the registry is re-queried on first read. The cache
-/// **root** is still set (per-call writes still happen) — making the
-/// TTL zero gives "skip read, still write" semantics, which is enough
-/// to satisfy the `--no-cache` contract without forking the
-/// `CacheDir` API.
-fn cache_dir(root: &Path, no_cache: bool) -> CacheDir {
-    let cd = CacheDir::with_root(root);
-    if no_cache {
-        cd.with_ttl(std::time::Duration::ZERO)
-    } else {
-        cd
-    }
 }
 
 fn build_claude_adapter(opts: &InstallOpts, project_root: &Path) -> ClaudeCodeAdapter {
