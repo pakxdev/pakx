@@ -193,7 +193,7 @@ pub async fn run(args: PublishArgs) -> Result<()> {
             },
         )
         .await
-        .map_err(map_backend_err)?;
+        .map_err(|e| handle_backend_err(&e, args.json))?;
     pb.finish_and_clear();
     eprintln!(
         "{} {} {} on {}",
@@ -214,7 +214,7 @@ pub async fn run(args: PublishArgs) -> Result<()> {
             readme_payload,
         )
         .await
-        .map_err(map_backend_err)?;
+        .map_err(|e| handle_backend_err(&e, args.json))?;
     pb.finish_and_clear();
     eprintln!(
         "{} uploaded {} v{} ({} bytes, sha256 {})",
@@ -276,18 +276,270 @@ pub async fn run(args: PublishArgs) -> Result<()> {
     Ok(())
 }
 
-fn map_backend_err(e: BackendError) -> anyhow::Error {
-    match e {
-        BackendError::Unauthorized => {
-            anyhow::anyhow!("registry rejected the token — run `pakx login` again")
-        }
-        BackendError::Forbidden => {
-            anyhow::anyhow!("you don't own this package — pick a different name")
-        }
-        BackendError::Conflict { message } => {
-            anyhow::anyhow!("version already published: {message}")
-        }
-        BackendError::NotFound => anyhow::anyhow!("package not found on registry"),
-        other => anyhow::anyhow!(other),
+/// Convert a `BackendError` into a multi-line `anyhow::Error` whose
+/// `Display` is the publisher-facing hint shown on the terminal's last
+/// red line. When `json_mode` is set we ALSO emit a single-line JSON
+/// error envelope on stdout BEFORE returning the typed `anyhow` — that
+/// way `pakx publish --json | jq` consumers get a structured
+/// `{errorKind, fixHint, upstreamCode}` block instead of being forced
+/// to parse the human-readable stderr hint.
+///
+/// Mapping is grounded in `pakx-registry`'s actual emit sites — every
+/// arm is matched against a code the registry is documented to send
+/// from the POST upsert or the PUT version handler. Codes the registry
+/// doesn't emit are NOT mapped (so a stray future status doesn't show
+/// up as a dead branch); the unknown-status fallthrough preserves the
+/// upstream message so a wire-shape drift surfaces verbatim instead of
+/// being smothered by a generic hint.
+fn handle_backend_err(e: &BackendError, json_mode: bool) -> anyhow::Error {
+    if json_mode {
+        emit_publish_error_json(e);
     }
+    map_backend_err(e)
+}
+
+fn map_backend_err(e: &BackendError) -> anyhow::Error {
+    match e {
+        BackendError::Unauthorized => anyhow::anyhow!(
+            "Token expired or invalid.\n  \
+             Fix: run `pakx login` to re-authenticate.\n  \
+             Tokens last 90 days from issue; check `pakx whoami` for the active login.",
+        ),
+        BackendError::Forbidden => anyhow::anyhow!(
+            "You don't own this package, or it's already taken under a different account.\n  \
+             Fix: run `pakx whoami` to confirm your logged-in account, then pick a different `name:` in the manifest.\n  \
+             Names are owned per-publisher — there's no rename path once a name is registered.",
+        ),
+        BackendError::NotFound => anyhow::anyhow!(
+            "Package not found on registry.\n  \
+             Fix: run `pakx publish` from the bundle root so the upsert step (POST /api/v1/packages) registers the name before the version upload.",
+        ),
+        // Round-77 verify-before-cite: 411 surfaces when a proxy strips
+        // Content-Length or the CLI got swapped for a chunked-encoding
+        // client. The pakx CLI itself always sends a declared length,
+        // so the publisher-facing fix points at the toolchain in
+        // between, not at the bundle contents.
+        BackendError::LengthRequired => anyhow::anyhow!(
+            "Registry rejected the upload without a Content-Length header (411).\n  \
+             Fix: the pakx CLI always sends one — a 411 here points at a corporate proxy or VPN stripping the header.\n  \
+             Workaround: retry from a different network, or set `--registry` to a self-hosted instance bypassing the proxy.",
+        ),
+        // 413 carries the registry-side cap (`maxBytes`) in the JSON
+        // body when available. The current cap is 50 MiB
+        // (`TARBALL_MAX_BYTES` in the registry's version PUT handler).
+        BackendError::TooLarge { max_bytes } => {
+            let cap = max_bytes.map_or_else(
+                || "the registry's hard cap".to_owned(),
+                |n| format!("{} MiB", n / (1024 * 1024)),
+            );
+            anyhow::anyhow!(
+                "Tarball too large (413). Max size: {cap}.\n  \
+                 Fix: prune large binaries / generated assets / `node_modules` from the bundle and re-publish.\n  \
+                 Tip: `pakx pack` prints the byte size — run it locally to size-check before publishing.",
+            )
+        }
+        // 409 on the POST upsert path. The registry's response body
+        // carries the stored + received kinds so the hint can quote
+        // both sides. A kind change isn't fixable in-place (kind picks
+        // the install destination dir).
+        BackendError::KindMismatch { stored, received } => {
+            let stored_str = stored.as_deref().unwrap_or("<unknown>");
+            let received_str = received.as_deref().unwrap_or("<unknown>");
+            anyhow::anyhow!(
+                "Package kind conflict (409): the registry has this name registered as `{stored_str}`, but you published with `--kind {received_str}`.\n  \
+                 Fix: a package's kind is immutable. Publish under a new `name:` in the manifest, or run `pakx publish --kind {stored_str}` to match.",
+            )
+        }
+        // 409 on the PUT version path. The fix is always "bump the
+        // version in agents.yml" — re-uploads of an existing version
+        // are refused by design.
+        BackendError::VersionExists => anyhow::anyhow!(
+            "This version was already published (409).\n  \
+             Fix: bump `version:` in the manifest (or `agents.yml`) and re-publish.\n  \
+             Versions are immutable once accepted — re-uploading the same `version:` is refused on purpose.",
+        ),
+        // Legacy `Conflict` variant from the prior wire shape. Kept so
+        // any caller that constructs a `Conflict` directly (tests,
+        // future code paths) still gets a sensible hint.
+        BackendError::Conflict { message } => anyhow::anyhow!(
+            "Conflict from registry: {message}\n  \
+             Fix: re-run with a bumped `version:` if this is a re-publish, or `pakx whoami` to confirm the right account.",
+        ),
+        // 400 with optional `detail`. The registry emits `detail` for
+        // zod-refusal (POST schema) and named cases (`empty`,
+        // oversize README). When present we echo it verbatim — the
+        // registry already wrote publisher-friendly copy.
+        BackendError::Invalid { detail } => {
+            let detail_str = detail
+                .as_deref()
+                .unwrap_or("see https://pakx.dev/docs/manifest for the manifest schema");
+            anyhow::anyhow!(
+                "Registry refused the request (400): {detail_str}\n  \
+                 Fix: correct the manifest field flagged above and re-publish.\n  \
+                 Schema reference: https://pakx.dev/docs/manifest",
+            )
+        }
+        // 429 carries `Retry-After` (seconds) when the limiter trips.
+        // The publish bucket is per-user (20 burst, ~6/min sustained);
+        // a publisher who actually tripped it almost certainly did so
+        // by accident.
+        BackendError::RateLimited { retry_after_secs } => {
+            let wait = retry_after_secs.unwrap_or(60);
+            anyhow::anyhow!(
+                "Rate limited (429). Retry after: {wait}s.\n  \
+                 Fix: wait the indicated interval, then re-run `pakx publish`.\n  \
+                 The publish bucket is per-user (20 burst, ~6/min sustained); if this persists, check for a script re-publishing in a loop.",
+            )
+        }
+        // 500 — the registry's `internalError()` helper has redacted
+        // the body in production. Best we can offer is "report it".
+        BackendError::Internal => anyhow::anyhow!(
+            "Registry internal error (500).\n  \
+             Fix: retry in a minute. If it persists, file an issue at https://github.com/pakxdev/pakx-registry/issues with the manifest name + version.",
+        ),
+        // Validation lifts from `pakx-core` — these mean the CLI
+        // refused to dial out at all (hostile path segment in
+        // `name` / `owner` / `version`). Hint says fix the manifest.
+        BackendError::InvalidName { name, reason } => anyhow::anyhow!(
+            "Invalid package name `{name}`: {reason}.\n  \
+             Fix: edit `name:` in the manifest — kebab-case (`my-skill`), no `..`, no `/`.",
+        ),
+        BackendError::InvalidVersion { version, reason } => anyhow::anyhow!(
+            "Invalid version `{version}`: {reason}.\n  \
+             Fix: use a SemVer-compatible value (`0.1.0`, `1.0.0-rc.1`).",
+        ),
+        // Transport-layer reqwest error. Most often a DNS miss / TLS
+        // failure / proxy timeout — surface verbatim so the operator
+        // sees the underlying message.
+        BackendError::Http(http_err) => anyhow::anyhow!(
+            "Network error talking to registry: {http_err}\n  \
+             Fix: check connectivity, then re-run `pakx publish`.\n  \
+             If you're behind a proxy, set `HTTPS_PROXY` and retry.",
+        ),
+        // Unknown status — surface the upstream body verbatim so a
+        // future code never gets smothered by a generic hint.
+        BackendError::Other { status, body } => anyhow::anyhow!(
+            "Registry error ({status}): {body}\n  \
+             This status isn't mapped to a specific fix-hint — file an issue at https://github.com/pakxdev/pakx/issues so we can add one.",
+        ),
+    }
+}
+
+/// Emit a single-line JSON envelope on stdout describing the publish
+/// failure. Additive contract to the round-32 `pakx publish --json`
+/// shape: every payload carries `ok: false`, a CLI-stable `errorKind`
+/// discriminator, the canonical `upstreamCode` from the registry, a
+/// one-sentence `fixHint`, and (for the codes that emit them) any
+/// structured extras the registry returned (`retryAfterSeconds`,
+/// `maxBytes`, `detail`, `stored`/`received` kind).
+///
+/// `errorKind` strings are part of the `pakx publish --json` contract —
+/// downstream jq pipelines may branch on them. They are CHOSEN to be
+/// stable across registry minor versions even if the registry-side
+/// canonical name changes.
+#[allow(clippy::too_many_lines)] // 13-arm match; splitting per-variant would only obscure shape
+fn emit_publish_error_json(e: &BackendError) {
+    let payload = match e {
+        BackendError::Unauthorized => serde_json::json!({
+            "ok": false,
+            "errorKind": "unauthorized",
+            "upstreamCode": 401,
+            "fixHint": "Run `pakx login` to re-authenticate.",
+        }),
+        BackendError::Forbidden => serde_json::json!({
+            "ok": false,
+            "errorKind": "forbidden",
+            "upstreamCode": 403,
+            "fixHint": "Pick a different `name:` in the manifest — this one is owned by another account.",
+        }),
+        BackendError::NotFound => serde_json::json!({
+            "ok": false,
+            "errorKind": "not-found",
+            "upstreamCode": 404,
+            "fixHint": "Re-run `pakx publish` from the bundle root so the upsert step registers the name before the version upload.",
+        }),
+        BackendError::LengthRequired => serde_json::json!({
+            "ok": false,
+            "errorKind": "length-required",
+            "upstreamCode": 411,
+            "fixHint": "A proxy stripped Content-Length. Retry from a different network.",
+        }),
+        BackendError::TooLarge { max_bytes } => serde_json::json!({
+            "ok": false,
+            "errorKind": "tarball-too-large",
+            "upstreamCode": 413,
+            "maxBytes": max_bytes,
+            "fixHint": "Prune large files from the bundle and re-publish.",
+        }),
+        BackendError::KindMismatch { stored, received } => serde_json::json!({
+            "ok": false,
+            "errorKind": "kind-mismatch",
+            "upstreamCode": 409,
+            "stored": stored,
+            "received": received,
+            "fixHint": "Publish under a new `name:`, or pass the stored kind via `--kind`.",
+        }),
+        BackendError::VersionExists => serde_json::json!({
+            "ok": false,
+            "errorKind": "version-exists",
+            "upstreamCode": 409,
+            "fixHint": "Bump `version:` in the manifest and re-publish.",
+        }),
+        BackendError::Conflict { message } => serde_json::json!({
+            "ok": false,
+            "errorKind": "conflict",
+            "upstreamCode": 409,
+            "detail": message,
+            "fixHint": "Re-run with a bumped `version:`, or confirm the right account via `pakx whoami`.",
+        }),
+        BackendError::Invalid { detail } => serde_json::json!({
+            "ok": false,
+            "errorKind": "invalid-request",
+            "upstreamCode": 400,
+            "detail": detail,
+            "fixHint": "Correct the manifest field flagged in `detail` and re-publish.",
+        }),
+        BackendError::RateLimited { retry_after_secs } => serde_json::json!({
+            "ok": false,
+            "errorKind": "rate-limited",
+            "upstreamCode": 429,
+            "retryAfterSeconds": retry_after_secs,
+            "fixHint": "Wait the indicated interval and re-run `pakx publish`.",
+        }),
+        BackendError::Internal => serde_json::json!({
+            "ok": false,
+            "errorKind": "registry-internal",
+            "upstreamCode": 500,
+            "fixHint": "Retry in a minute. If persistent, file an issue.",
+        }),
+        BackendError::InvalidName { name, reason } => serde_json::json!({
+            "ok": false,
+            "errorKind": "invalid-name",
+            "name": name,
+            "reason": reason,
+            "fixHint": "Edit `name:` in the manifest — kebab-case, no `..`, no `/`.",
+        }),
+        BackendError::InvalidVersion { version, reason } => serde_json::json!({
+            "ok": false,
+            "errorKind": "invalid-version",
+            "version": version,
+            "reason": reason,
+            "fixHint": "Use a SemVer-compatible value (`0.1.0`, `1.0.0-rc.1`).",
+        }),
+        BackendError::Http(http_err) => serde_json::json!({
+            "ok": false,
+            "errorKind": "network",
+            "detail": http_err.to_string(),
+            "fixHint": "Check connectivity, then re-run `pakx publish`.",
+        }),
+        BackendError::Other { status, body } => serde_json::json!({
+            "ok": false,
+            "errorKind": "unmapped",
+            "upstreamCode": status,
+            "detail": body,
+            "fixHint": "File an issue at https://github.com/pakxdev/pakx/issues so we can add a hint.",
+        }),
+    };
+    let line = serde_json::to_string(&payload).expect("serialize publish error json");
+    println!("{line}");
 }

@@ -40,6 +40,58 @@ pub enum BackendError {
         version: String,
         reason: &'static str,
     },
+    /// HTTP 411 from the version PUT path. Emitted when the tarball
+    /// upload request lacks a parseable `Content-Length`, or when the
+    /// client sent `Transfer-Encoding: chunked`. The CLI always sends a
+    /// declared `Content-Length`, so a 411 here points at a build-tool
+    /// or proxy stripping the header — not a publisher-fixable input.
+    #[error("length required (411): registry rejected the upload without a Content-Length header")]
+    LengthRequired,
+    /// HTTP 413 from the version PUT path. Emitted when the tarball
+    /// exceeds the registry's hard cap (50 MiB as of v0.1). Carries the
+    /// cap parsed from the response body (`maxBytes` field) when the
+    /// shape is recognisable, so the CLI hint can quote the exact
+    /// ceiling instead of guessing.
+    #[error("payload too large (413): tarball exceeds registry cap")]
+    TooLarge { max_bytes: Option<u64> },
+    /// HTTP 409 specifically meaning "this version was already
+    /// published". Distinguished from the generic `Conflict` variant
+    /// (which the upload path mapped before this refactor) so the CLI
+    /// hint can call out the exact next-step ("bump the version") and
+    /// the `--json` payload can pin `errorKind: "version-exists"`.
+    #[error("version already published (409)")]
+    VersionExists,
+    /// HTTP 409 from the POST upsert path when a republish under a
+    /// different `kind` is attempted. The registry refuses kind changes
+    /// in-place because the kind picks the install destination. Carries
+    /// the stored + received kinds from the JSON body when parseable so
+    /// the CLI hint can quote both sides.
+    #[error("kind mismatch (409): stored={stored:?} received={received:?}")]
+    KindMismatch {
+        stored: Option<String>,
+        received: Option<String>,
+    },
+    /// HTTP 400 with a registry-side validation reason. Emitted by the
+    /// POST upsert when the manifest fails the zod schema (name shape,
+    /// description length, sponsors / keywords / readme schema) and by
+    /// the version PUT for `empty`, `invalid-id`, and oversize-README
+    /// inputs. Carries the `detail` field from the response body when
+    /// present (a string in some shapes, a structured zod-flatten
+    /// object in others — stringified verbatim for the CLI hint).
+    #[error("invalid request (400){}", detail.as_ref().map(|d| format!(": {d}")).unwrap_or_default())]
+    Invalid { detail: Option<String> },
+    /// HTTP 429 — caller hit the per-user (publish bucket) or per-IP
+    /// (search bucket) rate limit. `retry_after_secs` is parsed from
+    /// the `Retry-After` response header set by
+    /// `lib/rate-limit.ts::withRateLimitHeaders`.
+    #[error("rate limited (429)")]
+    RateLimited { retry_after_secs: Option<u64> },
+    /// HTTP 500 — uncaught registry-side throw. The response body is
+    /// redacted to `{ error: "internal" }` in production by the
+    /// `lib/api-errors.ts::internalError` helper; the operator-facing
+    /// detail lives only in the registry's server log.
+    #[error("registry internal error (500)")]
+    Internal,
     #[error("registry error ({status}): {body}")]
     Other { status: u16, body: String },
 }
@@ -161,6 +213,48 @@ impl PakxBackend {
             StatusCode::OK | StatusCode::CREATED => Ok(res.json::<CreatePackageResponse>().await?),
             StatusCode::UNAUTHORIZED => Err(BackendError::Unauthorized),
             StatusCode::FORBIDDEN => Err(BackendError::Forbidden),
+            // 429 is bucketed per-user on the POST upsert (the
+            // `PUBLISH_RATE` bucket on
+            // `lib/rate-limit.ts::withRateLimitHeaders`). The
+            // `Retry-After` header is set when the limiter trips —
+            // surface it so the CLI hint can quote a wait time instead
+            // of guessing.
+            StatusCode::TOO_MANY_REQUESTS => Err(BackendError::RateLimited {
+                retry_after_secs: parse_retry_after(&res),
+            }),
+            // 409 on the POST upsert path is exclusively
+            // `kind-mismatch` (see `app/api/v1/packages/route.ts`). The
+            // version-collision 409 lives on the PUT version path. We
+            // lift the stored + received kinds out of the JSON body so
+            // the CLI hint can quote both sides; the body has the
+            // shape `{ error, stored, received, hint }`.
+            StatusCode::CONFLICT => {
+                let body = res.text().await.unwrap_or_default();
+                let parsed = parse_error_body(&body);
+                let stored = parsed.as_ref().and_then(|v| {
+                    v.get("stored")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                });
+                let received = parsed.as_ref().and_then(|v| {
+                    v.get("received")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                });
+                Err(BackendError::KindMismatch { stored, received })
+            }
+            // 400 on the POST upsert path is the zod-refusal branch.
+            // The body shape is `{ error: "invalid", detail: <string |
+            // object> }`; we lift the detail verbatim so the CLI hint
+            // can echo the registry's own complaint without inventing
+            // wording.
+            StatusCode::BAD_REQUEST => {
+                let body = res.text().await.unwrap_or_default();
+                Err(BackendError::Invalid {
+                    detail: parse_error_body(&body).as_ref().and_then(detail_from_value),
+                })
+            }
+            StatusCode::INTERNAL_SERVER_ERROR => Err(BackendError::Internal),
             _ => Err(BackendError::Other {
                 status: status.as_u16(),
                 body: res.text().await.unwrap_or_default(),
@@ -227,9 +321,44 @@ impl PakxBackend {
             StatusCode::UNAUTHORIZED => Err(BackendError::Unauthorized),
             StatusCode::FORBIDDEN => Err(BackendError::Forbidden),
             StatusCode::NOT_FOUND => Err(BackendError::NotFound),
-            StatusCode::CONFLICT => Err(BackendError::Conflict {
-                message: res.text().await.unwrap_or_default(),
+            // 409 on the version PUT path is exclusively
+            // `version-exists` (see `app/api/v1/packages/[owner]/[name]/
+            // [version]/route.ts`). The kind-mismatch 409 lives on the
+            // POST upsert path. We surface the dedicated variant so the
+            // CLI hint can be specific ("bump the version in
+            // agents.yml") and `--json` callers can branch on
+            // `errorKind: "version-exists"`.
+            StatusCode::CONFLICT => Err(BackendError::VersionExists),
+            // 411 surfaces when the PUT lacked a parseable
+            // Content-Length header (or sent chunked encoding). The
+            // CLI always sends a numeric Content-Length, so the only
+            // way a 411 reaches us is via an intermediary stripping
+            // the header — bubble a typed variant so the hint can
+            // call out the proxy-side likely cause.
+            StatusCode::LENGTH_REQUIRED => Err(BackendError::LengthRequired),
+            // 413 with `{ error: "too-large", maxBytes: <n> }`. Lift
+            // `maxBytes` so the CLI can quote the registry's exact
+            // ceiling instead of guessing.
+            StatusCode::PAYLOAD_TOO_LARGE => {
+                let body = res.text().await.unwrap_or_default();
+                Err(BackendError::TooLarge {
+                    max_bytes: parse_error_body(&body)
+                        .and_then(|v| v.get("maxBytes").and_then(serde_json::Value::as_u64)),
+                })
+            }
+            // 400 on the version PUT covers `empty`, `invalid-id`, and
+            // oversize-README inputs (see `readReadmeHeader`). Lift the
+            // optional `detail` for the CLI hint, same as POST.
+            StatusCode::BAD_REQUEST => {
+                let body = res.text().await.unwrap_or_default();
+                Err(BackendError::Invalid {
+                    detail: parse_error_body(&body).as_ref().and_then(detail_from_value),
+                })
+            }
+            StatusCode::TOO_MANY_REQUESTS => Err(BackendError::RateLimited {
+                retry_after_secs: parse_retry_after(&res),
             }),
+            StatusCode::INTERNAL_SERVER_ERROR => Err(BackendError::Internal),
             _ => Err(BackendError::Other {
                 status: status.as_u16(),
                 body: res.text().await.unwrap_or_default(),
@@ -307,6 +436,50 @@ fn validate_version(version: &str) -> Result<(), BackendError> {
             reason,
         }
     })
+}
+
+/// Parse a registry JSON error body into a `serde_json::Value` if it
+/// looks like one. We deliberately swallow parse failures (returning
+/// `None`) so a non-JSON 4xx body never panics the caller — the typed
+/// variant just falls back to a `None` field and the CLI hint uses the
+/// generic copy. Capped at 64 KiB so a runaway HTML page from a CDN
+/// error response can't push megabytes through `serde_json`.
+fn parse_error_body(body: &str) -> Option<serde_json::Value> {
+    if body.is_empty() || body.len() > 64 * 1024 {
+        return None;
+    }
+    serde_json::from_str(body).ok()
+}
+
+/// Pull the `detail` field out of a parsed registry error body.
+///
+/// The registry emits `detail` in two shapes:
+///   - A plain string (most paths): `{ error: "invalid", detail: "readme too large (max 256 KiB)" }`
+///   - A zod `flatten()` object (POST schema-refusal): `{ error: "invalid", detail: { formErrors: [...], fieldErrors: {...} } }`
+///
+/// We stringify the object shape with `to_string` so the CLI hint can
+/// echo it verbatim. Non-string, non-object values (or absent `detail`)
+/// collapse to `None`.
+fn detail_from_value(v: &serde_json::Value) -> Option<String> {
+    match v.get("detail") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(other @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+            Some(other.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Read the `Retry-After` response header as a non-negative integer
+/// number of seconds. The HTTP spec also permits an HTTP-date but the
+/// registry's `withRateLimitHeaders` always emits seconds, so we only
+/// parse the integer form. Returns `None` on absent / non-integer
+/// values; the CLI hint falls back to a generic wait time.
+fn parse_retry_after(res: &reqwest::Response) -> Option<u64> {
+    res.headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
 /// Minimal percent-encoder for URL path segments. Encodes everything
