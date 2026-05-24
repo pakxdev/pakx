@@ -1126,6 +1126,491 @@ fn whoami_rejects_plaintext_http_registry() {
         ));
 }
 
+// ---------------------------------------------------------------------------
+// PM-2: `pakx publish` failure-mode hints
+//
+// Each of the codes the registry's PUT version handler + POST upsert
+// handler actually emits gets mapped to a multi-line CLI hint and (in
+// `--json` mode) a structured `{errorKind, fixHint, upstreamCode}`
+// block. The tests below pin both halves:
+//   - non-json: assert the stderr contains the publisher-facing fix
+//     hint substring
+//   - json: assert stdout carries a single-line JSON envelope with the
+//     CLI-stable `errorKind` discriminator and the upstream status code
+//
+// Wiremock is mounted with the LOGIN happy-path first (so the CLI
+// reaches the publish call), then the PUT or POST is overridden to
+// return the failure code under test. Each test exits non-zero.
+// ---------------------------------------------------------------------------
+
+/// Helper: minimal happy-path `whoami` so login succeeds before the
+/// publish step trips the failure mock. Returns the live server handle
+/// for the caller to mount further routes on.
+async fn whoami_only_server(login: &str) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/whoami"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": "u_1", "login": login, "email": null })),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Helper: mount a working POST `/api/v1/packages` upsert so the test
+/// reaches the version PUT (where most failure codes live).
+async fn mount_successful_post(server: &MockServer, login: &str) {
+    Mock::given(method("POST"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "pkg_1",
+            "owner": login,
+            "name": "pdf",
+            "kind": "skills",
+            "created": true
+        })))
+        .mount(server)
+        .await;
+}
+
+/// Helper: seed the credentials file via `pakx login` against the
+/// supplied registry. Asserts success.
+fn login_into(creds_path: &std::path::Path, registry: &str) {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            registry,
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+}
+
+/// Helper: invoke `pakx publish` with the supplied flags, expect a
+/// non-zero exit, and return the full output for further inspection.
+fn publish_expect_failure(
+    src: &std::path::Path,
+    creds_path: &std::path::Path,
+    registry: &str,
+    extra: &[&str],
+) -> std::process::Output {
+    let mut args: Vec<&str> = vec![
+        "publish",
+        src.to_str().unwrap(),
+        "--registry",
+        registry,
+        "--credentials-file",
+        creds_path.to_str().unwrap(),
+    ];
+    args.extend(extra);
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args(&args)
+        .assert()
+        .failure()
+        .get_output()
+        .clone()
+}
+
+/// 413 tarball-too-large — registry returns the cap in `maxBytes`. Hint
+/// must quote the cap in human-readable MiB; JSON must carry both
+/// `maxBytes` and `upstreamCode: 413`.
+#[tokio::test]
+async fn publish_413_tarball_too_large_emits_hint_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    mount_successful_post(&server, "alice").await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/v1/packages/.+/.+/.+$"))
+        .respond_with(ResponseTemplate::new(413).set_body_json(json!({
+            "error": "too-large",
+            "maxBytes": 50 * 1024 * 1024
+        })))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    // Non-json: stderr hint must surface "Tarball too large" and quote
+    // the 50 MiB cap.
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("Tarball too large"),
+        "expected tarball-too-large hint: {stderr}"
+    );
+    assert!(
+        stderr.contains("50 MiB"),
+        "expected cap quoted in MiB: {stderr}"
+    );
+
+    // JSON: stdout carries the structured envelope.
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["errorKind"], "tarball-too-large");
+    assert_eq!(v["upstreamCode"], 413);
+    assert_eq!(v["maxBytes"], 50 * 1024 * 1024_u64);
+    assert!(v["fixHint"].is_string());
+}
+
+/// 411 length-required — registry emits this when the request lacks a
+/// parseable Content-Length. CLI hint must point at the proxy / network
+/// layer as the likely cause, not at the bundle contents.
+#[tokio::test]
+async fn publish_411_length_required_emits_hint_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    mount_successful_post(&server, "alice").await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/v1/packages/.+/.+/.+$"))
+        .respond_with(ResponseTemplate::new(411).set_body_json(json!({
+            "error": "length-required"
+        })))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("Content-Length"),
+        "expected Content-Length in hint: {stderr}"
+    );
+    assert!(stderr.contains("411"), "expected status quoted: {stderr}");
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "length-required");
+    assert_eq!(v["upstreamCode"], 411);
+}
+
+/// 409 version-exists — the registry's PUT version path emits this
+/// when re-publishing a version that already exists. Hint must tell the
+/// user to bump `version:`.
+#[tokio::test]
+async fn publish_409_version_exists_emits_hint_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    mount_successful_post(&server, "alice").await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/v1/packages/.+/.+/.+$"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "version-exists"
+        })))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("already published"),
+        "expected version-exists hint: {stderr}"
+    );
+    assert!(
+        stderr.contains("bump"),
+        "expected bump-version action: {stderr}"
+    );
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "version-exists");
+    assert_eq!(v["upstreamCode"], 409);
+}
+
+/// 409 kind-mismatch — the registry's POST upsert path emits this
+/// when a republish attempts to change the package kind. JSON must
+/// surface both stored + received.
+#[tokio::test]
+async fn publish_409_kind_mismatch_emits_hint_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    // POST is the failure source on this code, not the PUT — override
+    // POST to return 409 with the stored/received body shape.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "kind-mismatch",
+            "stored": "mcp",
+            "received": "skills",
+            "hint": "A package's kind is immutable."
+        })))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("kind conflict") || stderr.contains("kind"),
+        "expected kind-mismatch hint: {stderr}"
+    );
+    assert!(
+        stderr.contains("mcp"),
+        "expected stored kind quoted: {stderr}"
+    );
+    assert!(
+        stderr.contains("skills"),
+        "expected received kind quoted: {stderr}"
+    );
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "kind-mismatch");
+    assert_eq!(v["upstreamCode"], 409);
+    assert_eq!(v["stored"], "mcp");
+    assert_eq!(v["received"], "skills");
+}
+
+/// 429 rate-limited — registry sets `Retry-After` via
+/// `withRateLimitHeaders`. The CLI hint must quote the header value;
+/// JSON must carry `retryAfterSeconds`.
+#[tokio::test]
+async fn publish_429_rate_limited_emits_hint_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    mount_successful_post(&server, "alice").await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/v1/packages/.+/.+/.+$"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "42")
+                .set_body_json(json!({ "error": "too-many-requests" })),
+        )
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("Rate limited"),
+        "expected rate-limited hint: {stderr}"
+    );
+    assert!(
+        stderr.contains("42"),
+        "expected retry-after value quoted: {stderr}"
+    );
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "rate-limited");
+    assert_eq!(v["upstreamCode"], 429);
+    assert_eq!(v["retryAfterSeconds"], 42);
+}
+
+/// 401 unauthorized — token expired or revoked. Hint must point at
+/// `pakx login`.
+#[tokio::test]
+async fn publish_401_unauthorized_emits_hint_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    // whoami needs to succeed so login can seed creds; afterward we
+    // need POST to 401. Mock whoami first, then POST.
+    let server = whoami_only_server("alice").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({ "error": "unauthorized" })))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("Token expired"),
+        "expected token-expired hint: {stderr}"
+    );
+    assert!(
+        stderr.contains("pakx login"),
+        "expected `pakx login` action: {stderr}"
+    );
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "unauthorized");
+    assert_eq!(v["upstreamCode"], 401);
+}
+
+/// 403 forbidden — caller doesn't own the package name. Hint must tell
+/// them to pick a different name.
+#[tokio::test]
+async fn publish_403_forbidden_emits_hint_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "error": "forbidden" })))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("don't own") || stderr.contains("different `name:"),
+        "expected forbidden hint: {stderr}"
+    );
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "forbidden");
+    assert_eq!(v["upstreamCode"], 403);
+}
+
+/// 400 invalid-request — the POST upsert path emits this on zod
+/// refusal. Detail field must echo back into the hint and the JSON
+/// payload.
+#[tokio::test]
+async fn publish_400_invalid_emits_hint_with_detail_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid",
+            "detail": "readme too large (max 256 KiB)"
+        })))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("readme too large"),
+        "expected detail surfaced in hint: {stderr}"
+    );
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "invalid-request");
+    assert_eq!(v["upstreamCode"], 400);
+    assert_eq!(v["detail"], "readme too large (max 256 KiB)");
+}
+
+/// 500 internal — registry's `internalError()` helper redacts the body
+/// in production. Hint must say "retry / file an issue if persistent".
+#[tokio::test]
+async fn publish_500_internal_emits_hint_and_json() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    mount_successful_post(&server, "alice").await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/v1/packages/.+/.+/.+$"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "error": "internal" })))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("500"),
+        "expected 500 quoted in hint: {stderr}"
+    );
+    assert!(
+        stderr.contains("Retry") || stderr.contains("issue"),
+        "expected retry/issue guidance: {stderr}"
+    );
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "registry-internal");
+    assert_eq!(v["upstreamCode"], 500);
+}
+
+/// Unmapped status — the registry shouldn't emit it, but if a future
+/// code lands the CLI must surface the upstream body verbatim instead
+/// of being smothered by a generic hint. Use 418 as the canonical
+/// "this never happens" code.
+#[tokio::test]
+async fn publish_unmapped_status_surfaces_upstream_body() {
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    write_skill(&src, "pdf", "1.0.0");
+    let server = whoami_only_server("alice").await;
+    mount_successful_post(&server, "alice").await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/v1/packages/.+/.+/.+$"))
+        .respond_with(ResponseTemplate::new(418).set_body_string("teapot"))
+        .mount(&server)
+        .await;
+
+    login_into(&creds_path, &server.uri());
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &[]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("418"), "expected status quoted: {stderr}");
+    assert!(
+        stderr.contains("teapot"),
+        "expected upstream body surfaced verbatim: {stderr}"
+    );
+    assert!(
+        stderr.contains("file an issue"),
+        "expected file-an-issue prompt: {stderr}"
+    );
+
+    let out = publish_expect_failure(src.path(), &creds_path, &server.uri(), &["--json"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("json on stdout");
+    assert_eq!(v["errorKind"], "unmapped");
+    assert_eq!(v["upstreamCode"], 418);
+    assert_eq!(v["detail"], "teapot");
+}
+
 #[test]
 fn publish_rejects_userinfo_smuggling_registry() {
     let temp = TempDir::new().unwrap();
