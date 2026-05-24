@@ -14,6 +14,15 @@
 //! drive (no lockfile / manifest needed) and the cleanup discipline
 //! is identical across all five sites — fixing one verifies the
 //! pattern for the rest.
+//!
+//! Round 86 adds a parallel guard for `pakx test`: the subcommand
+//! previously used a bare `TempDir::new()` for its cache root, which
+//! lacked the pid+nanos prefix needed to keep parallel integration
+//! tests from sharing cache state when their wiremock servers
+//! recycle the same loopback port. The new test (and the
+//! corresponding `make_cache_tempdir("pakx-test-cache")` swap in
+//! `commands::test::build_registry_client`) align `pakx test` with
+//! the rest of the federated-query family.
 
 use assert_cmd::Command;
 use serde_json::json;
@@ -92,4 +101,127 @@ async fn search_cleans_up_its_per_call_cache_tempdir() {
         std::env::temp_dir(),
         leaked,
     );
+}
+
+/// Round-86 companion: `pakx test` previously built its cache root
+/// via `TempDir::new()`, which produced names like `.tmpXXXXXX` with
+/// no `pakx-test-cache-` prefix. The bare prefix meant the
+/// cleanup-leak guard above could not see those dirs at all, AND
+/// the names did not carry the pid+nanos collision-avoidance suffix
+/// that `make_cache_tempdir` adds. After the swap to
+/// `make_cache_tempdir("pakx-test-cache")` the dir is visible to the
+/// same scanner — and self-deletes on drop just like the other five
+/// federated subcommands.
+#[tokio::test]
+async fn test_cleans_up_its_per_call_cache_tempdir() {
+    // The online path requires a manifest with at least one `mcp:` dep
+    // so the cache root actually gets used. Mock the official-MCP
+    // detail endpoint with a single hit; disable Smithery + pakx-
+    // registry so only the MCP source is touched.
+    let mcp = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/v0/servers/io\.github\.acme/.+",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                {
+                    "name": "io.github.acme/sample",
+                    "description": "x",
+                    "version_detail": {"version": "1.0.0"}
+                }
+            ]
+        })))
+        .mount(&mcp)
+        .await;
+    Mock::given(method("GET"))
+        .and(wm_path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&mcp)
+        .await;
+
+    let project = tempfile::TempDir::new().expect("project tempdir");
+    std::fs::write(
+        project.path().join("agents.yml"),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/sample\n",
+    )
+    .unwrap();
+
+    let before = snapshot_pakx_cache_dirs();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "test",
+            "--mcp-base-url",
+            &mcp.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
+        .assert()
+        .success();
+
+    let after = snapshot_pakx_cache_dirs();
+
+    let leaked: Vec<_> = after
+        .difference(&before)
+        .filter(|n| n.to_string_lossy().contains("pakx-test-cache-"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "`pakx test` leaked cache tempdirs in {:?}: {:?}",
+        std::env::temp_dir(),
+        leaked,
+    );
+}
+
+/// `pakx test --no-cache` is wired through the same `cache_dir_at`
+/// helper as every other federated subcommand. The flag must parse
+/// and the command must still succeed (the cache-bypass only
+/// changes which lookups hit the wire, not the surface contract).
+#[tokio::test]
+async fn test_accepts_no_cache_flag() {
+    let mcp = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(
+            r"^/v0/servers/io\.github\.acme/.+",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                {
+                    "name": "io.github.acme/sample",
+                    "description": "x",
+                    "version_detail": {"version": "1.0.0"}
+                }
+            ]
+        })))
+        .mount(&mcp)
+        .await;
+    Mock::given(method("GET"))
+        .and(wm_path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&mcp)
+        .await;
+
+    let project = tempfile::TempDir::new().expect("project tempdir");
+    std::fs::write(
+        project.path().join("agents.yml"),
+        "name: example\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/sample\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "test",
+            "--mcp-base-url",
+            &mcp.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--no-cache",
+        ])
+        .assert()
+        .success();
 }
