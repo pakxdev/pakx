@@ -147,6 +147,18 @@ pub struct UpdateArgs {
     /// `--kind` flag on `pakx remove`.
     #[arg(short = 'k', long = "kind", value_enum)]
     pub kind: Option<UpdateKind>,
+
+    /// Bypass the federated-source cache for this invocation. Drops
+    /// the per-call cache TTL to zero on both the outdated check and
+    /// the post-update install reconciliation, so a freshly published
+    /// version is visible immediately instead of waiting for the
+    /// default 1-hour cache TTL to expire. Mirrors the
+    /// `--no-cache` flag documented on `pakx outdated` /
+    /// `pakx install` / `pakx search`; the canonical use case is
+    /// `pakx publish && pakx update --yes --no-cache` to re-pin
+    /// against the just-uploaded version with no wait.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 /// One concrete rewrite to apply to the manifest. Either supplied
@@ -343,11 +355,16 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
         no_pakx_registry: args.no_pakx_registry,
         claude_home: args.claude_home,
         no_lockfile: false,
-        // `pakx update` was the trigger for the version-rewrite —
-        // honour the freshest registry view by default. Adding a
-        // dedicated `--no-cache` here is deferred until users ask for
-        // it; the implicit fresh-read matches the user's intent.
-        no_cache: false,
+        // Forward `--no-cache` into the install reconciliation so the
+        // freshly-rewritten pin gets resolved against an un-cached
+        // view of the registry. Wired in round 86 to close the
+        // `pakx publish && pakx update --yes --no-cache` loop: prior
+        // to this, the post-update install could still serve a cached
+        // resolution from before the publish landed, leaving the user
+        // re-pinned in `agents.yml` but installed at the previous
+        // version. The default `false` preserves the historical
+        // behaviour for users who do not opt in.
+        no_cache: args.no_cache,
     };
     let report = install_run(opts).await?;
     if !report.failed.is_empty() {
@@ -397,7 +414,7 @@ async fn plan_phase(args: &UpdateArgs, project_root: &Path) -> Result<PlanPhase>
             args.mcp_base_url.as_deref(),
             args.smithery_base_url.as_deref(),
             None,
-            false,
+            args.no_cache,
         )
         .await?;
         // Error rows print on stderr via `gather_outdated`'s internals;
@@ -421,6 +438,7 @@ async fn plan_phase(args: &UpdateArgs, project_root: &Path) -> Result<PlanPhase>
         args.pakx_base_url.as_deref(),
         args.mcp_base_url.as_deref(),
         args.smithery_base_url.as_deref(),
+        args.no_cache,
     )
     .await?
     {
@@ -460,6 +478,7 @@ async fn build_plan_for_id(
     pakx_base_url: Option<&str>,
     mcp_base_url: Option<&str>,
     smithery_base_url: Option<&str>,
+    no_cache: bool,
 ) -> Result<SingleIdOutcome> {
     let rows = gather_outdated(
         project_root,
@@ -467,7 +486,7 @@ async fn build_plan_for_id(
         mcp_base_url,
         smithery_base_url,
         None,
-        false,
+        no_cache,
     )
     .await?;
     if rows.is_empty() {

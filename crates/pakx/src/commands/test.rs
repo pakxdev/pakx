@@ -418,8 +418,7 @@ fn build_registry_client(
             }
             None => PAKX_BASE_URL,
         };
-        let pakx =
-            PakxSource::with_parts(http_client(), url, cache_dir_at(cache_root, no_cache));
+        let pakx = PakxSource::with_parts(http_client(), url, cache_dir_at(cache_root, no_cache));
         client = client.with_source(Box::new(pakx));
     }
 

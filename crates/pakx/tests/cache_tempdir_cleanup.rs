@@ -103,6 +103,28 @@ async fn search_cleans_up_its_per_call_cache_tempdir() {
     );
 }
 
+/// Mount the official-MCP search endpoint so `OfficialMcpSource::fetch`
+/// resolves cleanly through the search-fallback path. Mirrors the
+/// fixture shape used by `test_cmd::test_online_resolves_against_registry`
+/// — the per-server detail endpoint is intentionally NOT mounted so
+/// every fetch falls through to the search path (matches the
+/// 2025-12-11 production schema).
+async fn mount_official_mcp_search_hit(server: &MockServer, name: &str, version: &str) {
+    Mock::given(method("GET"))
+        .and(wm_path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                {
+                    "name": name,
+                    "description": "x",
+                    "version_detail": { "version": version }
+                }
+            ]
+        })))
+        .mount(server)
+        .await;
+}
+
 /// Round-86 companion: `pakx test` previously built its cache root
 /// via `TempDir::new()`, which produced names like `.tmpXXXXXX` with
 /// no `pakx-test-cache-` prefix. The bare prefix meant the
@@ -114,31 +136,8 @@ async fn search_cleans_up_its_per_call_cache_tempdir() {
 /// federated subcommands.
 #[tokio::test]
 async fn test_cleans_up_its_per_call_cache_tempdir() {
-    // The online path requires a manifest with at least one `mcp:` dep
-    // so the cache root actually gets used. Mock the official-MCP
-    // detail endpoint with a single hit; disable Smithery + pakx-
-    // registry so only the MCP source is touched.
     let mcp = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(wiremock::matchers::path_regex(
-            r"^/v0/servers/io\.github\.acme/.+",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "servers": [
-                {
-                    "name": "io.github.acme/sample",
-                    "description": "x",
-                    "version_detail": {"version": "1.0.0"}
-                }
-            ]
-        })))
-        .mount(&mcp)
-        .await;
-    Mock::given(method("GET"))
-        .and(wm_path("/v0/servers"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
-        .mount(&mcp)
-        .await;
+    mount_official_mcp_search_hit(&mcp, "io.github.acme/sample", "1.0.0").await;
 
     let project = tempfile::TempDir::new().expect("project tempdir");
     std::fs::write(
@@ -183,26 +182,7 @@ async fn test_cleans_up_its_per_call_cache_tempdir() {
 #[tokio::test]
 async fn test_accepts_no_cache_flag() {
     let mcp = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(wiremock::matchers::path_regex(
-            r"^/v0/servers/io\.github\.acme/.+",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "servers": [
-                {
-                    "name": "io.github.acme/sample",
-                    "description": "x",
-                    "version_detail": {"version": "1.0.0"}
-                }
-            ]
-        })))
-        .mount(&mcp)
-        .await;
-    Mock::given(method("GET"))
-        .and(wm_path("/v0/servers"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
-        .mount(&mcp)
-        .await;
+    mount_official_mcp_search_hit(&mcp, "io.github.acme/sample", "1.0.0").await;
 
     let project = tempfile::TempDir::new().expect("project tempdir");
     std::fs::write(

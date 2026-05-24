@@ -620,6 +620,77 @@ async fn update_no_install_hint_propagates_directory_arg() {
     );
 }
 
+/// Round-86 wiring guard: `pakx update --no-cache` must parse and
+/// the full update + install reconciliation must still succeed.
+/// The cache-bypass semantic itself is unit-tested by
+/// `commands::cache_tempdir::cache_dir_at_clamps_ttl_when_no_cache_set`
+/// — this integration test pins the surface contract (flag accepted,
+/// command returns 0, manifest rewritten as usual). Documents the
+/// closure of the canonical `pakx publish && pakx update --yes
+/// --no-cache` post-publish re-pin loop.
+#[tokio::test]
+async fn update_yes_no_cache_succeeds_end_to_end() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let pakx_registry = MockServer::start().await;
+    let mcp = MockServer::start().await;
+    mount_empty_mcp(&mcp).await;
+    mount_pakx_detail(&pakx_registry, &[("0.1.2", false), ("0.1.0", false)]).await;
+
+    let (tarball_bytes, sha_hex) = build_skill_tarball();
+    let tarball_route = "/tarballs/hello-world-0.1.2.tgz";
+    let tarball_url = format!("{}{tarball_route}", pakx_registry.uri());
+    mount_pakx_version(&pakx_registry, "0.1.2", &sha_hex, &tarball_url).await;
+    mount_pakx_tarball(&pakx_registry, tarball_route, tarball_bytes).await;
+
+    write_manifest(
+        project.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  skills:\n    - arwenizEr/hello-world@0.1.0\n",
+    );
+    write_lockfile(project.path(), &pakx_lockfile("0.1.0"));
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "update",
+            "--yes",
+            "--no-cache",
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+            "--mcp-base-url",
+            &mcp.uri(),
+            "--no-smithery",
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Manifest must now pin 0.1.2 — same outcome as the cached
+    // happy-path. The `--no-cache` switch is observable upstream
+    // (fresh registry queries) but the user-visible result is the
+    // same: pinned at the latest available version.
+    let yml = std::fs::read_to_string(project.path().join("agents.yml")).unwrap();
+    assert!(
+        yml.contains("arwenizEr/hello-world@0.1.2"),
+        "agents.yml must be rewritten to the new pin under --no-cache; got:\n{yml}"
+    );
+}
+
+/// Help-text guard: `pakx update --help` must surface `--no-cache`.
+/// Pins the round-86 wiring so a future flag-rename does not silently
+/// drop the bypass from the documented surface.
+#[test]
+fn update_help_lists_no_cache() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args(["update", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-cache"));
+}
+
 /// Inverse: without `--directory`, the hint stays in its original
 /// `→ next: pakx install` shape (no spurious trailing flag).
 #[tokio::test]
