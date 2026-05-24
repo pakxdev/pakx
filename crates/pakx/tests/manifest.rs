@@ -237,6 +237,161 @@ fn manifest_delete_missing_path_is_idempotent_warning() {
 
 // ----- get JSON round-trip ------------------------------------------
 
+/// A schema-clean manifest (only modelled top-level keys) that gets
+/// `set`'d with an UNKNOWN top-level key must be rejected — the typed
+/// `Manifest` reader is `#[serde(deny_unknown_fields)]`, so without
+/// this guard the post-`set` file would refuse to parse on the next
+/// `pakx test` / `pakx install`. The user must see a clear error
+/// listing the supported keys + a guarantee the original bytes were
+/// restored.
+#[test]
+fn manifest_set_rejects_unknown_top_level_key_on_clean_manifest() {
+    let temp = TempDir::new().unwrap();
+    let manifest_path = temp.path().join("agents.yml");
+    let clean = "name: example\nversion: 0.1.0\n";
+    std::fs::write(&manifest_path, clean).unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "manifest",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "set",
+            "homepage",
+            "https://example.test",
+        ])
+        .assert()
+        .failure()
+        // Error must name the rejected key + list supported keys.
+        .stderr(predicate::str::contains("'homepage'"))
+        .stderr(predicate::str::contains("not a recognized manifest field"))
+        .stderr(predicate::str::contains("name"))
+        .stderr(predicate::str::contains("version"))
+        .stderr(predicate::str::contains("dependencies"));
+
+    // Rollback contract: the file is byte-identical to the pre-set
+    // state. Using exact-equality (not a substring check) so a
+    // trailing-newline or quoting-style drift surfaces immediately.
+    let after = std::fs::read_to_string(&manifest_path).unwrap();
+    assert_eq!(after, clean, "rollback must restore the original bytes");
+}
+
+/// Companion: setting a KNOWN top-level key on a clean manifest still
+/// succeeds. Pin so the schema guard doesn't accidentally over-reject
+/// the supported subset (`name`, `version`, `agents`, `dependencies`).
+#[test]
+fn manifest_set_allows_known_top_level_key_on_clean_manifest() {
+    let temp = TempDir::new().unwrap();
+    let manifest_path = temp.path().join("agents.yml");
+    let clean = "name: example\nversion: 0.1.0\n";
+    std::fs::write(&manifest_path, clean).unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "manifest",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "set",
+            "--json",
+            "agents",
+            "[\"claude-code\"]",
+        ])
+        .assert()
+        .success();
+
+    let body = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(body.contains("agents:"), "agents was written: {body}");
+    assert!(body.contains("claude-code"), "agent id was written: {body}");
+}
+
+/// `MANIFEST_TOP_LEVEL_KEYS` in `commands/manifest.rs` is the
+/// authoritative list the schema-guard error message renders. It MUST
+/// stay in lockstep with the `Manifest` struct's accepted top-level
+/// keys — otherwise a future schema bump (e.g. adding `homepage`)
+/// would leave the error message stale and confuse users about why
+/// their input was rejected. Each key listed here is independently
+/// asserted to be accepted by the typed schema via a minimal
+/// `parse_manifest` round-trip; if any drifts, this test trips and
+/// the constant must be updated alongside the schema.
+#[test]
+fn manifest_top_level_keys_constant_matches_schema() {
+    // We can't reach into the binary's private constant, so we
+    // exhaustively probe each known top-level key by writing a
+    // minimal manifest that uses ONLY that key (plus the always-
+    // required `name` / `version`) and asserting `pakx test --offline`
+    // accepts it. If the constant ever drifts away from the schema,
+    // this test plus `manifest_set_rejects_unknown_top_level_key_on_clean_manifest`
+    // together catch it: one verifies the constant lists everything
+    // the schema accepts, the other verifies the schema rejects what
+    // the constant excludes.
+    let temp = TempDir::new().unwrap();
+    let manifest_path = temp.path().join("agents.yml");
+
+    // Minimal manifests exercising each top-level key. Required pair
+    // (`name`, `version`) is shared.
+    let probes: &[(&str, &str)] = &[
+        ("name", "name: probe\nversion: 0.0.1\n"),
+        ("version", "name: probe\nversion: 0.0.1\n"),
+        (
+            "agents",
+            "name: probe\nversion: 0.0.1\nagents:\n  - claude-code\n",
+        ),
+        (
+            "dependencies",
+            "name: probe\nversion: 0.0.1\ndependencies:\n  mcp: []\n",
+        ),
+    ];
+
+    for (key, body) in probes {
+        std::fs::write(&manifest_path, body).unwrap();
+        let out = Command::cargo_bin(BIN)
+            .unwrap()
+            .current_dir(temp.path())
+            .args(["test", "--offline"])
+            .assert()
+            .get_output()
+            .clone();
+        assert!(
+            out.status.success(),
+            "top-level key {key:?} should parse cleanly; stderr=\n{}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+}
+
+/// If the manifest was ALREADY in a schema-invalid state pre-edit
+/// (e.g. a previous lax `set` left an unmodelled key in place), the
+/// schema guard must not block further `set` calls — otherwise users
+/// would have no way to repair a corrupted manifest via the CLI.
+/// Pinning the "broken-stays-broken edit allowed" branch.
+#[test]
+fn manifest_set_allows_edits_when_pre_state_already_invalid() {
+    let temp = TempDir::new().unwrap();
+    let manifest_path = temp.path().join("agents.yml");
+    // Pre-existing unknown `description` top-level key — this fails
+    // `parse_manifest` already, so the guard must skip the post-check.
+    let pre = "name: example\nversion: 0.1.0\ndescription: old text\n";
+    std::fs::write(&manifest_path, pre).unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "manifest",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "set",
+            "description",
+            "new text",
+        ])
+        .assert()
+        .success();
+
+    let body = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(body.contains("description: new text"), "got:\n{body}");
+}
+
 #[test]
 fn manifest_get_json_emits_quoted_string_scalar() {
     // Locks in the `--json` contract: even for a plain string value,

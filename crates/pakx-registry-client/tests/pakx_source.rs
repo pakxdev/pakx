@@ -365,3 +365,35 @@ async fn fetch_rejects_malformed_id() {
     // No request should have been made to the mock server.
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+/// `fetch_version` must shape-guard the `<version>` URL segment BEFORE
+/// firing any HTTP request. A version of `..` percent-encodes to a
+/// literal `..` segment (RFC 3986 leaves dots alone) that a CDN /
+/// normalising reverse proxy would collapse upward, silently rerouting
+/// the GET to the package-detail endpoint instead of the version
+/// endpoint. Pin the guard with a hostile input set + assert the mock
+/// server saw zero traffic.
+#[tokio::test]
+async fn fetch_version_rejects_hostile_version_pre_network() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    let src = source_against(&server, &cache);
+
+    for bad in ["", "..", "../etc", "1..0", "-1.0.0", "1.0 0", "1.0/0"] {
+        let err = src.fetch_version("alice", "demo", bad).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RegistryError::Invalid {
+                    source_tag: "pakx",
+                    ..
+                }
+            ),
+            "version {bad:?} must be rejected as invalid, got {err:?}",
+        );
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "validator must fire before any HTTP request",
+    );
+}

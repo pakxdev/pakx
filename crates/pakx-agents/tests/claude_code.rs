@@ -60,11 +60,11 @@ async fn install_skill_writes_files() {
     assert_eq!(installed.id, "anthropics/pdf");
     assert_eq!(installed.version, "1.0.0");
 
-    let root = adapter
-        .config_dir()
-        .join("skills")
-        .join("anthropics")
-        .join("pdf");
+    // Single-level dash-separated leaf matches the install runner's
+    // `<owner>-<name>` convention (see `install::skill` doc comment).
+    // Diverging from the installer here would silently break
+    // `Adapter::list` / `pakx list` / `pakx doctor`.
+    let root = adapter.config_dir().join("skills").join("anthropics-pdf");
     assert!(root.join("SKILL.md").is_file());
     assert!(root.join("reference").join("usage.md").is_file());
 }
@@ -90,7 +90,7 @@ async fn install_skill_replaces_drifted_install() {
     adapter.install_skill(&v1).await.unwrap();
     adapter.install_skill(&v2).await.unwrap();
 
-    let on_disk = std::fs::read(adapter.config_dir().join("skills/a/b/SKILL.md")).unwrap();
+    let on_disk = std::fs::read(adapter.config_dir().join("skills/a-b/SKILL.md")).unwrap();
     assert_eq!(on_disk, b"v2");
 }
 
@@ -105,7 +105,7 @@ async fn install_skill_integrity_mismatch_aborts() {
     let err = adapter.install_skill(&skill).await.unwrap_err();
     assert!(matches!(err, AdapterError::IntegrityMismatch { .. }));
     assert!(
-        !adapter.config_dir().join("skills/a/b").exists(),
+        !adapter.config_dir().join("skills/a-b").exists(),
         "nothing written"
     );
 }
@@ -180,7 +180,7 @@ async fn uninstall_removes_skill_dir() {
         .await
         .unwrap();
     adapter.uninstall("a/b").await.unwrap();
-    assert!(!adapter.config_dir().join("skills/a/b").exists());
+    assert!(!adapter.config_dir().join("skills/a-b").exists());
 }
 
 #[tokio::test]
@@ -197,6 +197,46 @@ async fn uninstall_rejects_malformed_id() {
     let adapter = adapter_in(&temp);
     let err = adapter.uninstall("bareid").await.unwrap_err();
     assert!(matches!(err, AdapterError::Invalid { .. }));
+}
+
+/// Regression: the install runner extracts skills to
+/// `<claude_home>/skills/<owner>-<name>/` (single level, dash-separated
+/// — see `crates/pakx/src/install/skill.rs`). Pre-fix this adapter built
+/// `<claude_home>/skills/<owner>/<name>/` (two levels) and `list()`
+/// walked two levels deep, so every installer-produced skill was
+/// invisible to `pakx list` / `pakx doctor` and reported as drift.
+///
+/// This test pins the adapter to the installer layout by simulating
+/// what the installer writes — a `SKILL.md` under
+/// `skills/<owner>-<name>/` — and asserts `list()` recovers the
+/// canonical `<owner>/<name>` id.
+#[tokio::test]
+async fn list_recovers_canonical_id_from_installer_layout() {
+    let temp = TempDir::new().unwrap();
+    let adapter = adapter_in(&temp);
+
+    // Hand-craft the installer's on-disk shape so the test pins the
+    // adapter/installer contract WITHOUT routing through
+    // `install_skill` (which builds the same path via this adapter).
+    let dest = adapter
+        .config_dir()
+        .join("skills")
+        .join("arwenizer-hello-world");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(
+        dest.join("SKILL.md"),
+        b"---\nname: hello-world\nversion: 0.1.2\n---\n# Hello\n",
+    )
+    .unwrap();
+
+    let listed = adapter.list().await.unwrap();
+    assert_eq!(listed.len(), 1, "single skill recovered, got {listed:?}");
+    let entry = &listed[0];
+    // Dash splits on the FIRST `-`, so a `<name>` containing dashes
+    // (e.g. `hello-world`) round-trips correctly.
+    assert_eq!(entry.id, "arwenizer/hello-world");
+    assert_eq!(entry.version, "0.1.2");
+    assert_eq!(entry.path, dest);
 }
 
 #[tokio::test]

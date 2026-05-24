@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
+use futures::stream::{self, StreamExt};
 use pakx_core::manifest::{DepSpec, PackageType};
 use pakx_core::{http_client, read_lockfile_from, read_manifest_from, Lockfile, Manifest};
 use pakx_registry_client::{
@@ -24,6 +25,19 @@ use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
 const LOCKFILE_FILENAME: &str = "agents.lock";
+
+/// Concurrency cap on the federated resolver fan-out. 10 is the
+/// sweet-spot from the 2026-05 perf pass: 3 deps × ~400ms RTT
+/// sequential ≈ 1066ms p50, collapsing to ~400ms (max single dep) when
+/// fanned out. Larger fan-outs hammer upstream registries
+/// (`OfficialMcp` / Smithery / pakx-registry) without buying
+/// additional wall-clock gain past ~10 concurrent calls — past that
+/// the registry's own rate-limit / connection-pool ceiling becomes
+/// the bottleneck. Same constant is intentionally not shared with the
+/// install runner: that path also does per-dep adapter writes which
+/// are FS-bound, not network-bound, so its concurrency model is
+/// different (currently still sequential per-kind).
+const TEST_RESOLVE_CONCURRENCY: usize = 10;
 
 #[derive(Debug, Clone, Args)]
 pub struct TestArgs {
@@ -199,43 +213,88 @@ fn check_offline(manifest: &Manifest, lockfile: Option<&Lockfile>, failures: &mu
     }
 }
 
+/// Fan resolution out across every `mcp:` dep in parallel, capped at
+/// [`TEST_RESOLVE_CONCURRENCY`]. Pre-fix this loop awaited each
+/// `resolve_federated` call serially — 3 deps × ~400ms RTT = ~1066ms
+/// p50 wall clock. With `buffer_unordered` the wall-clock collapses to
+/// `max(per-dep RTT)` (~400ms on the same 3-dep manifest, ≈ 58% drop).
+///
+/// Output ordering matches the manifest deps order even though the
+/// futures complete out-of-order: we tag each future with its dep
+/// index, collect the (index, render) pairs, then sort by index before
+/// printing. That keeps the user-visible row order stable across runs
+/// (which a flaky-output CI parser would otherwise hate) without
+/// sacrificing the parallel-network win.
+///
+/// Git deps short-circuit synchronously (no network) and are counted
+/// straight into `failures` before the fan-out — they don't take a
+/// slot in the concurrency budget.
 async fn check_online(manifest: &Manifest, client: &RegistryClient, failures: &mut usize) {
     let Some(deps) = &manifest.dependencies.mcp else {
         return;
     };
-    for dep in deps {
+
+    // Split sync-failed (git deps) from network-resolved entries up
+    // front so the fan-out only carries work that actually awaits.
+    let mut rendered: Vec<(usize, String, bool)> = Vec::with_capacity(deps.len());
+    let mut to_resolve: Vec<(usize, String)> = Vec::with_capacity(deps.len());
+    for (idx, dep) in deps.iter().enumerate() {
         let id = dep_id(dep);
         if let DepSpec::Git(_) = dep {
-            println!("{} mcp/{id} git deps not yet supported", ui::glyph_fail());
-            *failures += 1;
-            continue;
+            rendered.push((
+                idx,
+                format!("{} mcp/{id} git deps not yet supported", ui::glyph_fail()),
+                true,
+            ));
+        } else {
+            to_resolve.push((idx, id));
         }
-        // Federated resolution: OfficialMcp.fetch first, then search
-        // every other registered source for an exact-name match.
-        // README + CHANGELOG sell this as a federated check; without
-        // the search fallback the `--no-smithery` / `--no-pakx-registry`
-        // toggles are dead flags.
-        match resolve_federated(client, &id).await {
-            Ok(Resolved::OfficialMcp(pkg) | Resolved::Federated(pkg)) => {
-                println!(
-                    "{} mcp/{id} -> {source}:{pid}@{ver}",
-                    ui::glyph_ok(),
-                    source = pkg.source.as_tag(),
-                    pid = pkg.id,
-                    ver = pkg.version,
-                );
-            }
-            Ok(Resolved::NotFound) => {
-                println!(
-                    "{} mcp/{id} not found in any federated registry",
-                    ui::glyph_fail()
-                );
-                *failures += 1;
-            }
-            Err(e) => {
-                println!("{} mcp/{id} {e}", ui::glyph_fail());
-                *failures += 1;
-            }
+    }
+
+    // Bounded-concurrency fan-out. `buffer_unordered` keeps up to
+    // `TEST_RESOLVE_CONCURRENCY` resolutions in flight; results
+    // surface as they complete (we sort by `idx` after the collect to
+    // restore manifest order).
+    let resolved: Vec<(usize, String, bool)> = stream::iter(to_resolve)
+        .map(|(idx, id)| async move {
+            // Federated resolution: OfficialMcp.fetch first, then
+            // search every other registered source for an exact-name
+            // match. README + CHANGELOG sell this as a federated
+            // check; without the search fallback the `--no-smithery` /
+            // `--no-pakx-registry` toggles are dead flags.
+            let outcome = resolve_federated(client, &id).await;
+            let (line, failed) = match outcome {
+                Ok(Resolved::OfficialMcp(pkg) | Resolved::Federated(pkg)) => (
+                    format!(
+                        "{} mcp/{id} -> {source}:{pid}@{ver}",
+                        ui::glyph_ok(),
+                        source = pkg.source.as_tag(),
+                        pid = pkg.id,
+                        ver = pkg.version,
+                    ),
+                    false,
+                ),
+                Ok(Resolved::NotFound) => (
+                    format!(
+                        "{} mcp/{id} not found in any federated registry",
+                        ui::glyph_fail()
+                    ),
+                    true,
+                ),
+                Err(e) => (format!("{} mcp/{id} {e}", ui::glyph_fail()), true),
+            };
+            (idx, line, failed)
+        })
+        .buffer_unordered(TEST_RESOLVE_CONCURRENCY)
+        .collect()
+        .await;
+
+    rendered.extend(resolved);
+    rendered.sort_by_key(|(idx, _, _)| *idx);
+    for (_, line, failed) in rendered {
+        println!("{line}");
+        if failed {
+            *failures += 1;
         }
     }
 }

@@ -101,8 +101,10 @@ fn list_json_emits_valid_array_with_expected_keys() {
 }
 
 // Skill-shaped lockfile fixture for status tests: the adapter only
-// reconciles entries it can see on disk under `skills/<owner>/<name>/`,
-// so the `ok` / `drift` JSON contract is exercised against this shape.
+// reconciles entries it can see on disk under `skills/<owner>-<name>/`
+// (single-level dash-separated leaf — see `pakx-agents`'s
+// `ClaudeCodeAdapter::skill_dir`), so the `ok` / `drift` JSON contract
+// is exercised against this shape.
 const SKILLS_LOCKFILE: &str = r#"{"lockfileVersion":1,"manifestHash":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","entries":{
   "skills/anthropic/pdf@1.4.0":{
     "name":"anthropic/pdf",
@@ -117,10 +119,12 @@ const SKILLS_LOCKFILE: &str = r#"{"lockfileVersion":1,"manifestHash":"sha256-AAA
 }}
 "#;
 
-/// Write a minimal `SKILL.md` under `<home>/skills/<owner>/<name>/` so
+/// Write a minimal `SKILL.md` under `<home>/skills/<owner>-<name>/` so
 /// `ClaudeCodeAdapter::list` discovers it with the supplied version.
+/// Mirrors the installer layout pinned in
+/// `crates/pakx/src/install/skill.rs`.
 fn write_installed_skill(home: &std::path::Path, owner: &str, name: &str, version: &str) {
-    let dir = home.join("skills").join(owner).join(name);
+    let dir = home.join("skills").join(format!("{owner}-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let body = format!("---\nname: {name}\nversion: {version}\n---\n# {name}\nbody\n");
     std::fs::write(dir.join("SKILL.md"), body).unwrap();

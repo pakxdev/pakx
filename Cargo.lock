@@ -1193,6 +1193,7 @@ dependencies = [
  "comfy-table",
  "dirs",
  "flate2",
+ "futures",
  "gethostname",
  "indicatif",
  "inquire",

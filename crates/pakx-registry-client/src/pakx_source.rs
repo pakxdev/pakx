@@ -13,7 +13,7 @@
 //!   GET /api/v1/packages/{owner}/{name}/{version}     -> per-version detail (includes signed tarballUrl)
 
 use async_trait::async_trait;
-use pakx_core::{http_client, RegistrySource};
+use pakx_core::{http_client, validate_version, RegistrySource};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,6 +89,17 @@ impl PakxSource {
         name: &str,
         version: &str,
     ) -> Result<PackageVersion, RegistryError> {
+        // Shape-guard the `<version>` segment **before** any encoding /
+        // network work. `urlencoding_minimal` follows RFC 3986 §2.3 and
+        // leaves `.` unreserved — so a version of `..` would
+        // percent-encode to a literal `..` segment that a normalising
+        // reverse proxy collapses, silently re-routing the GET to a
+        // different endpoint. See `pakx_core::validation` for the
+        // shared threat model.
+        validate_version(version).map_err(|e| RegistryError::Invalid {
+            source_tag: TAG,
+            reason: e.to_string(),
+        })?;
         let url = format!(
             "{}/api/v1/packages/{}/{}/{}",
             self.base_url,

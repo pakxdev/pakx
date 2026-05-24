@@ -11,6 +11,7 @@ pub mod http_client;
 pub mod install;
 pub mod lockfile;
 pub mod manifest;
+pub mod validation;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -40,3 +41,4 @@ pub use manifest::{
     PathSeg as ManifestPathSeg, RegistrySpec, RemoveOutcome, Sponsor, SponsorError, SponsorKind,
     StringSpec, UpdateOutcome, KNOWN_AGENT_IDS, MAX_SPONSORS, PACKAGE_TYPES,
 };
+pub use validation::{validate_package_name, validate_version, ValidationError, MAX_VERSION_LEN};

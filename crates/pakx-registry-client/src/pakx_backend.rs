@@ -13,7 +13,10 @@
 //! aggregate public packages alongside MCP/Smithery.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use pakx_core::{http_client_with_timeout, Sponsor, UPLOAD_REQUEST_TIMEOUT};
+use pakx_core::{
+    http_client_with_timeout, validate_package_name as core_validate_package_name,
+    validate_version as core_validate_version, Sponsor, ValidationError, UPLOAD_REQUEST_TIMEOUT,
+};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -32,6 +35,11 @@ pub enum BackendError {
     Conflict { message: String },
     #[error("invalid package name {name:?}: {reason}")]
     InvalidName { name: String, reason: &'static str },
+    #[error("invalid version {version:?}: {reason}")]
+    InvalidVersion {
+        version: String,
+        reason: &'static str,
+    },
     #[error("registry error ({status}): {body}")]
     Other { status: u16, body: String },
 }
@@ -177,6 +185,10 @@ impl PakxBackend {
         // silently re-routing the `PUT` to a different endpoint. The
         // encoder is correct; we need a separate shape guard on top.
         validate_package_name(name)?;
+        // Same threat model applies to the `<version>` segment — a
+        // `version` of `..` percent-encodes to a literal `..` segment
+        // that a normalising reverse proxy can collapse upward.
+        validate_version(version)?;
         // Percent-encode every path segment. Without this, a package
         // `name` containing `/` or `..` silently routes the PUT to the
         // wrong endpoint — `PakxSource::fetch` already encodes these
@@ -241,6 +253,7 @@ impl PakxBackend {
         // Same shape guard + percent-encoding contract as
         // `upload_version`; see that method for the rationale.
         validate_package_name(name)?;
+        validate_version(version)?;
         let url = self.package_version_url(owner, name, version);
         let res = self.http.delete(url).bearer_auth(token).send().await?;
         let status = res.status();
@@ -257,47 +270,33 @@ impl PakxBackend {
     }
 }
 
-/// Reject hostile package names before they reach the URL builder.
-///
-/// `urlencoding_minimal` follows RFC 3986 §2.3 and leaves `.` in the
-/// unreserved set, so a name like `..` produces a URL segment with a
-/// literal `..` — which most HTTP routers (and any normalizing
-/// reverse-proxy in front of the registry) collapse, silently
-/// re-routing the request to an unintended endpoint. The encoder is
-/// doing the right thing for `.`; we need a shape guard on the input.
-///
-/// Rejection rules:
-/// - empty
-/// - exactly `.` or `..`
-/// - starts with `.` (hidden-file convention; nothing legit needs it)
-/// - contains the substring `..` anywhere
-/// - contains `/`, `\`, or any ASCII control char
+/// Thin wrapper around [`pakx_core::validate_package_name`] that lifts
+/// the shared `ValidationError` into this crate's `BackendError`
+/// variant. The shape rules — empty, `..`, leading `.`, embedded `..`,
+/// `/` / `\` / control chars — live in pakx-core so the CLI and any
+/// future consumer (e.g. a registry-side typed client) all enforce the
+/// same contract. See [`pakx_core::validation`] for the threat model.
 fn validate_package_name(name: &str) -> Result<(), BackendError> {
-    let reject = |reason: &'static str| BackendError::InvalidName {
-        name: name.to_owned(),
-        reason,
-    };
-    if name.is_empty() {
-        return Err(reject("name must not be empty"));
-    }
-    if name == "." || name == ".." {
-        return Err(reject("name must not be `.` or `..`"));
-    }
-    if name.starts_with('.') {
-        return Err(reject("name must not start with `.`"));
-    }
-    if name.contains("..") {
-        return Err(reject("name must not contain `..`"));
-    }
-    for c in name.chars() {
-        if c == '/' || c == '\\' {
-            return Err(reject("name must not contain `/` or `\\`"));
+    core_validate_package_name(name).map_err(|ValidationError { input, reason }| {
+        BackendError::InvalidName {
+            name: input,
+            reason,
         }
-        if c.is_control() {
-            return Err(reject("name must not contain control characters"));
+    })
+}
+
+/// Mirror of [`validate_package_name`] for the `<version>` URL path
+/// segment. Same threat model — a literal `..` segment after the
+/// minimal RFC 3986 encoder is a router-normalisation hazard — but a
+/// tighter character whitelist because the semver-friendly set is
+/// well-defined (see [`pakx_core::validate_version`]).
+fn validate_version(version: &str) -> Result<(), BackendError> {
+    core_validate_version(version).map_err(|ValidationError { input, reason }| {
+        BackendError::InvalidVersion {
+            version: input,
+            reason,
         }
-    }
-    Ok(())
+    })
 }
 
 /// Minimal percent-encoder for URL path segments. Encodes everything
@@ -321,7 +320,7 @@ fn urlencoding_minimal(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_package_name, BackendError, PakxBackend};
+    use super::{validate_package_name, validate_version, BackendError, PakxBackend};
 
     #[test]
     fn package_version_url_encodes_slash_in_name() {
@@ -445,5 +444,80 @@ mod tests {
         let b = PakxBackend::new("https://registry.pakx.dev/");
         let url = b.package_version_url("a", "b", "1.0.0");
         assert_eq!(url, "https://registry.pakx.dev/api/v1/packages/a/b/1.0.0");
+    }
+
+    #[test]
+    fn validate_version_accepts_semver_shapes() {
+        assert!(validate_version("0.1.0").is_ok());
+        assert!(validate_version("1.0.0-rc.1").is_ok());
+        assert!(validate_version("1.0.0+build.7").is_ok());
+    }
+
+    #[test]
+    fn validate_version_rejects_traversal_and_empty() {
+        // Each of these would percent-encode to a literal `..` segment
+        // (or worse) and silently re-route the PUT / DELETE to a
+        // different endpoint after a normalising reverse proxy
+        // collapsed the path. The encoder is doing the right thing for
+        // `.` / `..` per RFC 3986; the shape guard catches the input.
+        assert!(matches!(
+            validate_version("..").unwrap_err(),
+            BackendError::InvalidVersion { .. },
+        ));
+        assert!(matches!(
+            validate_version("../etc").unwrap_err(),
+            BackendError::InvalidVersion { .. },
+        ));
+        assert!(matches!(
+            validate_version("").unwrap_err(),
+            BackendError::InvalidVersion { .. },
+        ));
+        assert!(matches!(
+            validate_version("1..0").unwrap_err(),
+            BackendError::InvalidVersion { .. },
+        ));
+    }
+
+    #[test]
+    fn validate_version_rejects_unsafe_chars_and_leading_dash() {
+        assert!(matches!(
+            validate_version("1.0.0/x").unwrap_err(),
+            BackendError::InvalidVersion { .. },
+        ));
+        // Leading `-` would land in `clap`-style flag parsing on any
+        // shell tooling downstream.
+        assert!(matches!(
+            validate_version("-1.0.0").unwrap_err(),
+            BackendError::InvalidVersion { .. },
+        ));
+        // Control char.
+        assert!(matches!(
+            validate_version("1.0.0\n").unwrap_err(),
+            BackendError::InvalidVersion { .. },
+        ));
+    }
+
+    #[tokio::test]
+    async fn upload_version_rejects_hostile_version_before_http() {
+        // No mock server stood up — if the validator falls through to
+        // an HTTP send the test will hang on TCP and fail by timeout,
+        // making "validator fired pre-network" the only way the test
+        // passes.
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .upload_version("tok", "alice", "demo", "..", vec![], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidVersion { .. }));
+    }
+
+    #[tokio::test]
+    async fn unpublish_rejects_hostile_version_before_http() {
+        let b = PakxBackend::new("https://example.invalid");
+        let err = b
+            .unpublish("tok", "alice", "demo", "../escape")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidVersion { .. }));
     }
 }
