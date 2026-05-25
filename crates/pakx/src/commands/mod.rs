@@ -13,6 +13,7 @@ pub mod install;
 pub mod list;
 pub mod login;
 pub mod manifest;
+pub mod new;
 pub mod outdated;
 pub mod pack;
 pub mod publish;

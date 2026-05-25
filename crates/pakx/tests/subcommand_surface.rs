@@ -23,6 +23,7 @@ const BIN: &str = "pakx";
 /// here means the help-text contract goes uncovered for that command.
 const SUBCOMMANDS: &[&str] = &[
     "init",
+    "new",
     "add",
     "remove",
     "install",
