@@ -6,7 +6,99 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-05-25
+
 ### Added
+
+- **`pakx install --rollback-on-error` — opt-in all-or-nothing
+  install.** When any dependency fails partway through a multi-dep
+  install, the default behaviour leaves a half-installed tree across
+  `~/.claude/{skills,agents,commands,prompts,hooks}` and the
+  project-scoped `.mcp.json` merge target. With `--rollback-on-error`,
+  the runner snapshots the prior on-disk state of every target the run
+  will touch (derived purely from the manifest's declared deps) before
+  the first adapter write, and on a failed run restores local state to
+  exactly what it was before: dirs the run created are removed, dirs
+  that pre-existed are moved back with their prior contents (via
+  rename, atomic within a filesystem). The post-rollback report is
+  re-cast so the summary and `--json` payload don't claim installs that
+  were reverted. Opt-in only this version; default-on is reserved for a
+  future major bump. Without the flag, the prior partial-install
+  behaviour is preserved exactly.
+
+- **Per-dependency `pakx install` progress.** The single whole-run
+  spinner is replaced by one `indicatif::MultiProgress` bar per
+  dependency. Each bar advances through its lifecycle (resolve →
+  install) and settles to a terminal `[ok]` / `[skip]` / `[fail]`
+  line, so cold-cache installs of several deps show per-dep progress
+  instead of one opaque spinner. A presentation-only `ProgressSink`
+  seam keeps the runner logic unchanged; non-TTY / `--json` paths use a
+  no-op sink and render nothing extra on stderr.
+
+- **`pakx audit --offline` — lockfile-only audit, no network.** The
+  deprecation signal lives behind a live `fetch_version` request that
+  intentionally bypasses the cache (signed-URL TTL discipline), so an
+  offline audit cannot know whether a pakx entry is deprecated. Rather
+  than emit a misleading `ok`, every pakx entry is reported as `skip`
+  with a `not checked (offline)` note — exit-code-neutral, but
+  distinguished from the structural "no deprecation signal" skip so a
+  consumer can tell "unknown offline" apart. Lets the audit run in
+  airgapped / no-egress CI without any network I/O.
+
+- **`pakx new <kind> <name>` (alias `scaffold`) — generate a
+  publishable bundle.** `pakx init` writes a *consumer* `agents.yml`;
+  there was previously no command to scaffold a *publisher* bundle.
+  `pakx new <kind> <name>` generates a correct starter tree in one
+  command for five kinds — `skills`, `subagents`, `prompts`,
+  `commands`, `hooks` — each producing a bundle that passes the
+  per-kind `pakx pack` validation (below) with zero warnings:
+  - `skills` → `SKILL.md` with `description:` frontmatter.
+  - `subagents` → `SKILL.md` with a kebab-case `name:` + `description:`.
+  - `commands` → `SKILL.md` with `description:`.
+  - `prompts` → a non-empty `prompt.md` alongside the manifest.
+  - `hooks` → a `hooks.json` declaring a `PreToolUse` event + matcher.
+
+  `mcp` is rejected with a pointer to `pakx add mcp <id>` — an MCP
+  server is registry config, not a packable file bundle, so there is
+  nothing honest to scaffold.
+
+- **`pakx search --kind <kind>` — filter search results by kind.**
+  `pakx search` was the last kind-blind command. It now forwards
+  `?kind=<kind>` to the pakx-registry's existing list endpoint
+  (server-side filter, composed with `?q=`) and filters federated hits
+  client-side. Federated sources (Smithery, official MCP Registry) have
+  no kind concept and match only `--kind mcp`. The kind token is parsed
+  via the same canonical plural token set as `pakx add <kind> <id>`,
+  and a tolerant normalizer folds the registry's singular `"skill"`
+  onto the CLI's plural `"skills"`. Search output gains a `kind` column
+  on the human table and an additive `kind` field on each `--json` hit
+  (null for federated sources). This completes "kind first-class
+  everywhere" alongside the `pakx list` kind column, `pakx tree`,
+  `pakx info` kind, and `pakx new <kind>`.
+
+- **`pakx list` kind column.** The pinned-lockfile table now surfaces
+  each entry's kind as a dedicated column, making the manifest section
+  a dep was declared under visible at a glance.
+
+- **`pakx info <id> <field>` — npm-view-style field query.** An
+  optional positional `<field>` arg accepts the same dot/bracket path
+  syntax `pakx manifest get` uses (e.g. `versions[0].sha256`,
+  `description`, `sponsors[0].url`). When set, the command prints only
+  that field. Output discipline mirrors `npm view <pkg> <field>`:
+  scalar strings print unquoted, numbers / bools / null route through
+  `Display`, arrays / objects emit as compact single-line JSON.
+
+- **`pakx pack` reads `README.md` and `pakx publish` forwards it to the
+  registry.** Publishers can ship a long-form `README.md` alongside
+  their bundle; `pack` reads `<src>/README.md` (UTF-8 lossy decode),
+  truncating to a UTF-8 char boundary with a non-fatal warning past the
+  256 KiB registry cap. `publish` forwards it: the `readme` field in
+  the POST body plus an `x-pakx-readme-b64` header on the tarball PUT
+  (keeps the PUT body on `application/gzip` for the registry's
+  Content-Length pre-check). Absent README → the field is omitted
+  entirely, so a republish from a README-less bundle never wipes a
+  previously-stored README. The pakx-web `/p/*` detail page renders the
+  stored markdown.
 
 - **`pakx export <id>` — copy an installed package's on-disk tree into
   a portable folder.** Resolves the id via the lockfile (no network
@@ -58,6 +150,25 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   the existing behaviour.
 
 ### Changed
+
+- **`pakx pack` per-kind validation warnings (skills / subagents /
+  commands / prompts / hooks).** Round 35 relaxed per-kind validation
+  on the premise that Claude Code lacked a public spec for the
+  non-skill kinds; that premise is now stale — Claude Code publicly
+  specs every kind. The round-32 skills-only `description:` warning is
+  extended to the other kinds, driven by the declared `kind:`
+  frontmatter (defaulting to `skills`). All checks append to the
+  existing `PackOutput.warnings` vec and **never hard-error**, so
+  local-smoke / air-gapped publishes still succeed (exit 0):
+  - `skills` — warn if `SKILL.md` lacks a non-empty `description:`.
+  - `subagents` — warn if no bundle markdown has frontmatter with both
+    a kebab-case `name:` and a `description:`.
+  - `commands` — warn if no bundle markdown declares a `description:`.
+  - `prompts` — warn if the bundle ships no non-empty file besides the
+    manifest.
+  - `hooks` — warn if no `hooks.json` (or equivalent) is present.
+
+  The relevant Claude Code doc URL is cited inline in each warning.
 
 - **`pakx unpublish` no longer claims a 30-day soft-delete grace.** The
   prior copy ("30-day soft-delete grace; resolves to 404 after the
