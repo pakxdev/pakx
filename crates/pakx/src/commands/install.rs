@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
-use crate::install::{run, InstallOpts, InstallReportEntry, InstallStatus};
+use crate::install::{
+    run_with_progress, InstallOpts, InstallReportEntry, InstallStatus, MultiProgressSink,
+};
 use crate::ui;
 
 #[derive(Debug, Clone, Args)]
@@ -103,10 +105,20 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
         no_cache: args.no_cache,
         rollback_on_error: args.rollback_on_error,
     };
-    let pb = ui::spinner("resolving dependencies");
-    let report = run(opts).await;
-    pb.finish_and_clear();
-    let report = report?;
+    // Per-dependency progress: one `indicatif` bar per dep, each
+    // advancing resolve -> install and settling to `[ok]`/`[skip]`/`[fail]`.
+    // The sink renders to stderr only when stderr is an interactive
+    // terminal we own (folds in `--color never` / `NO_COLOR`); otherwise
+    // every bar is hidden, so CI logs, pipes, and `--json` stdout stay
+    // byte-clean — identical to the prior single-spinner gate. We drop
+    // the sink before printing the summary so any unfinished bar clears
+    // and the finished per-dep trail sits above the summary block.
+    let report = {
+        let sink = MultiProgressSink::new(ui::stderr_progress_enabled());
+        let report = run_with_progress(opts, &sink).await;
+        drop(sink);
+        report
+    }?;
 
     if !report.installed.is_empty() {
         eprintln!("{}", ui::heading("installed:"));

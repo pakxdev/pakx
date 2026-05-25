@@ -28,6 +28,7 @@ use tracing::{debug, warn};
 
 use super::bundle::{install_bundle_from_pakx, ResolvedBundle};
 use super::mcp_translate::{translate, TranslateError};
+use super::progress::{NoopSink, Phase, ProgressSink};
 use super::rollback::Snapshot;
 use super::skill::{install_skill_from_pakx, parse_skill_shorthand, ResolvedSkill};
 use crate::commands::cache_tempdir::cache_dir_at;
@@ -146,7 +147,37 @@ impl InstallStatus {
     }
 }
 
+/// Run an install with no progress reporting. Thin wrapper over
+/// [`run_with_progress`] using the [`NoopSink`]. This is the stable
+/// entry point for callers that don't render per-dep progress —
+/// `pakx update`'s in-process reconcile and every test — so threading
+/// the sink stays opt-in and the behaviour is byte-for-byte identical.
+///
+/// # Errors
+///
+/// See [`run_with_progress`].
 pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
+    run_with_progress(opts, &NoopSink).await
+}
+
+/// Run an install, reporting per-dependency lifecycle events to `sink`.
+///
+/// The sink is **presentation-only**: it observes each dep's
+/// begin → resolve → install → finish transitions but cannot influence
+/// control flow, the install outcome, the lockfile write, or the
+/// `tracing` trail. Handing in a [`NoopSink`] is exactly equivalent to
+/// the historical no-progress behaviour.
+///
+/// # Errors
+///
+/// Surfaces manifest-read, registry-client-build, snapshot-capture,
+/// rollback-restore, and lockfile-write failures. Per-dep install
+/// errors are collected into [`InstallReport::failed`] rather than
+/// short-circuiting, so a partial run still returns `Ok(report)`.
+pub async fn run_with_progress(
+    opts: InstallOpts,
+    sink: &dyn ProgressSink,
+) -> Result<InstallReport> {
     let project_root = match opts.project_root.clone() {
         Some(p) => p,
         None => std::env::current_dir().context("cannot read cwd")?,
@@ -205,7 +236,7 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
 
     if let Some(deps) = &manifest.dependencies.mcp {
         for dep in deps {
-            install_mcp_dep(dep, &client, &claude, &mut report, &mut entries).await;
+            install_mcp_dep(dep, &client, &claude, &mut report, &mut entries, sink).await;
         }
     }
 
@@ -227,19 +258,18 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
                     &claude,
                     &mut report,
                     &mut entries,
+                    sink,
                 )
                 .await;
             }
         } else {
             for dep in deps {
                 let label = format!("skills/{}", dep.display_hint());
-                push_failed(
-                    &mut report,
-                    label,
-                    PackageType::Skills,
-                    None,
-                    "skill installs require pakx-registry; --no-pakx-registry refused".into(),
-                );
+                sink.begin(&label);
+                let reason =
+                    "skill installs require pakx-registry; --no-pakx-registry refused".to_owned();
+                sink.finish_failed(&label, &reason);
+                push_failed(&mut report, label, PackageType::Skills, None, reason);
             }
         }
     }
@@ -255,6 +285,7 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         &claude,
         &mut report,
         &mut entries,
+        sink,
     )
     .await;
 
@@ -377,17 +408,21 @@ fn build_claude_adapter(opts: &InstallOpts, project_root: &Path) -> ClaudeCodeAd
     adapter.with_project_root(project_root)
 }
 
+#[allow(clippy::too_many_lines)] // linear per-dep lifecycle (resolve → translate → install) with a sink call at each boundary; splitting would scatter the error-path parity
 async fn install_mcp_dep(
     dep: &DepSpec,
     client: &RegistryClient,
     claude: &ClaudeCodeAdapter,
     report: &mut InstallReport,
     entries: &mut BTreeMap<String, LockEntry>,
+    sink: &dyn ProgressSink,
 ) {
     let id = match dep {
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Registry(r) => r.name.clone(),
         DepSpec::Git(g) => {
+            sink.begin(&g.git);
+            sink.finish_failed(&g.git, "git deps not implemented for MCP yet");
             push_failed(
                 report,
                 g.git.clone(),
@@ -398,6 +433,11 @@ async fn install_mcp_dep(
             return;
         }
     };
+    // Label the bar by the *manifest* id for the whole lifecycle so the
+    // begin / phase / finish calls all address the same bar even though
+    // `mcp.id` (the resolved canonical id) may differ post-resolution.
+    sink.begin(&id);
+    sink.phase(&id, Phase::Resolve);
     debug!(target: "pakx::install", %id, "resolving mcp dep");
 
     let (pkg, source) = match resolve_federated(client, &id).await {
@@ -409,6 +449,7 @@ async fn install_mcp_dep(
         }
         Ok(Resolved::NotFound) => {
             warn!(target: "pakx::install", %id, "not in any federated registry");
+            sink.finish_failed(&id, "not found in any federated registry");
             push_failed(
                 report,
                 id.clone(),
@@ -419,6 +460,7 @@ async fn install_mcp_dep(
             return;
         }
         Err(e) => {
+            sink.finish_failed(&id, &e.to_string());
             push_failed(report, id.clone(), PackageType::Mcp, None, e.to_string());
             return;
         }
@@ -427,6 +469,7 @@ async fn install_mcp_dep(
     let transport = match translate(&pkg) {
         Ok(t) => t,
         Err(TranslateError::NoTransport { .. }) => {
+            sink.finish_failed(&id, "no installable transport advertised");
             push_failed(
                 report,
                 id.clone(),
@@ -437,6 +480,7 @@ async fn install_mcp_dep(
             return;
         }
         Err(e) => {
+            sink.finish_failed(&id, &e.to_string());
             push_failed(
                 report,
                 id.clone(),
@@ -448,6 +492,7 @@ async fn install_mcp_dep(
         }
     };
 
+    sink.phase(&id, Phase::Install);
     let mcp = McpServer {
         id: pkg.id.clone(),
         version: pkg.version.clone(),
@@ -457,6 +502,7 @@ async fn install_mcp_dep(
 
     match claude.install_mcp(&mcp).await {
         Ok(_) => {
+            sink.finish_ok(&id);
             push_ok(
                 report,
                 mcp.id.clone(),
@@ -465,11 +511,18 @@ async fn install_mcp_dep(
             );
             entries.insert(mcp.lockfile_key(), lock_entry_for(&mcp, integrity, source));
         }
-        Err(AdapterError::AlreadyInstalled { id }) => {
-            push_skipped(report, id, PackageType::Mcp, Some(mcp.version.clone()));
+        Err(AdapterError::AlreadyInstalled { id: installed_id }) => {
+            sink.finish_skipped(&id);
+            push_skipped(
+                report,
+                installed_id,
+                PackageType::Mcp,
+                Some(mcp.version.clone()),
+            );
             entries.insert(mcp.lockfile_key(), lock_entry_for(&mcp, integrity, source));
         }
         Err(e) => {
+            sink.finish_failed(&id, &e.to_string());
             push_failed(
                 report,
                 mcp.id,
@@ -640,6 +693,7 @@ fn lock_entry_for(mcp: &McpServer, integrity: Integrity, source: RegistrySource)
 /// whole install. The Claude Code path runs whenever a Claude home
 /// is configured (override or default), which it always is in the
 /// runner's `build_claude_adapter` path.
+#[allow(clippy::too_many_arguments)] // matches `install_bundle_dep`; the sink is presentation-only
 async fn install_skill_dep(
     dep: &DepSpec,
     source: &PakxSource,
@@ -648,12 +702,15 @@ async fn install_skill_dep(
     claude: &ClaudeCodeAdapter,
     report: &mut InstallReport,
     entries: &mut BTreeMap<String, LockEntry>,
+    sink: &dyn ProgressSink,
 ) {
     // Only `String(...)` shorthand is wired at v0.1 — git + registry
     // object specs need their own resolution paths (Phase C+).
     let shorthand = match dep {
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Git(g) => {
+            sink.begin(&g.git);
+            sink.finish_failed(&g.git, "git deps not implemented for skills yet");
             push_failed(
                 report,
                 g.git.clone(),
@@ -664,9 +721,15 @@ async fn install_skill_dep(
             return;
         }
         DepSpec::Registry(r) => {
+            let label = format!("{}/{}", r.registry, r.name);
+            sink.begin(&label);
+            sink.finish_failed(
+                &label,
+                "registry-object spec not implemented for skills yet",
+            );
             push_failed(
                 report,
-                format!("{}/{}", r.registry, r.name),
+                label,
                 PackageType::Skills,
                 None,
                 "registry-object spec not implemented for skills yet".into(),
@@ -675,9 +738,13 @@ async fn install_skill_dep(
         }
     };
 
+    sink.begin(&shorthand);
+    sink.phase(&shorthand, Phase::Resolve);
+
     let (_, _, requested_version) = match parse_skill_shorthand(&shorthand) {
         Ok(t) => t,
         Err(e) => {
+            sink.finish_failed(&shorthand, &e.to_string());
             push_failed(report, shorthand, PackageType::Skills, None, e.to_string());
             return;
         }
@@ -687,6 +754,7 @@ async fn install_skill_dep(
 
     // Install path: Claude Code only at v0.1. Other adapters will
     // grow their own extract logic as their adapters land.
+    sink.phase(&shorthand, Phase::Install);
     let claude_home = claude.config_dir();
     let resolved = match install_skill_from_pakx(
         source,
@@ -700,6 +768,7 @@ async fn install_skill_dep(
     {
         Ok(r) => r,
         Err(e) => {
+            sink.finish_failed(&shorthand, &format!("{e:#}"));
             push_failed(
                 report,
                 shorthand,
@@ -718,6 +787,7 @@ async fn install_skill_dep(
         resolved.version
     );
     entries.insert(lockfile_key, lock_entry_for_skill(&resolved));
+    sink.finish_ok(&shorthand);
     push_ok(
         report,
         resolved.id,
@@ -751,34 +821,35 @@ fn lock_entry_for_skill(resolved: &ResolvedSkill) -> LockEntry {
 /// `--no-pakx-registry` is set we fail each dep loudly — the same
 /// policy the skill path uses — because there is no other source that
 /// can satisfy the request.
+#[allow(clippy::too_many_arguments)] // linear fan-out; the sink is presentation-only
 async fn install_all_bundle_deps(
     manifest: &Manifest,
     pakx_source_with_url: Option<&(PakxSource, String)>,
     claude: &ClaudeCodeAdapter,
     report: &mut InstallReport,
     entries: &mut BTreeMap<String, LockEntry>,
+    sink: &dyn ProgressSink,
 ) {
     for (kind, deps) in bundle_deps(manifest) {
         let Some(deps) = deps else { continue };
         if let Some((source, base_url)) = pakx_source_with_url {
             let http = http_client();
             for dep in deps {
-                install_bundle_dep(kind, dep, source, &http, base_url, claude, report, entries)
-                    .await;
+                install_bundle_dep(
+                    kind, dep, source, &http, base_url, claude, report, entries, sink,
+                )
+                .await;
             }
         } else {
             for dep in deps {
                 let label = format!("{}/{}", kind.as_str(), dep.display_hint());
-                push_failed(
-                    report,
-                    label,
-                    kind,
-                    None,
-                    format!(
-                        "{} installs require pakx-registry; --no-pakx-registry refused",
-                        kind.as_str()
-                    ),
+                sink.begin(&label);
+                let reason = format!(
+                    "{} installs require pakx-registry; --no-pakx-registry refused",
+                    kind.as_str()
                 );
+                sink.finish_failed(&label, &reason);
+                push_failed(report, label, kind, None, reason);
             }
         }
     }
@@ -799,6 +870,7 @@ async fn install_bundle_dep(
     claude: &ClaudeCodeAdapter,
     report: &mut InstallReport,
     entries: &mut BTreeMap<String, LockEntry>,
+    sink: &dyn ProgressSink,
 ) {
     // Only the shorthand string form is wired at v0 — git + registry
     // object specs need their own resolution paths (Phase C+), same
@@ -806,33 +878,32 @@ async fn install_bundle_dep(
     let shorthand = match dep {
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Git(g) => {
-            push_failed(
-                report,
-                g.git.clone(),
-                kind,
-                None,
-                format!("git deps not implemented for {} yet", kind.as_str()),
-            );
+            let reason = format!("git deps not implemented for {} yet", kind.as_str());
+            sink.begin(&g.git);
+            sink.finish_failed(&g.git, &reason);
+            push_failed(report, g.git.clone(), kind, None, reason);
             return;
         }
         DepSpec::Registry(r) => {
-            push_failed(
-                report,
-                format!("{}/{}", r.registry, r.name),
-                kind,
-                None,
-                format!(
-                    "registry-object spec not implemented for {} yet",
-                    kind.as_str()
-                ),
+            let label = format!("{}/{}", r.registry, r.name);
+            let reason = format!(
+                "registry-object spec not implemented for {} yet",
+                kind.as_str()
             );
+            sink.begin(&label);
+            sink.finish_failed(&label, &reason);
+            push_failed(report, label, kind, None, reason);
             return;
         }
     };
 
+    sink.begin(&shorthand);
+    sink.phase(&shorthand, Phase::Resolve);
+
     let (_, _, requested_version) = match parse_skill_shorthand(&shorthand) {
         Ok(t) => t,
         Err(e) => {
+            sink.finish_failed(&shorthand, &e.to_string());
             push_failed(report, shorthand, kind, None, e.to_string());
             return;
         }
@@ -840,6 +911,7 @@ async fn install_bundle_dep(
 
     debug!(target: "pakx::install", kind = kind.as_str(), id = %shorthand, "resolving bundle dep");
 
+    sink.phase(&shorthand, Phase::Install);
     let claude_home = claude.config_dir();
     let resolved = match install_bundle_from_pakx(
         source,
@@ -854,6 +926,7 @@ async fn install_bundle_dep(
     {
         Ok(r) => r,
         Err(e) => {
+            sink.finish_failed(&shorthand, &format!("{e:#}"));
             push_failed(
                 report,
                 shorthand,
@@ -867,6 +940,7 @@ async fn install_bundle_dep(
 
     let lockfile_key = format!("{}/{}@{}", kind.as_str(), resolved.id, resolved.version);
     entries.insert(lockfile_key, lock_entry_for_bundle(&resolved));
+    sink.finish_ok(&shorthand);
     push_ok(report, resolved.id, kind, Some(resolved.version));
 }
 

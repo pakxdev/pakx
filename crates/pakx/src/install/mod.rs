@@ -3,8 +3,12 @@
 
 pub mod bundle;
 pub mod mcp_translate;
+pub mod progress;
 pub mod rollback;
 pub mod runner;
 pub mod skill;
 
-pub use runner::{run, InstallOpts, InstallReportEntry, InstallStatus, ADAPTER_WIRED_KINDS};
+pub use progress::MultiProgressSink;
+pub use runner::{
+    run, run_with_progress, InstallOpts, InstallReportEntry, InstallStatus, ADAPTER_WIRED_KINDS,
+};

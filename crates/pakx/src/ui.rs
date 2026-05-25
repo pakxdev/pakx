@@ -230,6 +230,20 @@ pub fn table() -> comfy_table::Table {
 // Indicatif spinner / progress bar wiring
 // ---------------------------------------------------------------------------
 
+/// Whether interactive progress (spinner / multi-bar) should render to
+/// stderr. Folds the same inputs the single [`spinner`] gates on:
+/// `--color always|never`, `NO_COLOR`, and `IsTerminal(stderr)`. When
+/// `false`, callers must construct hidden bars so CI logs / pipes /
+/// `--json` stdout stay byte-clean.
+///
+/// Exposed so the per-dep `MultiProgress` path in
+/// [`crate::install::progress`] makes the identical render decision as
+/// the legacy spinner instead of re-deriving it.
+#[must_use]
+pub fn stderr_progress_enabled() -> bool {
+    stderr_color()
+}
+
 /// Build a spinner with the project default style. Hidden (renders to
 /// `/dev/null`) when stderr is not a TTY so CI logs stay clean.
 pub fn spinner(message: impl Into<String>) -> indicatif::ProgressBar {
