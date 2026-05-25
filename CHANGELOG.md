@@ -6,6 +6,38 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-05-25
+
+### Fixed
+
+- **`pakx publish` no longer panics on certain registry responses.** After
+  a successful upload, `publish` byte-sliced the registry-returned sha256
+  to display a short digest. On a response whose digest was shorter than
+  expected — or contained a multibyte character — the slice landed on a
+  non-char boundary and panicked, turning a successful publish into a
+  crash with no actionable output. The digest is now shortened on
+  character boundaries (falling back to the full string when it is shorter
+  than the display width), so the post-upload summary renders cleanly
+  regardless of the exact registry response shape.
+- **`pakx add` and `pakx install` are now honest about what they did.**
+  Interactive runs no longer double-render their output when attached to a
+  TTY. `pakx add` warns and suppresses the usual "next step" hint when an
+  MCP entry has no installable transport (there is nothing to install, so
+  it no longer implies otherwise). Install failures now carry actionable
+  error messages instead of bare backend codes, and the `.mcp.json`
+  rollback path no longer clobbers an existing file. Dependencies for
+  not-yet-supported kinds are routed to *skipped* rather than reported as
+  *failed*, so a partially-supported manifest no longer reads as broken.
+- **UX and correctness hardening across the whole command surface.** Stream
+  discipline was tightened on `pakx update` and `pakx outdated` (status
+  noise no longer interleaves with machine-readable output). `pakx search`
+  now distinguishes a degraded registry response from a genuinely empty
+  result set. `pakx unpublish` gained a confirmation gate. `pakx manifest`
+  edits validate before writing so a rejected change can no longer leave a
+  half-written manifest on disk. Roughly fifteen further error and hint
+  messages across the command set were rewritten to be actionable rather
+  than terse.
+
 ## [0.1.7] — 2026-05-25
 
 ### Added
