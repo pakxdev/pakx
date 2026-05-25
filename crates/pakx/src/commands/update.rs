@@ -365,6 +365,9 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
         // version. The default `false` preserves the historical
         // behaviour for users who do not opt in.
         no_cache: args.no_cache,
+        // `pakx update` reconciliation keeps today's partial-install
+        // semantics; rollback is opt-in on `pakx install` only.
+        rollback_on_error: false,
     };
     let report = install_run(opts).await?;
     if !report.failed.is_empty() {

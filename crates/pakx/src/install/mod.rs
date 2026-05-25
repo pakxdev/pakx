@@ -3,6 +3,7 @@
 
 pub mod bundle;
 pub mod mcp_translate;
+pub mod rollback;
 pub mod runner;
 pub mod skill;
 
