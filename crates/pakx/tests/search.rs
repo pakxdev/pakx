@@ -121,6 +121,66 @@ async fn search_empty_results_prints_hint() {
         .stderr(predicate::str::contains("no results"));
 }
 
+/// Degraded vs. empty: when the only source errors (500), the merged
+/// result is empty — but that must NOT read as a genuinely-empty
+/// registry. A "N of M sources failed" warning on stderr distinguishes
+/// the degraded run. Without it, `pakx search` printed "no results" and
+/// exited 0, hiding the outage.
+#[tokio::test]
+async fn search_warns_when_all_sources_fail() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "anything",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
+        .assert()
+        .success()
+        // Degraded marker present.
+        .stderr(predicate::str::contains("source(s) failed"))
+        // Still reports no results (empty merged set).
+        .stderr(predicate::str::contains("no results"));
+}
+
+/// Companion: a genuinely-empty result (every source answered 200 with
+/// zero hits) must NOT carry the degraded warning — only "no results".
+#[tokio::test]
+async fn search_genuinely_empty_does_not_warn_about_failed_sources() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "ghost",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("no results"))
+        // No degraded warning on a clean empty run.
+        .stderr(predicate::str::contains("source(s) failed").not());
+}
+
 #[tokio::test]
 async fn search_json_emits_valid_array_with_expected_keys() {
     let server = MockServer::start().await;

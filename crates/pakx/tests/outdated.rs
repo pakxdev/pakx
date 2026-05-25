@@ -251,18 +251,27 @@ async fn outdated_exits_one_when_pakx_entry_is_outdated() {
         .code(1)
         .get_output()
         .clone();
+    // The human view (table + summary) lives on STDERR — one stream with
+    // the up-to-date verdict — so `pakx outdated --json` keeps stdout
+    // byte-clean. Round-93 single-stream fix.
+    let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("arwenizEr/hello-world"),
-        "stdout must list outdated id; got:\n{stdout}"
+        stderr.contains("arwenizEr/hello-world"),
+        "stderr must list outdated id; got stderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("0.1.0") && stdout.contains("0.1.2"),
-        "stdout must show current + latest; got:\n{stdout}"
+        stderr.contains("0.1.0") && stderr.contains("0.1.2"),
+        "stderr must show current + latest; got stderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("upgrade"),
-        "stdout must mark status=upgrade; got:\n{stdout}"
+        stderr.contains("upgrade"),
+        "stderr must mark status=upgrade; got stderr:\n{stderr}"
+    );
+    // Single-stream: the human (non-JSON) table must NOT land on stdout.
+    assert!(
+        !stdout.contains("arwenizEr/hello-world"),
+        "human table must not split onto stdout; got stdout:\n{stdout}"
     );
 }
 

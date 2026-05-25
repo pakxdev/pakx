@@ -99,7 +99,7 @@ fn why_renders_found_dep_with_full_context() {
         ))
         .stdout(predicate::str::contains("pinned in agents.lock at 0.1.2"))
         .stdout(predicate::str::contains(
-            "registry: pakx (https://registry.pakx.dev/api/v1/packages/arwenizEr/hello-world)",
+            "registry: pakx (https://pakx.dev/p/pakx/arwenizEr/hello-world)",
         ))
         .stdout(predicate::str::contains("adapter: wired (skills)"));
 }

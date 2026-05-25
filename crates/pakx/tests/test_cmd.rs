@@ -500,6 +500,37 @@ async fn test_online_resolves_deps_in_parallel() {
     );
 }
 
+/// A manifest made entirely of `skills:` deps (no `mcp:`) must NOT
+/// claim "all entries ok / manifest validated" — only `mcp:` is
+/// actually resolved today; every other kind is reported "not yet
+/// validated". The footer must be qualified so the exit-0 doesn't read
+/// as a full all-clear for a manifest of installable skills.
+#[test]
+fn test_offline_qualifies_footer_when_only_non_mcp_kinds_present() {
+    let project = TempDir::new().unwrap();
+    write_manifest(
+        project.path(),
+        "name: example\nversion: 0.1.0\ndependencies:\n  skills:\n    - alice/widget@0.1.0\n",
+    );
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["test", "--offline"])
+        .assert()
+        // Skills aren't resolved, but nothing FAILED either → exit 0
+        // with a HONEST footer.
+        .success()
+        // The skill row is reported as not-yet-validated.
+        .stdout(predicate::str::contains("skills/alice/widget"))
+        .stdout(predicate::str::contains("not yet validated"))
+        // The footer must NOT overclaim a full validation.
+        .stdout(predicate::str::contains("all entries ok").not())
+        .stdout(predicate::str::contains("manifest validated").not())
+        // It must instead state what was actually skipped.
+        .stdout(predicate::str::contains("only mcp"))
+        .stdout(predicate::str::contains("skipped"));
+}
+
 #[test]
 fn test_does_not_write_lockfile() {
     let project = TempDir::new().unwrap();

@@ -125,17 +125,46 @@ pub async fn run(args: UpgradeArgs) -> Result<()> {
         validate_base_url(url)?;
     }
 
-    let release: Release = http_client()
+    // Wrap the GitHub Releases round-trip with an actionable hint. The
+    // raw reqwest error for a 403 (unauthenticated rate-limit: 60 req/hr
+    // per IP) or a DNS/offline failure reads as opaque transport jargon
+    // ("error sending request for url …"); the user can't tell a
+    // rate-limit from a network outage. Map both the transport failure
+    // and a non-2xx status onto the same hint so `pakx upgrade` always
+    // explains *why* it couldn't check.
+    let gh_hint = "couldn't reach GitHub Releases to check for a newer pakx — \
+         likely rate-limited (GitHub allows 60 requests/hour unauthenticated) or offline. \
+         Retry later, or upgrade manually via your install channel.";
+    let response = http_client()
         .get(url)
         .header("user-agent", ua)
         .header("accept", "application/vnd.github+json")
         .send()
-        .await?
-        .error_for_status()?
+        .await
+        .with_context(|| gh_hint)?
+        .error_for_status()
+        .with_context(|| gh_hint)?;
+    let release: Release = response
         .json()
-        .await?;
+        .await
+        .context("GitHub Releases returned a response pakx couldn't parse")?;
 
     let latest = release.tag_name.trim_start_matches('v');
+
+    // Guard against an unparseable latest tag. `compare_semver` falls
+    // back to `(0,0,0)` for anything it can't parse — which would make
+    // CURRENT compare as *newer* and print the misleading "Running a dev
+    // build?" line, hiding the fact that we never actually learned the
+    // latest version. Surface a clear message and stop instead.
+    if parse_semver(latest).is_none() {
+        println!(
+            "couldn't parse the latest release version from GitHub (tag {:?}); \
+             skipping the up-to-date check. Upgrade manually via your install channel if needed.",
+            release.tag_name,
+        );
+        return Ok(());
+    }
+
     let cmp = compare_semver(CURRENT, latest);
 
     match cmp {
@@ -285,6 +314,14 @@ fn run_command(plan: &UpgradePlan) -> Result<()> {
     else {
         return Ok(());
     };
+
+    // Echo the exact command immediately before spawning, on every
+    // path that reaches here — including `--yes`, which skips the
+    // interactive confirm and so previously launched a child process
+    // (curl|sh, brew, cargo, …) with no on-screen indication of what
+    // was about to run. The child inherits stdio below, so its own
+    // output follows this line.
+    println!("{} running: {}", ui::glyph_info(), plan.command_display());
 
     let mut cmd = ProcessCommand::new(program);
     cmd.args(c_args);
@@ -574,21 +611,26 @@ enum Ordering {
     Greater,
 }
 
+/// Parse a `major.minor.patch` string (pre-release / build suffix
+/// stripped) into a comparable tuple. Returns `None` when any segment
+/// is non-numeric or there are too many segments — the caller uses this
+/// to distinguish "older / newer / equal" from "couldn't parse at all".
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    // Strip any pre-release suffix (`-rc.1`, `+build.5`).
+    let core = s.split(['-', '+']).next().unwrap_or(s);
+    let mut parts = core.splitn(3, '.').map(str::parse::<u64>);
+    let major = parts.next().transpose().ok()?.unwrap_or(0);
+    let minor = parts.next().transpose().ok()?.unwrap_or(0);
+    let patch = parts.next().transpose().ok()?.unwrap_or(0);
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
 fn compare_semver(a: &str, b: &str) -> Ordering {
-    let parse = |s: &str| -> Result<(u64, u64, u64), anyhow::Error> {
-        // Strip any pre-release suffix (`-rc.1`, `+build.5`).
-        let core = s.split(['-', '+']).next().unwrap_or(s);
-        let mut parts = core.splitn(3, '.').map(str::parse::<u64>);
-        let major = parts.next().transpose()?.unwrap_or(0);
-        let minor = parts.next().transpose()?.unwrap_or(0);
-        let patch = parts.next().transpose()?.unwrap_or(0);
-        if parts.next().is_some() {
-            return Err(anyhow!("too many version segments"));
-        }
-        Ok((major, minor, patch))
-    };
-    let av = parse(a).unwrap_or((0, 0, 0));
-    let bv = parse(b).unwrap_or((0, 0, 0));
+    let av = parse_semver(a).unwrap_or((0, 0, 0));
+    let bv = parse_semver(b).unwrap_or((0, 0, 0));
     match av.cmp(&bv) {
         std::cmp::Ordering::Less => Ordering::Less,
         std::cmp::Ordering::Equal => Ordering::Equal,
@@ -841,5 +883,27 @@ mod tests {
     fn semver_missing_segments_treated_as_zero() {
         assert_eq!(compare_semver("0.1", "0.1.0"), Ordering::Equal);
         assert_eq!(compare_semver("1", "1.0.0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn parse_semver_accepts_well_formed_versions() {
+        assert_eq!(parse_semver("0.1.2"), Some((0, 1, 2)));
+        assert_eq!(parse_semver("1"), Some((1, 0, 0)));
+        assert_eq!(parse_semver("2.3"), Some((2, 3, 0)));
+        // Pre-release / build suffix stripped before parsing.
+        assert_eq!(parse_semver("1.2.3-rc.1"), Some((1, 2, 3)));
+        assert_eq!(parse_semver("1.2.3+build"), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn parse_semver_rejects_unparseable_tags() {
+        // The finding-19 case: a non-numeric "latest" tag used to fall
+        // back to (0,0,0) inside `compare_semver`, making CURRENT look
+        // newer ("dev build?"). `parse_semver` returns `None` so the
+        // caller can surface a clear "couldn't parse" message instead.
+        assert_eq!(parse_semver("nightly"), None);
+        assert_eq!(parse_semver("v-unknown"), None);
+        assert_eq!(parse_semver("1.2.3.4"), None);
+        assert_eq!(parse_semver(""), None);
     }
 }

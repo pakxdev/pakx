@@ -96,10 +96,28 @@ pub async fn run(args: ListArgs) -> Result<()> {
     }
 
     let claude = build_claude(args.claude_home.as_deref(), &project_root);
+    // Reconcile against the on-disk adapter state. `None` means "no
+    // reconciliation was performed" — either `--no-check` was passed OR
+    // the adapter's `list()` itself errored. Previously a failed
+    // `claude.list()` was swallowed via `.ok()` and silently rendered
+    // every row as `unknown`, indistinguishable from `--no-check`. We
+    // now warn on stderr when the check FAILED so the user knows the
+    // `unknown` rows mean "couldn't verify", not "verified, no adapter".
     let on_disk = if args.no_check {
         None
     } else {
-        claude.list().await.ok()
+        match claude.list().await {
+            Ok(list) => Some(list),
+            Err(e) => {
+                eprintln!(
+                    "{} could not read installed state from the Claude adapter ({e}); \
+                     drift column shows `unknown` (re-run without the failing adapter, \
+                     or with --no-check to silence)",
+                    ui::glyph_warn_err(),
+                );
+                None
+            }
+        }
     };
 
     let entries: Vec<(&String, &LockEntry, &'static str)> = lock

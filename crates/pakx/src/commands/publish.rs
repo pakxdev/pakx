@@ -126,7 +126,17 @@ pub async fn run(args: PublishArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("not logged in to {} — run `pakx login`", args.registry))?;
 
     let pb = ui::spinner("packing");
-    let pack = pack_dir(&src, std::env::temp_dir().as_path())?;
+    // Pack into a `TempDir` guard rather than the bare system temp dir.
+    // `pack_dir` writes a `<name>-<version>.tgz` file into `out_dir`;
+    // packing straight into `std::env::temp_dir()` leaked that tarball
+    // into the user's temp forever (one orphaned `.tgz` per publish).
+    // The guard's `Drop` removes the directory (and the tarball inside)
+    // once we return — mirrors the round-39 cache-tempdir pattern. We
+    // keep `pack_tmp` bound through the upload so the directory survives
+    // until the function exits; `pack.bytes` already holds the archive
+    // contents in memory, so the on-disk file is only ever transient.
+    let pack_tmp = tempfile::TempDir::new().context("create pack temp dir")?;
+    let pack = pack_dir(&src, pack_tmp.path())?;
     pb.finish_and_clear();
     // Warnings stream to stderr regardless of `--json` so CI logs always
     // surface the publisher hygiene hints (missing `description:`, etc.)
@@ -216,13 +226,21 @@ pub async fn run(args: PublishArgs) -> Result<()> {
         .await
         .map_err(|e| handle_backend_err(&e, args.json))?;
     pb.finish_and_clear();
+    // Truncate the sha256 for the human line via `get(..16)`, NOT a raw
+    // byte-slice. The hash is a registry-returned string; a short or
+    // multibyte value would make `&upload.sha256[..16]` panic on a byte
+    // index that doesn't land on a char boundary — AFTER a successful
+    // upload, so the user would see a publish that "failed" despite the
+    // package being live. Fall back to the full string when it's shorter
+    // than 16 bytes.
+    let sha_display = upload.sha256.get(..16).unwrap_or(&upload.sha256);
     eprintln!(
         "{} uploaded {} v{} ({} bytes, sha256 {})",
         ui::glyph_ok_err(),
         ui::success_err(&upload.id),
         upload.version,
         upload.size_bytes,
-        &upload.sha256[..16]
+        sha_display,
     );
     eprintln!(
         "{}",

@@ -159,11 +159,27 @@ fn emit_cached(args: &WhoamiArgs, entry: &CredentialEntry) -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
-    let login = entry
-        .login
-        .clone()
-        .unwrap_or_else(|| "(unknown)".to_owned());
-    println!("{}", ui::success(&login));
+    // Mark the cached (offline / network-failure) view explicitly. A
+    // bare `(unknown)` previously read like a real username, and a
+    // cached login showed no "possibly-stale" marker — both hid the fact
+    // that we never reached the registry this run. When the cache holds
+    // no login at all (`None`) we say so rather than printing a literal
+    // `(unknown)` that looks like an account name.
+    match entry.login.as_deref() {
+        Some(login) => {
+            println!(
+                "{} {}",
+                ui::success(login),
+                ui::dim("(cached — offline; may be stale)"),
+            );
+        }
+        None => {
+            println!(
+                "{}",
+                ui::dim("cached credentials present but no login recorded (offline; may be stale)"),
+            );
+        }
+    }
     ExitCode::SUCCESS
 }
 

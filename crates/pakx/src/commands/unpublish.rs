@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Args;
+use inquire::Confirm;
 use pakx_core::{Credentials, DEFAULT_REGISTRY_URL};
 use pakx_registry_client::PakxBackend;
 
@@ -18,6 +19,12 @@ pub struct UnpublishArgs {
     /// Override the pakx-registry base URL. Defaults to <https://registry.pakx.dev>.
     #[arg(short = 'r', long = "registry", default_value = DEFAULT_REGISTRY_URL)]
     pub registry: String,
+
+    /// Skip the confirmation prompt. Required when stdin is not a TTY
+    /// (CI / piped shell) — otherwise the command bails rather than
+    /// silently unpublishing.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 
     #[arg(long, hide = true)]
     pub credentials_file: Option<PathBuf>,
@@ -40,6 +47,24 @@ pub async fn run(args: UnpublishArgs) -> Result<()> {
     let entry = creds
         .get(&args.registry)
         .ok_or_else(|| anyhow!("not logged in to {} — run `pakx login`", args.registry))?;
+
+    // Destructive: confirm before the soft-delete DELETE. A typo'd id
+    // (`pakx unpublish alice/widgett@0.1.0`) must not silently mutate
+    // the registry. With `--yes` the caller already consented; on a
+    // non-TTY without `--yes` this bails with a hint rather than hanging
+    // on a prompt that can never be answered (mirrors `pakx remove`).
+    let action = format!("unpublish {owner}/{name}@{version}");
+    if !ui::confirm_or_bail(args.yes, &action, || {
+        Confirm::new(&format!(
+            "Unpublish {owner}/{name}@{version}? (deprecates the version on the registry)"
+        ))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| anyhow!("prompt failed: {e}"))
+    })? {
+        eprintln!("aborted; registry unchanged");
+        return Ok(());
+    }
 
     let backend = PakxBackend::new(&args.registry);
     backend

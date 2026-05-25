@@ -22,7 +22,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SUPPORTED_CORE: &str = pakx_core::VERSION;
 
 pub use cache::{CacheDir, DEFAULT_TTL};
-pub use client::RegistryClient;
+pub use client::{RegistryClient, SearchOutcome};
 pub use device_auth::{
     DeviceAuthClient, DeviceAuthError, InitiateRequest, InitiateResponse, PollResponse, PollStatus,
 };
