@@ -6,6 +6,19 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-05-25
+
+### Fixed
+
+- **`pakx list` and other tables now align correctly when color is
+  enabled.** With a color terminal (or `--color always`), colored cells —
+  such as the green `[ok]` badge in `pakx list` — carry ANSI escape bytes
+  that the table renderer was counting toward column width. The escape
+  bytes inflated the measured width, so the box-drawing borders no longer
+  lined up. The table renderer is now ANSI-aware (comfy-table
+  `custom_styling`): columns are measured by their visible width, so
+  bordered tables align correctly whether or not color is on.
+
 ## [0.1.8] — 2026-05-25
 
 ### Fixed

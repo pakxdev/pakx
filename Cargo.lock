@@ -1222,7 +1222,7 @@ checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
 name = "pakx-agents"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-trait",
  "base64",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "pakx-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "pakx-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64",
  "dirs",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "pakx-registry-client"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-trait",
  "base64",
