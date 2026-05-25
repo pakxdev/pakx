@@ -46,7 +46,7 @@ cargo install pakx-cli
 Or pinned to a tag from source (requires Rust 1.87+):
 
 ```sh
-cargo install --git https://github.com/pakxdev/pakx --tag v0.1.5 --locked pakx-cli
+cargo install --git https://github.com/pakxdev/pakx --tag v0.1.6 --locked pakx-cli
 ```
 
 The crate name `pakx` on crates.io is taken by an unrelated project; the published binary crate is `pakx-cli`. The binary it installs is named `pakx`.
