@@ -11,7 +11,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path as wm_path};
+use wiremock::matchers::{any, method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const BIN: &str = "pakx";
@@ -361,4 +361,150 @@ async fn audit_json_empty_array_when_no_entries() {
         .clone();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(stdout.trim_end(), "[]");
+}
+
+#[tokio::test]
+async fn audit_offline_makes_no_network_call_and_exits_zero() {
+    // `--offline` must skip the live `fetch_version` probe entirely.
+    // Mount a catch-all expecting ZERO requests; wiremock asserts the
+    // expectation on `MockServer` drop. Pass the mock URL via
+    // `--pakx-base-url` so that, if offline mode regressed and DID hit
+    // the network, the call would land here and trip `expect(0)`.
+    let project = TempDir::new().unwrap();
+    let pakx_registry = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&pakx_registry)
+        .await;
+    // A deprecated-looking pin: online this would exit 1. Offline it
+    // cannot be confirmed, so it must exit 0.
+    std::fs::write(project.path().join("agents.lock"), pakx_lockfile("0.1.0")).unwrap();
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "audit",
+            "--offline",
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("skip"),
+        "offline pakx row must surface as skip; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("not checked (offline)"),
+        "offline skip must carry the honest note; got:\n{stdout}"
+    );
+    // `MockServer` drop here verifies expect(0): zero requests reached
+    // the mock, i.e. offline mode made no network call.
+}
+
+#[tokio::test]
+async fn audit_offline_json_emits_honest_skip_shape() {
+    // `--offline --json`: each pakx entry must be `skip` with
+    // `deprecatedAt: null` AND `note: "not checked (offline)"` so a
+    // consumer can tell "unknown offline" apart from "confirmed ok".
+    let project = TempDir::new().unwrap();
+    let pakx_registry = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&pakx_registry)
+        .await;
+    std::fs::write(
+        project.path().join("agents.lock"),
+        mixed_lockfile("0.1.0", "io.github.acme/cool", "1.2.0"),
+    )
+    .unwrap();
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "audit",
+            "--offline",
+            "--json",
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.ends_with('\n'), "stdout must end with newline");
+    let body = stdout.trim_end_matches('\n');
+    assert!(!body.contains('\n'), "json output must be single-line");
+    let rows: Value = serde_json::from_str(body).expect("json parses");
+    let rows = rows.as_array().expect("top-level array");
+    assert_eq!(rows.len(), 2, "both entries present offline");
+    let by_id: std::collections::HashMap<&str, &Value> = rows
+        .iter()
+        .filter_map(|r| r["id"].as_str().map(|id| (id, r)))
+        .collect();
+
+    let pakx_row = by_id
+        .get("arwenizEr/hello-world")
+        .expect("pakx row present");
+    assert_eq!(pakx_row["status"], "skip");
+    assert!(
+        pakx_row["deprecatedAt"].is_null(),
+        "offline pakx row carries deprecatedAt=null: {pakx_row:?}"
+    );
+    assert_eq!(
+        pakx_row["note"], "not checked (offline)",
+        "offline pakx row note must read honestly: {pakx_row:?}"
+    );
+
+    // Non-pakx entries skip structurally (no signal), distinct note.
+    let mcp_row = by_id.get("io.github.acme/cool").expect("mcp row present");
+    assert_eq!(mcp_row["status"], "skip");
+    assert_eq!(
+        mcp_row["note"], "no deprecation signal",
+        "non-pakx skip keeps its structural note: {mcp_row:?}"
+    );
+}
+
+#[tokio::test]
+async fn audit_online_still_exits_one_on_deprecated_regression() {
+    // Regression guard: with `--offline` ABSENT, the round-49 contract
+    // is byte-identical — a deprecated pakx pin exits 1 and surfaces a
+    // real `deprecatedAt`, no `note` field on the deprecated row.
+    let project = TempDir::new().unwrap();
+    let pakx_registry = MockServer::start().await;
+    mount_pakx_version(
+        &pakx_registry,
+        "arwenizEr",
+        "hello-world",
+        "0.1.0",
+        Some("2026-04-12T08:00:00Z"),
+    )
+    .await;
+    std::fs::write(project.path().join("agents.lock"), pakx_lockfile("0.1.0")).unwrap();
+
+    let out = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["audit", "--pakx-base-url", &pakx_registry.uri(), "--json"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let rows: Value = serde_json::from_str(stdout.trim()).expect("json parses");
+    let row = &rows.as_array().expect("array")[0];
+    assert_eq!(row["status"], "deprecated");
+    assert_eq!(row["deprecatedAt"], "2026-04-12T08:00:00Z");
+    assert!(
+        row.as_object().expect("object").get("note").is_none(),
+        "deprecated rows must NOT carry a note: {row:?}"
+    );
 }
