@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/pakxdev/pakx"
@@ -74,9 +74,9 @@ url = "2.5"
 # beyond `libc`.
 gethostname = "0.5"
 # Internal crates
-pakx-core = { path = "crates/pakx-core", version = "0.1.6" }
-pakx-agents = { path = "crates/pakx-agents", version = "0.1.6" }
-pakx-registry-client = { path = "crates/pakx-registry-client", version = "0.1.6" }
+pakx-core = { path = "crates/pakx-core", version = "0.1.7" }
+pakx-agents = { path = "crates/pakx-agents", version = "0.1.7" }
+pakx-registry-client = { path = "crates/pakx-registry-client", version = "0.1.7" }
 
 [workspace.dependencies.assert_cmd]
 version = "2.0"
