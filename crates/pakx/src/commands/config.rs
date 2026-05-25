@@ -21,14 +21,15 @@ pub struct ConfigArgs {
 
 #[allow(clippy::unused_async)]
 pub async fn run(args: ConfigArgs) -> Result<()> {
-    let credentials_path = Credentials::default_path().map_or_else(
-        |e| format!("<unavailable: {e}>"),
-        |p| p.display().to_string(),
-    );
-    let cache_dir = CacheDir::default_path().map_or_else(
-        || "<unavailable on this platform>".to_string(),
-        |c| c.root().display().to_string(),
-    );
+    // Resolve as `Option` so the `--json` surface can emit `null` for an
+    // unresolvable path rather than a literal `<unavailable: …>` string
+    // that a `jq` consumer would have to substring-match to detect. The
+    // human render still substitutes a readable placeholder below.
+    let credentials_path: Option<String> = Credentials::default_path()
+        .ok()
+        .map(|p| p.display().to_string());
+    let cache_dir: Option<String> =
+        CacheDir::default_path().map(|c| c.root().display().to_string());
 
     if args.json {
         // Force stdout to no-color before any future paint helper
@@ -48,6 +49,8 @@ pub async fn run(args: ConfigArgs) -> Result<()> {
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
             },
+            // `null` (not a `<unavailable>` string) when the path can't
+            // be resolved — distinguishable in a `jq` pipeline.
             "credentialsPath": credentials_path,
             "cacheDir": cache_dir,
             "registries": {
@@ -69,8 +72,18 @@ pub async fn run(args: ConfigArgs) -> Result<()> {
     );
     println!();
     println!("{}", ui::heading("paths:"));
-    println!("  credentials: {}", ui::dim(&credentials_path));
-    println!("  cache:       {}", ui::dim(&cache_dir));
+    println!(
+        "  credentials: {}",
+        ui::dim(credentials_path.as_deref().unwrap_or("(unavailable)")),
+    );
+    println!(
+        "  cache:       {}",
+        ui::dim(
+            cache_dir
+                .as_deref()
+                .unwrap_or("(unavailable on this platform)")
+        ),
+    );
     println!();
     println!("{}", ui::heading("registries:"));
     println!("  official-mcp: {}", ui::dim(OFFICIAL_MCP_BASE_URL));

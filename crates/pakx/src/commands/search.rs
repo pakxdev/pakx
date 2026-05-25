@@ -136,7 +136,23 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     )?;
     let query = args.query.unwrap_or_default();
     let kind_tag = args.kind.map(PackageType::as_str);
-    let results = client.search_kind(&query, kind_tag).await;
+    let outcome = client.search_kind_reporting(&query, kind_tag).await;
+    let results = &outcome.packages;
+
+    // Surface a degraded run. When every source erred (all 500 / DNS /
+    // rate-limited) the merged result is empty and — without this hint
+    // — `pakx search` prints "no results" and exits 0, which reads as a
+    // genuinely-empty registry rather than a transport failure. Warn on
+    // stderr (never stdout, so it can't pollute `--json | jq`) whenever
+    // at least one source failed, so a partial result is also flagged.
+    if outcome.failed > 0 {
+        eprintln!(
+            "{} {} of {} search source(s) failed (transient registry / network error) — results may be incomplete",
+            ui::glyph_warn_err(),
+            outcome.failed,
+            outcome.total,
+        );
+    }
 
     let truncated: Vec<_> = results.iter().take(args.limit).collect();
 

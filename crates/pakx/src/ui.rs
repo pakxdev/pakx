@@ -228,6 +228,14 @@ pub fn glyph_warn_err() -> String {
     paint("[warn]", Style::new().yellow().bold(), stderr_color())
 }
 
+/// `----` informational glyph routed through the stderr TTY check. Use
+/// when an `----`-prefixed line lands on stderr so the colour decision
+/// matches the stream it's written to (the stdout `glyph_info` would
+/// paint based on stdout's TTY state, which can differ from stderr's).
+pub fn glyph_info_err() -> String {
+    paint("----", Style::new().dimmed(), stderr_color())
+}
+
 // ---------------------------------------------------------------------------
 // Section heading + value helpers (stdout).
 // ---------------------------------------------------------------------------
@@ -235,6 +243,14 @@ pub fn glyph_warn_err() -> String {
 /// Bold heading for `pakx config`, `pakx info`, `pakx doctor`.
 pub fn heading(text: &str) -> String {
     paint(text, Style::new().bold(), stdout_color())
+}
+
+/// Bold heading routed through the stderr TTY check — for headings
+/// (`summary:`, `failed:`, …) that land on stderr alongside other
+/// progress lines. Keeps the colour decision stream-aware rather than
+/// inheriting the stdout `heading`'s TTY state.
+pub fn heading_err(text: &str) -> String {
+    paint(text, Style::new().bold(), stderr_color())
 }
 
 /// Dimmed value text — for context that should sit visually behind the

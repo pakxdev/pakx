@@ -15,7 +15,7 @@ use clap::{Args, ValueEnum};
 use inquire::Confirm;
 use pakx_core::manifest::{
     read_from, remove_shorthand, sections_containing, write_to, Manifest, PackageType,
-    RemoveOutcome,
+    RemoveOutcome, PACKAGE_TYPES,
 };
 
 use crate::redact::{project_root_for, redact_path};
@@ -127,8 +127,23 @@ pub async fn run(args: RemoveArgs) -> Result<()> {
     );
     // Single dimmed next-step hint — mirrors `pakx add`. U+2192
     // RIGHTWARDS ARROW written as an escape to keep source ASCII.
-    eprintln!("{}", ui::dim_err("\u{2192} next: pakx install"));
+    // Suppress it when the manifest now has zero dependencies: there is
+    // nothing left for `pakx install` to reconcile, so pointing the user
+    // at it would only send them to a no-op (and reads as if more work
+    // remains when the manifest is already empty).
+    if has_any_dependency(&manifest) {
+        eprintln!("{}", ui::dim_err("\u{2192} next: pakx install"));
+    }
     Ok(())
+}
+
+/// Whether the manifest still declares at least one dependency in any
+/// section. `remove_shorthand` clears an emptied section to `None`, so a
+/// removal that drops the last entry leaves every section `None` here.
+fn has_any_dependency(manifest: &Manifest) -> bool {
+    PACKAGE_TYPES
+        .iter()
+        .any(|kind| manifest.dependencies.get(*kind).is_some())
 }
 
 fn resolve_manifest_path(directory: Option<&Path>, manifest: Option<&Path>) -> Result<PathBuf> {

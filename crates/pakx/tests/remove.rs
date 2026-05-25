@@ -444,9 +444,12 @@ fn remove_last_dep_in_kind_leaves_manifest_that_pakx_test_accepts() {
 #[test]
 fn remove_routes_success_line_to_stdout_and_hint_to_stderr() {
     let temp = TempDir::new().unwrap();
+    // TWO deps so one remains after removal — the `→ next: pakx install`
+    // hint is only printed while the manifest still has dependencies
+    // left to reconcile (see the zero-deps companion below).
     write_manifest(
         temp.path(),
-        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/cool\n",
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/cool\n    - io.github.acme/keep\n",
     );
     let assertion = Command::cargo_bin(BIN)
         .unwrap()
@@ -467,5 +470,40 @@ fn remove_routes_success_line_to_stdout_and_hint_to_stderr() {
     assert!(
         stderr.contains("\u{2192} next: pakx install"),
         "→ next hint must be on stderr; got stderr:\n{stderr}"
+    );
+}
+
+/// When removing the LAST dependency leaves the manifest empty, the
+/// `→ next: pakx install` hint must be suppressed — there is nothing
+/// left for `pakx install` to reconcile, so the hint would only send the
+/// user to a no-op and read as if more work remained.
+#[test]
+fn remove_suppresses_install_hint_when_no_deps_remain() {
+    let temp = TempDir::new().unwrap();
+    write_manifest(
+        temp.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - io.github.acme/cool\n",
+    );
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["remove", "io.github.acme/cool", "--yes"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assertion.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    // Removal itself still reported.
+    assert!(
+        stdout.contains("removed io.github.acme/cool (mcp)"),
+        "success line must be on stdout; got stdout:\n{stdout}"
+    );
+    // Hint suppressed on BOTH streams now that the manifest is empty.
+    assert!(
+        !stdout.contains("\u{2192} next: pakx install"),
+        "hint must be suppressed on stdout; got stdout:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("\u{2192} next: pakx install"),
+        "hint must be suppressed on stderr when no deps remain; got stderr:\n{stderr}"
     );
 }

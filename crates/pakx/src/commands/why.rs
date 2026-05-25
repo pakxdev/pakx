@@ -33,7 +33,6 @@ use pakx_core::{
     read_lockfile_from, read_manifest_from, split_shorthand, LockEntry, Manifest, PackageType,
     RegistrySource, PACKAGE_TYPES,
 };
-use pakx_registry_client::PAKX_BASE_URL;
 use serde::Serialize;
 
 use crate::install::ADAPTER_WIRED_KINDS;
@@ -41,6 +40,11 @@ use crate::ui;
 
 const MANIFEST_FILENAME: &str = "agents.yml";
 const LOCKFILE_FILENAME: &str = "agents.lock";
+/// Public dashboard origin — the browsable package pages live here
+/// (`/p/pakx/<owner>/<name>`), distinct from the JSON API base
+/// (`pakx_registry_client::PAKX_BASE_URL` = `https://registry.pakx.dev`).
+/// Matches the URL `pakx publish` prints as its post-publish "view:" hint.
+const PAKX_DASHBOARD_URL: &str = "https://pakx.dev";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 #[value(rename_all = "lowercase")]
@@ -212,11 +216,15 @@ fn section_contains(manifest: &Manifest, kind: PackageType, id_no_version: &str)
 fn registry_url_for(registry: RegistrySource, id: &str) -> Option<String> {
     match registry {
         // Only the pakx registry has a stable per-package canonical
-        // URL the user can paste into a browser. The federated MCP /
-        // Smithery sources have one too but with different shapes;
-        // surfacing only the pakx one keeps the contract simple and
-        // matches the spec ("registry: pakx (https://...)").
-        RegistrySource::Pakx => Some(format!("{PAKX_BASE_URL}/api/v1/packages/{id}")),
+        // URL the user can paste into a browser. Surface the **dashboard**
+        // page (`https://pakx.dev/p/pakx/<id>`), NOT the JSON API endpoint
+        // — the human line literally says the URL is browsable, and a
+        // `…/api/v1/packages/<id>` link renders as raw JSON in a browser.
+        // This matches the dashboard URL `pakx publish` prints. The
+        // federated MCP / Smithery sources have package pages too but
+        // with different shapes; surfacing only the pakx one keeps the
+        // contract simple.
+        RegistrySource::Pakx => Some(format!("{PAKX_DASHBOARD_URL}/p/pakx/{id}")),
         RegistrySource::OfficialMcp
         | RegistrySource::Smithery
         | RegistrySource::Glama

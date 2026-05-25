@@ -99,6 +99,14 @@ pub async fn run(args: NewArgs) -> Result<()> {
 
     let files = templates_for(kind, &args.name, &description);
 
+    // Track whether the target dir already existed BEFORE we touched it.
+    // A mid-loop write failure (disk full, permission) used to leave a
+    // half-written scaffold tree behind with no cleanup and no
+    // breadcrumb. We now clean up the partial tree on failure — but only
+    // when WE created the directory, so we never delete a pre-existing
+    // dir the user pointed `--force` at (which may hold their own files).
+    let target_preexisted = target.exists();
+
     // Create the target dir + every nested parent before writing. The
     // `atomic_write` helper requires the parent dir to exist (it writes a
     // sibling `.tmp` then renames), so we materialise the directory tree
@@ -110,12 +118,19 @@ pub async fn run(args: NewArgs) -> Result<()> {
     let mut written: Vec<String> = Vec::with_capacity(files.len());
     for file in &files {
         let path = target.join(&file.relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", redact_path(parent, &project_root)))?;
+        let write_result = (|| -> Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", redact_path(parent, &project_root)))?;
+            }
+            atomic_write(&path, file.contents.as_bytes())
+                .with_context(|| format!("write {}", redact_path(&path, &project_root)))?;
+            Ok(())
+        })();
+        if let Err(e) = write_result {
+            cleanup_partial_scaffold(&target, target_preexisted, &cwd);
+            return Err(e);
         }
-        atomic_write(&path, file.contents.as_bytes())
-            .with_context(|| format!("write {}", redact_path(&path, &project_root)))?;
         written.push(file.relative.clone());
     }
     // Stable, deterministic ordering so the JSON + human output don't
@@ -129,6 +144,41 @@ pub async fn run(args: NewArgs) -> Result<()> {
 
     emit_human(kind, &args.name, &target, &written);
     Ok(())
+}
+
+/// Roll back a partial scaffold after a mid-loop write failure.
+///
+/// Only removes `target` when WE created it (`!preexisted`) — a
+/// pre-existing dir the user pointed `--force` at may hold their own
+/// files we must never delete. When the removal itself fails (or the
+/// dir pre-existed) we leave a breadcrumb on stderr so the user knows
+/// where the partial tree is and can clean it up by hand. Best-effort:
+/// the caller still returns the original write error regardless.
+fn cleanup_partial_scaffold(target: &Path, preexisted: bool, cwd: &Path) {
+    if preexisted {
+        eprintln!(
+            "{} partial scaffold left in pre-existing directory {} — review and clean up by hand",
+            ui::glyph_warn_err(),
+            redact_path(target, cwd),
+        );
+        return;
+    }
+    match std::fs::remove_dir_all(target) {
+        Ok(()) => {
+            eprintln!(
+                "{} scaffold failed; removed the partial directory {}",
+                ui::glyph_warn_err(),
+                redact_path(target, cwd),
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "{} scaffold failed and the partial directory {} could not be removed ({e}) — clean it up by hand",
+                ui::glyph_warn_err(),
+                redact_path(target, cwd),
+            );
+        }
+    }
 }
 
 /// The five scaffoldable kinds. `mcp` is deliberately excluded — see the

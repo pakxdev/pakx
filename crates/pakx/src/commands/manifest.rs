@@ -222,13 +222,10 @@ fn run_get(manifest_path: &std::path::Path, args: &GetArgs) -> Result<ExitCode> 
 }
 
 fn run_set(manifest_path: &std::path::Path, args: &SetArgs) -> Result<ExitCode> {
-    // Snapshot the raw on-disk bytes BEFORE any in-memory edit. We
-    // use this for the rollback path if the post-write schema check
-    // fails — without it a hostile `set` would leave the manifest in
-    // a state subsequent reads (`pakx test`, `pakx install`) refuse
-    // to parse, and the user would have to hand-edit the file to
-    // recover. `None` when the manifest didn't yet exist; the
-    // rollback in that case deletes the file we created.
+    // Snapshot the raw on-disk bytes BEFORE any in-memory edit — used
+    // only to decide whether the manifest was already schema-valid
+    // (below). The invalid-result path no longer writes anything, so
+    // these bytes are no longer needed for a rollback.
     let original_bytes = std::fs::read(manifest_path).ok();
 
     // Did the manifest already satisfy the typed schema BEFORE this
@@ -237,8 +234,8 @@ fn run_set(manifest_path: &std::path::Path, args: &SetArgs) -> Result<ExitCode> 
     // chicken-and-egg trap (`pakx manifest set` is the documented way
     // to repair a broken manifest). The schema-guard only fires when
     // the pre-edit manifest parsed cleanly, so a clean → broken
-    // transition gets rolled back but a broken → still-broken edit is
-    // permitted. The pre-edit parse is best-effort; any read or parse
+    // transition is refused (nothing written) but a broken →
+    // still-broken edit is permitted. The pre-edit parse is best-effort; any read or parse
     // error short-circuits to "skip the guard" so we never block on
     // I/O quirks (file missing on first-set, mid-edit lock, etc.).
     let pre_was_schema_valid = original_bytes
@@ -276,53 +273,63 @@ fn run_set(manifest_path: &std::path::Path, args: &SetArgs) -> Result<ExitCode> 
         b.push(b'\n');
         b
     };
+    // Schema-guard BEFORE writing. `Manifest` is
+    // `#[serde(deny_unknown_fields)]`, so any top-level key the typed
+    // reader doesn't recognise (typo'd `descriptio`, an unmodelled
+    // `homepage`, …) makes `pakx test` / `pakx install` refuse to parse
+    // the file on the next run. Without this guard a `set` of any
+    // unmodelled key silently corrupts the manifest.
+    //
+    // The guard runs against the in-memory `bytes` we're ABOUT to write,
+    // so an invalid result never touches disk — previously the code
+    // wrote first, re-read, validated, then rolled back on failure,
+    // which left schema-invalid bytes on disk for the duration of that
+    // window (a concurrent `pakx test` / editor reload could observe
+    // the bad state, and a crash mid-window would leave it corrupted).
+    // Validating up front collapses the write + rollback into a single
+    // refusal — the original file is never modified on the invalid path.
+    //
+    // **Gated on pre-edit validity**: a manifest already broken (by a
+    // previous lax `set`, by hand-editing, by an additive backend field
+    // the CLI doesn't model yet) must not become un-fixable via
+    // `pakx manifest set`. The guard therefore only fires when the
+    // pre-edit bytes round-tripped through `parse_manifest` successfully
+    // — clean → broken transitions are refused, broken → still-broken
+    // edits are allowed through verbatim (matching the v0 textual-mutator
+    // contract for the repair case).
+    if pre_was_schema_valid {
+        let render_body = std::str::from_utf8(&bytes)
+            .map_err(|e| anyhow!("schema-guard: serialized manifest is not valid UTF-8: {e}"))?;
+        if let Err(schema_err) = parse_manifest(render_body, Some(manifest_path)) {
+            let top_level = top_level_offending_key(&args.path);
+            // Two render shapes: a known top-level-key problem gets
+            // the friendlier "supported keys" hint; anything deeper
+            // gets the raw schema error (the path-parser's mid-tree
+            // errors are already actionable on their own). The original
+            // manifest is untouched (we never wrote), so the messages no
+            // longer claim a "restore" / "rolled back" — nothing was
+            // written to roll back.
+            return Err(match top_level {
+                Some(key) if !MANIFEST_TOP_LEVEL_KEYS.contains(&key.as_str()) => anyhow!(
+                    "key '{key}' is not a recognized manifest field. \
+                     Supported top-level keys: {supported}. \
+                     Manifest left unchanged.",
+                    supported = MANIFEST_TOP_LEVEL_KEYS.join(", "),
+                ),
+                _ => anyhow!(
+                    "set would produce a schema-invalid manifest (not written): {schema_err}"
+                ),
+            });
+        }
+    }
+
+    // Validated (or pre-edit-broken repair case): now it's safe to write.
     atomic_write(manifest_path, &bytes).with_context(|| {
         format!(
             "write {}",
             redact_path(manifest_path, &project_root_for(manifest_path))
         )
     })?;
-
-    // Schema-guard the freshly-written manifest. `Manifest` is
-    // `#[serde(deny_unknown_fields)]`, so any top-level key the
-    // typed reader doesn't recognise (typo'd `descriptio`, an
-    // unmodelled `homepage`, …) makes `pakx test` / `pakx install`
-    // refuse to parse the file on the next run. Without this guard
-    // a `set` of any unmodelled key silently corrupts the manifest;
-    // the user only finds out the next time they run a parsing
-    // command, by which point they've forgotten what they edited.
-    //
-    // **Gated on pre-edit validity**: a manifest already broken (by
-    // a previous lax `set`, by hand-editing, by an additive backend
-    // field the CLI doesn't model yet) must not become un-fixable
-    // via `pakx manifest set`. The guard therefore only fires when
-    // the pre-edit bytes round-tripped through `parse_manifest`
-    // successfully — clean → broken transitions get rolled back,
-    // broken → still-broken edits are allowed through verbatim
-    // (matching the v0 textual-mutator contract for the repair
-    // case).
-    if pre_was_schema_valid {
-        let render_body = std::str::from_utf8(&bytes).map_err(|e| {
-            anyhow!("schema-guard: freshly-written manifest is not valid UTF-8: {e}")
-        })?;
-        if let Err(schema_err) = parse_manifest(render_body, Some(manifest_path)) {
-            rollback_manifest_write(manifest_path, original_bytes.as_deref())?;
-            let top_level = top_level_offending_key(&args.path);
-            // Two render shapes: a known top-level-key problem gets
-            // the friendlier "supported keys" hint; anything deeper
-            // gets the raw schema error (the path-parser's mid-tree
-            // errors are already actionable on their own).
-            return Err(match top_level {
-                Some(key) if !MANIFEST_TOP_LEVEL_KEYS.contains(&key.as_str()) => anyhow!(
-                    "key '{key}' is not a recognized manifest field. \
-                     Supported top-level keys: {supported}. \
-                     Original manifest restored.",
-                    supported = MANIFEST_TOP_LEVEL_KEYS.join(", "),
-                ),
-                _ => anyhow!("set produced a schema-invalid manifest (rolled back): {schema_err}"),
-            });
-        }
-    }
 
     println!(
         "{} set {} in {}",
@@ -331,49 +338,6 @@ fn run_set(manifest_path: &std::path::Path, args: &SetArgs) -> Result<ExitCode> 
         redact_path(manifest_path, &project_root_for(manifest_path)),
     );
     Ok(ExitCode::SUCCESS)
-}
-
-/// Restore the original manifest bytes (or delete the file when the
-/// original didn't exist). Used by [`run_set`] to undo a write that
-/// produced a schema-invalid file. Failures here are themselves an
-/// error — we'd rather surface the rollback failure than silently
-/// leave the user with a corrupted manifest.
-fn rollback_manifest_write(
-    manifest_path: &std::path::Path,
-    original_bytes: Option<&[u8]>,
-) -> Result<()> {
-    original_bytes.map_or_else(
-        || rollback_via_delete(manifest_path),
-        |bytes| rollback_via_restore(manifest_path, bytes),
-    )
-}
-
-/// Rollback branch: original bytes existed → restore them via
-/// `atomic_write`. Surfaces any write error with the redacted manifest
-/// path so CI logs don't leak the absolute path.
-fn rollback_via_restore(manifest_path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    atomic_write(manifest_path, bytes).with_context(|| {
-        format!(
-            "rollback {}",
-            redact_path(manifest_path, &project_root_for(manifest_path))
-        )
-    })
-}
-
-/// Rollback branch: no original bytes → the file didn't exist pre-
-/// write and we just created it. `remove_file` returning `NotFound` is
-/// fine (the user-visible state matches the pre-call state). Anything
-/// else (permission, busy) we surface so the user knows the rollback
-/// didn't fully succeed.
-fn rollback_via_delete(manifest_path: &std::path::Path) -> Result<()> {
-    match std::fs::remove_file(manifest_path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(anyhow!(
-            "rollback could not delete {}: {e}",
-            redact_path(manifest_path, &project_root_for(manifest_path)),
-        )),
-    }
 }
 
 /// Extract the first dot-path segment (the offending top-level

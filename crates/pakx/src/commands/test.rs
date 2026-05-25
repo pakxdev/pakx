@@ -156,13 +156,30 @@ pub async fn run(args: TestArgs) -> Result<()> {
         check_online(&manifest, &client, &mut failures).await;
     }
 
-    report_unhandled(&manifest);
+    let skipped = report_unhandled(&manifest);
 
     if failures == 0 {
-        println!("\n{}", ui::heading("all entries ok"));
-        // Single dimmed footer so the user sees the manifest-level
-        // outcome at a glance after the per-entry rows.
-        println!("{}", ui::dim("\u{2192} manifest validated"));
+        // Honest footer. Only `mcp:` deps are actually resolved today;
+        // skills / subagents / prompts / commands / hooks entries are
+        // reported "not yet validated" per-row but were previously
+        // followed by an unconditional "all entries ok / manifest
+        // validated" — a false all-clear for a manifest made entirely
+        // of installable skills. Qualify the footer so the exit-0 never
+        // overclaims: it now states exactly how many entries of other
+        // kinds were skipped rather than validated.
+        if skipped == 0 {
+            println!("\n{}", ui::heading("all entries ok"));
+            println!("{}", ui::dim("\u{2192} manifest validated"));
+        } else {
+            println!("\n{}", ui::heading("mcp entries ok"));
+            println!(
+                "{}",
+                ui::dim(&format!(
+                    "\u{2192} only mcp: resolved; {skipped} entr{} of other kinds skipped (not validated)",
+                    if skipped == 1 { "y" } else { "ies" },
+                ))
+            );
+        }
         Ok(())
     } else {
         anyhow::bail!("{failures} entry/entries failed validation")
@@ -310,7 +327,11 @@ async fn check_online(manifest: &Manifest, client: &RegistryClient, failures: &m
     }
 }
 
-fn report_unhandled(manifest: &Manifest) {
+/// Print a per-entry "not yet validated" row for every dep of a kind
+/// the online/offline resolver doesn't cover yet (everything but
+/// `mcp:`), and return how many such entries were skipped so the caller
+/// can qualify the success footer instead of claiming a full all-clear.
+fn report_unhandled(manifest: &Manifest) -> usize {
     let groups: [(PackageType, Option<&Vec<DepSpec>>); 5] = [
         (PackageType::Skills, manifest.dependencies.skills.as_ref()),
         (
@@ -350,14 +371,7 @@ fn report_unhandled(manifest: &Manifest) {
             skipped += 1;
         }
     }
-    if skipped > 0 {
-        eprintln!(
-            "{}",
-            ui::dim_err(&format!(
-                "note: skipped {skipped} entries (only mcp: validated in this version)"
-            ))
-        );
-    }
+    skipped
 }
 
 fn dep_id(dep: &DepSpec) -> String {

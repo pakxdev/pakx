@@ -366,7 +366,12 @@ async fn info_500_renders_clean_error() {
         .unwrap()
         .args(["info", "ghost/server", "--registry", &server.uri()])
         .assert()
-        .failure();
+        .failure()
+        // Round-93 finding 14: the detail path maps a 5xx onto an
+        // actionable hint instead of dumping the raw reqwest status
+        // error. Mirrors the friendlier `--version` path.
+        .stderr(predicate::str::contains("server error"))
+        .stderr(predicate::str::contains("retry"));
 }
 
 /// `pakx info` against a registry returning non-JSON body must

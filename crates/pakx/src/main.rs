@@ -9,6 +9,7 @@ mod commands;
 mod install;
 mod pack;
 mod redact;
+mod registry_hint;
 mod registry_url;
 mod resolve;
 mod ui;

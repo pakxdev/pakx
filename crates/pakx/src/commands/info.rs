@@ -153,9 +153,25 @@ pub async fn run(args: InfoArgs) -> Result<()> {
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(anyhow!("{}/{} not found on {}", owner, name, args.registry));
     }
-    let response = response
-        .error_for_status()
-        .map_err(|e| anyhow!("registry returned an error: {e}"))?;
+    // Map a 429 / 5xx onto an actionable hint instead of dumping the raw
+    // reqwest status error. Mirrors the friendlier handling on the
+    // `--version` detail path so both info routes read the same way.
+    let status = response.status();
+    let response = response.error_for_status().map_err(|e| {
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            anyhow!(
+                "{} is rate-limiting requests (429) — retry shortly",
+                args.registry
+            )
+        } else if status.is_server_error() {
+            anyhow!(
+                "{} returned a server error ({status}) — likely transient; retry shortly",
+                args.registry
+            )
+        } else {
+            anyhow!("registry returned an error: {e}")
+        }
+    })?;
     let detail: PackageDetail = response
         .json()
         .await

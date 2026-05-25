@@ -13,6 +13,29 @@ pub struct RegistryClient {
     sources: Vec<Box<dyn Source>>,
 }
 
+/// Result of a fan-out search that reports per-source health alongside
+/// the merged hits.
+///
+/// The plain [`RegistryClient::search`] / [`RegistryClient::search_kind`]
+/// helpers drop per-source failures to `tracing::warn` and return only
+/// the merged `Vec<Package>` — which means a CLI calling them cannot
+/// tell "every source genuinely returned zero hits" apart from "every
+/// source erred (500 / DNS / rate-limit) so we have nothing to show".
+/// Both render as an empty result and a `no results` exit-0, hiding a
+/// degraded run behind a clean one.
+///
+/// [`RegistryClient::search_kind_reporting`] returns this struct so the
+/// caller can surface "N of M sources failed" when `failed > 0`.
+#[derive(Debug, Clone)]
+pub struct SearchOutcome {
+    /// Merged, deduped hits across every source that succeeded.
+    pub packages: Vec<Package>,
+    /// How many registered sources returned an error.
+    pub failed: usize,
+    /// How many sources were queried in total.
+    pub total: usize,
+}
+
 impl RegistryClient {
     /// Construct an empty client. Add sources via [`Self::with_source`].
     #[must_use]
@@ -60,9 +83,23 @@ impl RegistryClient {
     ///
     /// `kind == None` is identical to [`Self::search`].
     pub async fn search_kind(&self, query: &str, kind: Option<&str>) -> Vec<Package> {
+        self.search_kind_reporting(query, kind).await.packages
+    }
+
+    /// Like [`Self::search_kind`], but returns a [`SearchOutcome`] that
+    /// carries per-source health (`failed` / `total`) alongside the
+    /// merged hits. Per-source failures are still logged via
+    /// `tracing::warn`; the counts let a caller distinguish a degraded
+    /// run (some/all sources erred → empty result) from a genuinely
+    /// empty one (every source answered, none matched). See
+    /// [`SearchOutcome`] for why this matters.
+    pub async fn search_kind_reporting(&self, query: &str, kind: Option<&str>) -> SearchOutcome {
         let Some(kind) = kind else {
-            return self.search(query).await;
+            // Unfiltered path mirrors `search` but threads the health
+            // counters through the same fan-out.
+            return self.search_excluding_reporting(query, None).await;
         };
+        let total = self.sources.len();
         let futures = self.sources.iter().map(|s| async move {
             let tag = s.tag();
             (tag, s.search_kind(query, Some(kind)).await)
@@ -71,16 +108,22 @@ impl RegistryClient {
             join_all(futures).await;
 
         let mut out: Vec<Package> = Vec::new();
+        let mut failed = 0usize;
         for (tag, res) in results {
             match res {
                 Ok(packages) => out.extend(packages),
                 Err(e) => {
+                    failed += 1;
                     warn!(target: "pakx::registry", source = ?tag, error = %e, "source search_kind failed");
                 }
             }
         }
         out.retain(|pkg| kind_matches(pkg, kind));
-        dedupe_by_source_id(out)
+        SearchOutcome {
+            packages: dedupe_by_source_id(out),
+            failed,
+            total,
+        }
     }
 
     /// Same as [`Self::search`], but skip the source matching `exclude`.
@@ -97,6 +140,24 @@ impl RegistryClient {
         query: &str,
         exclude: Option<RegistrySource>,
     ) -> Vec<Package> {
+        self.search_excluding_reporting(query, exclude)
+            .await
+            .packages
+    }
+
+    /// Like [`Self::search_excluding`], but returns a [`SearchOutcome`]
+    /// with per-source health counters. `total` counts only the sources
+    /// actually queried (after the `exclude` filter).
+    pub async fn search_excluding_reporting(
+        &self,
+        query: &str,
+        exclude: Option<RegistrySource>,
+    ) -> SearchOutcome {
+        let total = self
+            .sources
+            .iter()
+            .filter(|s| exclude.is_none_or(|tag| s.tag() != tag))
+            .count();
         let futures = self
             .sources
             .iter()
@@ -109,15 +170,21 @@ impl RegistryClient {
             join_all(futures).await;
 
         let mut out: Vec<Package> = Vec::new();
+        let mut failed = 0usize;
         for (tag, res) in results {
             match res {
                 Ok(packages) => out.extend(packages),
                 Err(e) => {
+                    failed += 1;
                     warn!(target: "pakx::registry", source = ?tag, error = %e, "source search failed");
                 }
             }
         }
-        dedupe_by_source_id(out)
+        SearchOutcome {
+            packages: dedupe_by_source_id(out),
+            failed,
+            total,
+        }
     }
 
     /// Fetch a package by `(source, id)`. Returns `NotFound` if no source
@@ -226,6 +293,32 @@ mod tests {
         }
     }
 
+    /// In-memory `Source` whose `search` always errors — used to assert
+    /// the `SearchOutcome` failure counter distinguishes a degraded run
+    /// from a genuinely-empty one.
+    struct FailingSource {
+        tag: RegistrySource,
+    }
+
+    #[async_trait]
+    impl Source for FailingSource {
+        fn tag(&self) -> RegistrySource {
+            self.tag
+        }
+        async fn search(&self, _query: &str) -> Result<Vec<Package>, RegistryError> {
+            Err(RegistryError::Decode {
+                source_tag: tag_to_static_str(self.tag),
+                message: "boom".to_owned(),
+            })
+        }
+        async fn fetch(&self, id: &str) -> Result<Package, RegistryError> {
+            Err(RegistryError::NotFound {
+                source_tag: tag_to_static_str(self.tag),
+                id: id.to_owned(),
+            })
+        }
+    }
+
     fn pkg(source: RegistrySource, id: &str, kind: Option<&str>) -> Package {
         Package {
             id: id.to_owned(),
@@ -325,5 +418,62 @@ mod tests {
         }));
         let hits = client.search_kind("", None).await;
         assert_eq!(hits.len(), 2);
+    }
+
+    /// `search_kind_reporting` counts per-source failures so a caller can
+    /// distinguish a degraded run (all sources erred → empty) from a
+    /// genuinely-empty one. Here BOTH sources error: `failed == total`,
+    /// and the merged hit list is empty.
+    #[tokio::test]
+    async fn search_kind_reporting_counts_all_failed_sources() {
+        let client = RegistryClient::new()
+            .with_source(Box::new(FailingSource {
+                tag: RegistrySource::OfficialMcp,
+            }))
+            .with_source(Box::new(FailingSource {
+                tag: RegistrySource::Smithery,
+            }));
+
+        let outcome = client.search_kind_reporting("anything", Some("mcp")).await;
+        assert!(outcome.packages.is_empty());
+        assert_eq!(outcome.failed, 2);
+        assert_eq!(outcome.total, 2);
+    }
+
+    /// A genuinely-empty run: every source answers (no error) but returns
+    /// zero hits. `failed == 0` so the CLI does NOT print a degraded
+    /// warning — the result is honestly empty.
+    #[tokio::test]
+    async fn search_kind_reporting_zero_failures_when_sources_answer_empty() {
+        let client = RegistryClient::new().with_source(Box::new(StubSource {
+            tag: RegistrySource::OfficialMcp,
+            packages: vec![],
+        }));
+
+        let outcome = client.search_kind_reporting("ghost", Some("mcp")).await;
+        assert!(outcome.packages.is_empty());
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.total, 1);
+    }
+
+    /// Partial degradation: one source errors, one succeeds with a hit.
+    /// The hit survives; `failed == 1`, `total == 2` — the CLI flags the
+    /// partial result without hiding the data it did get.
+    #[tokio::test]
+    async fn search_kind_reporting_partial_failure_keeps_good_hits() {
+        let client = RegistryClient::new()
+            .with_source(Box::new(StubSource {
+                tag: RegistrySource::OfficialMcp,
+                packages: vec![pkg(RegistrySource::OfficialMcp, "io.x/srv", None)],
+            }))
+            .with_source(Box::new(FailingSource {
+                tag: RegistrySource::Smithery,
+            }));
+
+        let outcome = client.search_kind_reporting("", Some("mcp")).await;
+        assert_eq!(outcome.packages.len(), 1);
+        assert_eq!(outcome.packages[0].id, "io.x/srv");
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.total, 2);
     }
 }

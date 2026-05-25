@@ -244,9 +244,16 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
         let action = format!("update {}", plan.id_no_version);
         if !ui::confirm_or_bail(auto_proceed, &action, || confirm_update(&plan))? {
             kept += 1;
-            println!(
+            // Human progress goes to stderr so it shares ONE stream with
+            // the summary + "→ running pakx install" + reconcile lines
+            // below. Mixing per-update lines on stdout while the rest
+            // landed on stderr split the human narrative across two
+            // streams (`pakx update 2>/dev/null` showed only half the
+            // story). `pakx update` has no `--json` mode, so stdout
+            // carries nothing machine-readable to protect.
+            eprintln!(
                 "{} kept {} at the existing pin",
-                ui::glyph_info(),
+                ui::glyph_info_err(),
                 plan.id_no_version
             );
             continue;
@@ -261,9 +268,9 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
             args.kind.map(UpdateKind::to_core),
         )?;
         if args.dry_run {
-            println!(
+            eprintln!(
                 "{} would update {} -> {} ({})",
-                ui::glyph_info(),
+                ui::glyph_info_err(),
                 plan.id_no_version,
                 plan.new_version,
                 kind.as_str(),
@@ -321,10 +328,10 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
         let registry = plan
             .registry_tag
             .map_or_else(String::new, |t| format!(" [{t}]"));
-        println!(
+        eprintln!(
             "{} updated {} to {}  ({} -> {}){}",
-            ui::glyph_ok(),
-            ui::success(&plan.id_no_version),
+            ui::glyph_ok_err(),
+            ui::success_err(&plan.id_no_version),
             plan.new_version,
             previous,
             plan.new_version,
@@ -346,7 +353,7 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
             || String::from("\u{2192} next: pakx install"),
             |dir| format!("\u{2192} next: pakx install --directory {}", dir.display()),
         );
-        println!("{}", ui::dim(&hint));
+        eprintln!("{}", ui::dim_err(&hint));
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -378,7 +385,7 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
     };
     let report = install_run(opts).await?;
     if !report.failed.is_empty() {
-        eprintln!("{}", ui::heading("failed:"));
+        eprintln!("{}", ui::heading_err("failed:"));
         for (id, reason) in &report.failed {
             eprintln!("  {} {id}: {reason}", ui::glyph_fail_err());
         }
@@ -659,7 +666,7 @@ fn print_summary(updated: usize, kept: usize) {
     eprintln!();
     eprintln!(
         "{}: updated {}, kept {}",
-        ui::heading("summary"),
+        ui::heading_err("summary"),
         if updated == 0 {
             "0".to_string()
         } else {

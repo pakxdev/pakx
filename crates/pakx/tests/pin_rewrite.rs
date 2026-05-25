@@ -208,14 +208,23 @@ async fn update_yes_rewrites_manifest_to_latest_then_installs() {
         .success()
         .get_output()
         .clone();
+    // Round-93 single-stream fix: `pakx update` has no `--json` mode, so
+    // ALL human lines (per-update, summary, reconcile) go to stderr — one
+    // stream — rather than splitting per-update onto stdout.
+    let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("arwenizEr/hello-world"),
-        "stdout should list the updated id; got:\n{stdout}"
+        stderr.contains("arwenizEr/hello-world"),
+        "stderr should list the updated id; got stderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("0.1.2"),
-        "stdout should reference the new pin; got:\n{stdout}"
+        stderr.contains("0.1.2"),
+        "stderr should reference the new pin; got stderr:\n{stderr}"
+    );
+    // The per-update human line must NOT split onto stdout.
+    assert!(
+        !stdout.contains("updated arwenizEr/hello-world"),
+        "update human line must not land on stdout; got stdout:\n{stdout}"
     );
 
     // Manifest must now pin 0.1.2.
@@ -303,10 +312,11 @@ async fn update_dry_run_does_not_modify_files() {
         .success()
         .get_output()
         .clone();
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // `would update` preview is a human line → stderr (single-stream).
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("would update"),
-        "dry-run must print a `would update` preview line; got:\n{stdout}"
+        stderr.contains("would update"),
+        "dry-run must print a `would update` preview line on stderr; got stderr:\n{stderr}"
     );
 
     // Disk state untouched.
@@ -653,11 +663,12 @@ async fn update_no_install_hint_propagates_directory_arg() {
         .success()
         .get_output()
         .clone();
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // `→ next:` hint is a human line → stderr (single-stream).
+    let stderr = String::from_utf8_lossy(&out.stderr);
     let expected = format!("\u{2192} next: pakx install --directory {subdir_str}");
     assert!(
-        stdout.contains(&expected),
-        "→ next hint must propagate --directory; expected {expected:?}, got stdout:\n{stdout}"
+        stderr.contains(&expected),
+        "→ next hint must propagate --directory; expected {expected:?}, got stderr:\n{stderr}"
     );
 }
 
@@ -760,13 +771,14 @@ async fn update_no_install_hint_omits_directory_when_unset() {
         .success()
         .get_output()
         .clone();
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // `→ next:` hint is a human line → stderr (single-stream).
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("\u{2192} next: pakx install"),
-        "→ next hint expected; got stdout:\n{stdout}"
+        stderr.contains("\u{2192} next: pakx install"),
+        "→ next hint expected on stderr; got stderr:\n{stderr}"
     );
     assert!(
-        !stdout.contains("--directory"),
-        "→ next hint must not carry --directory when unset; got stdout:\n{stdout}"
+        !stderr.contains("--directory"),
+        "→ next hint must not carry --directory when unset; got stderr:\n{stderr}"
     );
 }

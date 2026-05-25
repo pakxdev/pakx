@@ -428,6 +428,11 @@ async fn audit_pakx(
         }
         Err(e) => {
             let reason = format_registry_error(&e);
+            // The raw error stays in `tracing` (debug) for diagnosis; the
+            // user-facing line + table cell carry only the actionable
+            // hint so a transient 5xx / DNS failure doesn't dump driver
+            // jargon into the audit table.
+            tracing::debug!(target: "pakx::audit", %id, %version, error = %e, "version fetch failed");
             // Print once to stderr so CI logs surface the reason
             // alongside the table. The table row itself stays terse.
             eprintln!("{} {}@{}: {}", ui::glyph_warn_err(), id, version, reason);
@@ -445,10 +450,11 @@ async fn audit_pakx(
 }
 
 fn format_registry_error(e: &RegistryError) -> String {
-    match e {
-        RegistryError::NotFound { id, .. } => format!("not found: {id}"),
-        other => other.to_string(),
-    }
+    // Delegate to the shared mapper so `pakx audit` and `pakx outdated`
+    // render the same actionable hints for the same failure classes
+    // (transient / offline / not-found / invalid) rather than each
+    // command leaking raw `RegistryError::Display` jargon into its table.
+    crate::registry_hint::registry_error_hint(e)
 }
 
 fn split_owner_name(id: &str) -> Option<(&str, &str)> {

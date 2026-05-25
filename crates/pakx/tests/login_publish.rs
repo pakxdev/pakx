@@ -469,6 +469,86 @@ async fn publish_runs_full_pack_create_upload_flow() {
 }
 
 #[tokio::test]
+async fn publish_short_sha256_does_not_panic() {
+    // Regression: the human "uploaded … sha256 <…>" line truncated the
+    // registry-returned sha256 with a raw byte-slice `[..16]`, which
+    // panicked when the server returned a string shorter than 16 bytes —
+    // AND it panicked AFTER the upload succeeded, so the user saw a
+    // crash despite the package being live. The fix uses
+    // `.get(..16).unwrap_or(&sha256)`; a short sha must now render the
+    // whole string and exit cleanly.
+    let src = TempDir::new().unwrap();
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+
+    // Build a server whose PUT returns a 3-char sha256 ("abc").
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/whoami"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": "u_1", "login": "alice", "email": null })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "pkg_1",
+            "owner": "alice",
+            "name": "pdf",
+            "kind": "skills",
+            "created": true
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/api/v1/packages/.+/.+/.+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "alice/pdf",
+            "version": "1.0.0",
+            // Deliberately shorter than 16 bytes.
+            "sha256": "abc",
+            "sizeBytes": 123,
+            "tarballUrl": "https://example.com/tarball.tgz"
+        })))
+        .mount(&server)
+        .await;
+
+    write_skill(&src, "pdf", "1.0.0");
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "publish",
+            src.path().to_str().unwrap(),
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        // No panic; clean exit. The short sha renders whole.
+        .success()
+        .stderr(predicate::str::contains("uploaded"))
+        .stderr(predicate::str::contains("sha256 abc"));
+}
+
+#[tokio::test]
 async fn publish_dry_run_skips_upload() {
     let src = TempDir::new().unwrap();
     let temp = TempDir::new().unwrap();
@@ -533,6 +613,9 @@ async fn unpublish_calls_delete() {
             &server.uri(),
             "--credentials-file",
             creds_path.to_str().unwrap(),
+            // `unpublish` now prompts for confirmation; `--yes` is
+            // required on a non-TTY (test harness) to proceed.
+            "--yes",
         ])
         .assert()
         .success()
@@ -551,6 +634,48 @@ async fn unpublish_calls_delete() {
         stderr.contains("still resolvable for existing pins"),
         "new accurate copy must be present: {stderr}",
     );
+}
+
+#[tokio::test]
+async fn unpublish_without_yes_on_non_tty_bails_with_hint() {
+    // A destructive soft-delete must not run unconfirmed. On a non-TTY
+    // (the assert_cmd harness has no terminal) and without `--yes`, the
+    // command must FAIL FAST with an actionable hint — never hang on a
+    // prompt that can't be answered, and never silently unpublish.
+    let temp = TempDir::new().unwrap();
+    let creds_path = temp.path().join("c.json");
+    let server = mock_registry("alice").await;
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "login",
+            "--registry",
+            &server.uri(),
+            "--token",
+            VALID_TOKEN,
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "unpublish",
+            "alice/pdf@1.0.0",
+            "--registry",
+            &server.uri(),
+            "--credentials-file",
+            creds_path.to_str().unwrap(),
+        ])
+        // No `--yes`; non-TTY harness → bail.
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stdin is not a TTY"))
+        .stderr(predicate::str::contains("--yes"))
+        // The DELETE must NOT have fired: no success line.
+        .stderr(predicate::str::contains("unpublished").not());
 }
 
 /// Publish-emit shape: when the manifest declares sponsors, the POST

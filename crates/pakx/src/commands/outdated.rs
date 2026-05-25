@@ -39,8 +39,8 @@ use clap::{Args, ValueEnum};
 use comfy_table::{Cell, CellAlignment};
 use pakx_core::{http_client, read_lockfile_from, LockEntry, RegistrySource};
 use pakx_registry_client::{
-    OfficialMcpSource, PakxSource, SmitherySource, Source, OFFICIAL_MCP_BASE_URL, PAKX_BASE_URL,
-    SMITHERY_BASE_URL,
+    OfficialMcpSource, PakxSource, RegistryError, SmitherySource, Source, OFFICIAL_MCP_BASE_URL,
+    PAKX_BASE_URL, SMITHERY_BASE_URL,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -395,16 +395,23 @@ async fn check_entry(entry: &LockEntry, clients: &Clients) -> Row {
             }
         }
         Err(e) => {
+            // Map the typed error onto an actionable remediation hint
+            // (transient / offline / not-found) via the shared helper —
+            // the same mapping `pakx audit` uses — rather than dumping
+            // the raw `RegistryError::Display` transport jargon. The
+            // lossless error stays in `tracing` for diagnosis.
+            debug!(target: "pakx::outdated", %id, error = %e, "latest-version fetch failed");
+            let reason = crate::registry_hint::registry_error_hint(&e);
             // Print the reason once to stderr so CI logs surface it
             // alongside the table. The table row itself stays terse.
-            eprintln!("{} {}: {}", ui::glyph_warn_err(), id, e);
+            eprintln!("{} {}: {}", ui::glyph_warn_err(), id, reason);
             Row {
                 id,
                 current,
                 latest: None,
                 registry,
                 status: Status::Error,
-                error: Some(e),
+                error: Some(reason),
             }
         }
     }
@@ -416,8 +423,8 @@ async fn check_entry(entry: &LockEntry, clients: &Clients) -> Row {
 /// non-deprecated entry IS the latest non-deprecated. Falls back to
 /// the federated `Source::fetch` shape if the detail response lacks
 /// the array (older deployments).
-async fn fetch_latest_pakx(source: &PakxSource, id: &str) -> Result<String, String> {
-    let pkg = source.fetch(id).await.map_err(|e| e.to_string())?;
+async fn fetch_latest_pakx(source: &PakxSource, id: &str) -> Result<String, RegistryError> {
+    let pkg = source.fetch(id).await?;
     // `PakxSource::fetch` writes the parsed `versions[]` into
     // `install_hints.versions` as `[{version, deprecatedAt?, ...}]`.
     if let Some(versions) = pkg.install_hints.get("versions").and_then(Value::as_array) {
@@ -444,8 +451,8 @@ async fn fetch_latest_pakx(source: &PakxSource, id: &str) -> Result<String, Stri
 async fn fetch_latest_via_source<S: Source + ?Sized>(
     source: &S,
     id: &str,
-) -> Result<String, String> {
-    let pkg = source.fetch(id).await.map_err(|e| e.to_string())?;
+) -> Result<String, RegistryError> {
+    let pkg = source.fetch(id).await?;
     Ok(pkg.version)
 }
 
@@ -538,15 +545,22 @@ fn render_human(rows: &[Row]) {
             Cell::new(r.status.as_str()),
         ]);
     }
-    println!("{table}");
+    // Human view (table + summary) shares ONE stream with the
+    // clean-verdict line above (stderr). Previously the "all
+    // dependencies up to date" verdict went to stderr while the drift
+    // table + summary went to stdout — a `pakx outdated 2>/dev/null`
+    // showed the table but suppressed the verdict, and a `> log`
+    // captured the table but not the verdict. `--json` is the
+    // machine-readable surface and stays on stdout (see `render_json`).
+    eprintln!("{table}");
 
     let total = rows.len();
     let outdated =
         counts.get("upgrade").copied().unwrap_or(0) + counts.get("drift").copied().unwrap_or(0);
-    println!();
-    println!(
+    eprintln!();
+    eprintln!(
         "{}: {} outdated of {} entries",
-        ui::heading("summary"),
+        ui::heading_err("summary"),
         outdated,
         total
     );
