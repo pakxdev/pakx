@@ -423,6 +423,47 @@ async fn update_no_args_says_up_to_date_when_nothing_outdated() {
         .stderr(predicate::str::contains("up to date"));
 }
 
+/// Regression for the non-TTY hang: `pakx update` (no explicit id, no
+/// `--yes`) prompts per outdated dep via `inquire::Confirm`. With an
+/// outdated dep present and no terminal on stdin that prompt would block
+/// forever — it must instead fail fast with the "not a TTY" hint. The
+/// manifest pins `0.1.0` while the registry's latest is `0.1.2`, so a
+/// plan exists and the prompt path is reached.
+#[tokio::test]
+async fn update_without_yes_and_no_tty_bails_instead_of_hanging() {
+    let project = TempDir::new().unwrap();
+    let pakx_registry = MockServer::start().await;
+    mount_pakx_detail(&pakx_registry, &[("0.1.2", false), ("0.1.0", false)]).await;
+    write_manifest(
+        project.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  skills:\n    - arwenizEr/hello-world@0.1.0\n",
+    );
+    write_lockfile(project.path(), &pakx_lockfile("0.1.0"));
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        // Empty stdin → not a TTY. Guard must fire before the prompt.
+        .write_stdin("")
+        .args([
+            "update",
+            "--no-install",
+            "--pakx-base-url",
+            &pakx_registry.uri(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stdin is not a TTY"))
+        .stderr(predicate::str::contains("--yes"));
+
+    // Manifest must be unchanged — the bail happens before any rewrite.
+    let yml = std::fs::read_to_string(project.path().join("agents.yml")).unwrap();
+    assert!(
+        yml.contains("arwenizEr/hello-world@0.1.0"),
+        "manifest must keep the old pin; got:\n{yml}"
+    );
+}
+
 #[tokio::test]
 async fn update_bare_id_exits_two_when_registry_unreachable() {
     // The lockfile pins the id but no registry mount answers — the
