@@ -15,21 +15,36 @@ use pakx_core::McpTransport;
 use pakx_registry_client::Package;
 use serde::Deserialize;
 use thiserror::Error;
+use tracing::debug;
 
 #[derive(Debug, Error)]
 pub enum TranslateError {
     #[error("package {id:?} has no installable transport (no `packages` or `remotes`)")]
     NoTransport { id: String },
-    #[error("package {id:?} install_hints schema mismatch: {message}")]
-    Schema { id: String, message: String },
+    // User-facing message is intentionally stable + actionable: a serde
+    // decode failure on the registry's install-hint shape is almost
+    // always an upstream bug (the registry sent JSON pakx can't parse),
+    // not something the user can fix. The raw serde detail (which field,
+    // which line/col) is logged via `debug!` at construction time so it
+    // is available with `RUST_LOG=debug` / `--verbose` without leaking
+    // the noisy parser internals into the default failure summary.
+    #[error(
+        "registry returned install hints in an unexpected shape \
+             — likely a registry bug, please report"
+    )]
+    Schema { id: String },
 }
 
 pub fn translate(pkg: &Package) -> Result<McpTransport, TranslateError> {
-    let hints: InstallHints =
-        serde_json::from_value(pkg.install_hints.clone()).map_err(|e| TranslateError::Schema {
-            id: pkg.id.clone(),
-            message: e.to_string(),
-        })?;
+    let hints: InstallHints = serde_json::from_value(pkg.install_hints.clone()).map_err(|e| {
+        debug!(
+            target: "pakx::install::mcp_translate",
+            id = %pkg.id,
+            error = %e,
+            "install_hints schema decode failed"
+        );
+        TranslateError::Schema { id: pkg.id.clone() }
+    })?;
 
     if let Some(t) = pick_stdio(&hints, &pkg.id) {
         return Ok(t);

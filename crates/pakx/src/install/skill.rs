@@ -285,14 +285,18 @@ fn resolution_from_version_meta(
     version: &str,
     meta: &PackageVersion,
 ) -> Result<SkillResolution> {
-    let sha = meta
-        .sha256
-        .clone()
-        .ok_or_else(|| anyhow!("registry response for {id}@{version} omits sha256"))?;
-    let tarball_url = meta
-        .tarball_url
-        .clone()
-        .ok_or_else(|| anyhow!("registry response for {id}@{version} omits tarballUrl"))?;
+    let sha = meta.sha256.clone().ok_or_else(|| {
+        anyhow!(
+            "registry did not return a download URL for this version (server-side) \
+             — retry with --no-cache or report (missing sha256 for {id}@{version})"
+        )
+    })?;
+    let tarball_url = meta.tarball_url.clone().ok_or_else(|| {
+        anyhow!(
+            "registry did not return a download URL for this version (server-side) \
+             — retry with --no-cache or report (missing tarballUrl for {id}@{version})"
+        )
+    })?;
     Ok(SkillResolution {
         version: meta.version.clone(),
         sha256_hex: sha,
@@ -401,7 +405,20 @@ pub(super) fn verify_sha256(
     let digest = hasher.finalize();
     let got_hex = bytes_to_hex(&digest);
     if !sha_hex_eq(&got_hex, expected_hex) {
-        bail!("integrity mismatch for {id}: expected {expected_hex}, got {got_hex}");
+        // Lead with the remedy; the actual hashes are noise to the user
+        // and are logged via `debug!` so `--verbose` / `RUST_LOG=debug`
+        // still surfaces them for a maintainer diagnosing a re-publish.
+        debug!(
+            target: "pakx::install::skill",
+            %id,
+            expected = %expected_hex,
+            got = %got_hex,
+            "integrity mismatch"
+        );
+        bail!(
+            "downloaded tarball failed its integrity check — the download may be corrupt \
+             or the version was re-published; retry with `--no-cache` ({id})"
+        );
     }
     // Rewind once more for the extraction pass.
     tmp.as_file_mut()

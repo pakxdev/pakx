@@ -101,6 +101,14 @@ pub struct InstallReport {
     pub skipped: Vec<String>,
     pub failed: Vec<(String, String)>,
     pub lockfile_path: Option<PathBuf>,
+    /// Set `true` the first time an `mcp:` dep's adapter actually WRITES
+    /// `.mcp.json` (a fresh insert or a changed entry). Left `false` when
+    /// every mcp dep was skip / already-installed (the adapter returns
+    /// `AlreadyInstalled` *before* touching the file) or failed before
+    /// the write. Consumed by the rollback gate so a run that merely
+    /// *declared* an mcp dep without writing the merge file never reverts
+    /// `.mcp.json` and clobbers servers the user already had.
+    pub mcp_json_written: bool,
     /// Per-entry structured record. Populated alongside the legacy
     /// `installed`/`skipped`/`failed` vecs so existing consumers
     /// (`pakx install`'s human render, `pakx update`'s post-update
@@ -421,15 +429,13 @@ async fn install_mcp_dep(
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Registry(r) => r.name.clone(),
         DepSpec::Git(g) => {
+            // "Not implemented yet" is a SKIP, not a failure: routing it
+            // through `skipped` (heading reads "unchanged or not yet
+            // supported") keeps an otherwise-clean install at exit 0
+            // instead of letting an unsupported dep shape kill the run.
             sink.begin(&g.git);
-            sink.finish_failed(&g.git, "git deps not implemented for MCP yet");
-            push_failed(
-                report,
-                g.git.clone(),
-                PackageType::Mcp,
-                None,
-                "git deps not implemented for MCP yet".into(),
-            );
+            sink.finish_skipped(&g.git);
+            push_skipped(report, g.git.clone(), PackageType::Mcp, None);
             return;
         }
     };
@@ -449,14 +455,11 @@ async fn install_mcp_dep(
         }
         Ok(Resolved::NotFound) => {
             warn!(target: "pakx::install", %id, "not in any federated registry");
-            sink.finish_failed(&id, "not found in any federated registry");
-            push_failed(
-                report,
-                id.clone(),
-                PackageType::Mcp,
-                None,
-                "not found in any federated registry".into(),
-            );
+            let reason = "not found in any federated registry \
+                          (checked official MCP, Smithery, pakx-registry — verify the id; \
+                          if it's a skill, try `pakx add skills <id>`)";
+            sink.finish_failed(&id, reason);
+            push_failed(report, id.clone(), PackageType::Mcp, None, reason.into());
             return;
         }
         Err(e) => {
@@ -469,13 +472,15 @@ async fn install_mcp_dep(
     let transport = match translate(&pkg) {
         Ok(t) => t,
         Err(TranslateError::NoTransport { .. }) => {
-            sink.finish_failed(&id, "no installable transport advertised");
+            let reason = "advertises no npm / pypi / docker / http transport pakx can install \
+                          — check the upstream registry entry or report it to the publisher";
+            sink.finish_failed(&id, reason);
             push_failed(
                 report,
                 id.clone(),
                 PackageType::Mcp,
                 Some(pkg.version.clone()),
-                "no installable transport advertised".into(),
+                reason.into(),
             );
             return;
         }
@@ -502,6 +507,13 @@ async fn install_mcp_dep(
 
     match claude.install_mcp(&mcp).await {
         Ok(_) => {
+            // A successful `install_mcp` is the ONLY path that mutates
+            // `.mcp.json` (the adapter merges + writes on Ok; it returns
+            // `AlreadyInstalled` *before* writing when the entry is
+            // unchanged). Record the write so the rollback gate knows it
+            // may legitimately revert the merge file — see
+            // `apply_rollback_gate`.
+            report.mcp_json_written = true;
             sink.finish_ok(&id);
             push_ok(
                 report,
@@ -582,7 +594,7 @@ fn apply_rollback_gate(snapshot: Option<Snapshot>, report: &mut InstallReport) -
         "install failed with --rollback-on-error; restoring pre-run state"
     );
     snapshot
-        .restore()
+        .restore(report.mcp_json_written)
         .context("rollback failed; some targets may be left half-restored")?;
     // After a successful rollback nothing the run installed remains on
     // disk. Re-cast every `installed`/`skipped` row as a
@@ -709,31 +721,18 @@ async fn install_skill_dep(
     let shorthand = match dep {
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Git(g) => {
+            // Not-yet-supported → skip (not fail) so it can't trip the
+            // run's exit code. See the matching MCP path above.
             sink.begin(&g.git);
-            sink.finish_failed(&g.git, "git deps not implemented for skills yet");
-            push_failed(
-                report,
-                g.git.clone(),
-                PackageType::Skills,
-                None,
-                "git deps not implemented for skills yet".into(),
-            );
+            sink.finish_skipped(&g.git);
+            push_skipped(report, g.git.clone(), PackageType::Skills, None);
             return;
         }
         DepSpec::Registry(r) => {
             let label = format!("{}/{}", r.registry, r.name);
             sink.begin(&label);
-            sink.finish_failed(
-                &label,
-                "registry-object spec not implemented for skills yet",
-            );
-            push_failed(
-                report,
-                label,
-                PackageType::Skills,
-                None,
-                "registry-object spec not implemented for skills yet".into(),
-            );
+            sink.finish_skipped(&label);
+            push_skipped(report, label, PackageType::Skills, None);
             return;
         }
     };
@@ -878,21 +877,17 @@ async fn install_bundle_dep(
     let shorthand = match dep {
         DepSpec::String(s) => s.as_str().to_owned(),
         DepSpec::Git(g) => {
-            let reason = format!("git deps not implemented for {} yet", kind.as_str());
+            // Not-yet-supported → skip (not fail); see the MCP path.
             sink.begin(&g.git);
-            sink.finish_failed(&g.git, &reason);
-            push_failed(report, g.git.clone(), kind, None, reason);
+            sink.finish_skipped(&g.git);
+            push_skipped(report, g.git.clone(), kind, None);
             return;
         }
         DepSpec::Registry(r) => {
             let label = format!("{}/{}", r.registry, r.name);
-            let reason = format!(
-                "registry-object spec not implemented for {} yet",
-                kind.as_str()
-            );
             sink.begin(&label);
-            sink.finish_failed(&label, &reason);
-            push_failed(report, label, kind, None, reason);
+            sink.finish_skipped(&label);
+            push_skipped(report, label, kind, None);
             return;
         }
     };

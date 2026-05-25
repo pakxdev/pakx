@@ -383,7 +383,7 @@ async fn install_no_deps_writes_empty_lockfile() {
         .args(["init", "--yes", "--name", "empty"])
         .assert()
         .success();
-    Command::cargo_bin(BIN)
+    let assertion = Command::cargo_bin(BIN)
         .unwrap()
         .current_dir(project.path())
         .args([
@@ -393,6 +393,12 @@ async fn install_no_deps_writes_empty_lockfile() {
         ])
         .assert()
         .success();
+    // Friendly empty-state instead of a bare "installed 0, skipped 0".
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("nothing to install"),
+        "empty manifest must show the empty-state hint; stderr:\n{stderr}"
+    );
     let lock = std::fs::read_to_string(project.path().join("agents.lock")).unwrap();
     let v: Value = serde_json::from_str(&lock).unwrap();
     assert_eq!(v["lockfileVersion"], 1);
@@ -547,5 +553,171 @@ async fn install_failure_does_not_overwrite_existing_lockfile() {
     assert_eq!(
         after, sentinel,
         "failed install must not rewrite agents.lock; got: {after:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Actionable failure reasons + skip-not-fail for unsupported shapes.
+// ---------------------------------------------------------------------------
+
+/// An MCP id that resolves but advertises NO installable transport must
+/// fail with an ACTIONABLE message — leading with the remedy, not the
+/// jargon "no installable transport advertised".
+#[tokio::test]
+async fn install_no_transport_emits_actionable_failure() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let id = "io.github.acme/no-transport";
+
+    // Detail endpoint returns a record with no `packages` / `remotes`.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v0/servers/.+"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": id,
+            "version_detail": { "version": "1.0.0" }
+        })))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["init", "--yes", "--name", "demo"])
+        .assert()
+        .success();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["add", id, "--type", "mcp", "--no-validate"])
+        .assert()
+        .success();
+
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("advertises no npm / pypi / docker / http transport pakx can install"),
+        "failure must lead with the actionable remedy; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("no installable transport advertised"),
+        "the old jargon message must be gone; stderr:\n{stderr}"
+    );
+}
+
+/// The `NotFound` install failure must name the registries checked + the
+/// `pakx add skills` escape hatch — not the bare "not found in any
+/// federated registry".
+#[tokio::test]
+async fn install_not_found_failure_names_checked_registries() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+
+    // Detail 404 + empty search → the dep resolves cleanly to NotFound
+    // (not a transport error), which is the path the improved message
+    // covers.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v0/servers/.+"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "servers": [] })))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["init", "--yes", "--name", "demo"])
+        .assert()
+        .success();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["add", "ghost/server", "--type", "mcp", "--no-validate"])
+        .assert()
+        .success();
+
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("checked official MCP, Smithery, pakx-registry"),
+        "failure must name the registries checked; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("pakx add skills"),
+        "failure must point at the skills escape hatch; stderr:\n{stderr}"
+    );
+}
+
+/// A `git:` MCP dep is "not yet supported" — it must be routed through
+/// the SKIPPED bucket (heading reads "unchanged or not yet supported"),
+/// NOT the failed bucket. So an otherwise-clean run with only an
+/// unsupported dep must EXIT 0 instead of letting an unimplemented shape
+/// kill the install.
+#[tokio::test]
+async fn install_git_dep_is_skipped_not_failed() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+
+    // Seed a manifest with a single git-sourced mcp dep (a shape the
+    // installer doesn't implement yet). `pakx add` won't write this, so
+    // we author the YAML directly.
+    let manifest = "name: demo\nversion: 0.0.0\ndependencies:\n  mcp:\n    - git: \"https://example.test/repo.git\"\n";
+    std::fs::write(project.path().join("agents.yml"), manifest).unwrap();
+
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args([
+            "install",
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--claude-home",
+            claude_home.path().to_str().unwrap(),
+        ])
+        .assert()
+        // The crux: an unsupported dep no longer fails the run.
+        .success();
+
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("skipped"),
+        "the git dep must land in the skipped bucket; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("failed 0"),
+        "no failures expected for a not-yet-supported dep; stderr:\n{stderr}"
     );
 }

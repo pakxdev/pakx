@@ -120,6 +120,18 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
         report
     }?;
 
+    // Empty manifest (or one whose only deps were all filtered out before
+    // dispatch): nothing was processed. Give a friendly empty-state
+    // pointing at `pakx add` instead of an unhelpful "installed 0,
+    // skipped 0, failed 0" with no context. JSON callers still get their
+    // (empty) array below, so this is human-render-only.
+    if report.entries.is_empty() && !args.json {
+        eprintln!(
+            "{}",
+            ui::dim_err("nothing to install — add deps with `pakx add <id>`")
+        );
+    }
+
     if !report.installed.is_empty() {
         eprintln!("{}", ui::heading("installed:"));
         for id in &report.installed {
@@ -138,7 +150,15 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
     if !report.failed.is_empty() {
         eprintln!("{}", ui::heading("failed:"));
         for (id, reason) in &report.failed {
-            eprintln!("  {} {id}: {reason}", ui::glyph_fail_err());
+            // A reason built from a `{e:#}` cause chain can span multiple
+            // lines, which would break the aligned `failed:` block. Flatten
+            // to a single line (`; `-joined) for the human enumeration; the
+            // full chain is still available via `--json` / debug logs.
+            eprintln!(
+                "  {} {id}: {}",
+                ui::glyph_fail_err(),
+                flatten_reason(reason)
+            );
         }
     }
     if let Some(p) = &report.lockfile_path {
@@ -149,6 +169,16 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
             .and_then(|n| n.to_str())
             .map_or_else(|| p.display().to_string(), str::to_owned);
         eprintln!("{} wrote {}", ui::glyph_ok_err(), label);
+    } else if !args.no_lockfile && !report.failed.is_empty() {
+        // The runner gates the lockfile write on a zero-failure run, so a
+        // partial / total failure leaves the prior `agents.lock` untouched.
+        // Call it out so the user isn't surprised that the on-disk lockfile
+        // may now lag `agents.yml`. Suppressed under `--no-lockfile` (no
+        // write was ever going to happen).
+        eprintln!(
+            "{} agents.lock not updated (install had failures) — it may be out of date vs agents.yml",
+            ui::glyph_warn_err()
+        );
     }
 
     // Final summary so users can scan the outcome at a glance.
@@ -188,6 +218,20 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
     } else {
         anyhow::bail!("{} dep(s) failed to install", report.failed.len())
     }
+}
+
+/// Collapse a multi-line failure reason into one line so the aligned
+/// `failed:` block stays readable. Internal whitespace runs (including
+/// the newlines an anyhow `{e:#}` cause chain emits) become a single
+/// `; ` separator. The full multi-line chain is preserved for the
+/// `--json` payload (`error` field) and the `tracing` trail.
+fn flatten_reason(reason: &str) -> String {
+    reason
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Emit the `pakx install --json` payload: a single newline-terminated

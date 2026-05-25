@@ -30,7 +30,7 @@ use flate2::Compression;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path as wm_path};
+use wiremock::matchers::{method, path as wm_path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const BIN: &str = "pakx";
@@ -331,5 +331,94 @@ async fn rollback_restores_prior_contents_of_preexisting_dir() {
     assert!(
         !prior.join("NEW.md").exists(),
         "the failed run's freshly-written contents must be wiped"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (e) `.mcp.json` no-clobber: an mcp dep that is already-installed (the
+//     adapter writes nothing) must NOT have `.mcp.json` reverted on
+//     rollback when a LATER dep fails — doing so clobbers servers the
+//     user already had. Regression for the rollback `.mcp.json` bug.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rollback_does_not_clobber_mcp_json_when_mcp_was_already_installed() {
+    let project = TempDir::new().unwrap();
+    let claude_home = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+
+    // Mock the official MCP Registry for `io.github.acme/cool`: an
+    // npm-stdio server. Its installed `.mcp.json` entry is deterministic:
+    //   "cool": { "command": "npx", "args": ["-y","@acme/mcp"],
+    //             "env": { "API_KEY": "" } }
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v0/servers/.+"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "io.github.acme/cool",
+            "version_detail": { "version": "1.0.0" },
+            "packages": [{
+                "registry_name": "npm",
+                "name": "@acme/mcp",
+                "environment_variables": [{ "name": "API_KEY" }]
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    // A skill dep that FAILS (bogus sha) so the run ends in failure and
+    // the rollback gate fires.
+    let (tar_bad, _real) = build_tarball(&[("SKILL.md", b"# bad")]);
+    let bogus = "deadbeef".repeat(8);
+    mount_skill(&server, "alice/bad", "0.1.0", &bogus, tar_bad).await;
+
+    // Pre-seed `.mcp.json` so the mcp dep is ALREADY-INSTALLED (the
+    // adapter sees an identical entry and writes nothing) AND the user
+    // also has a server of their own that must survive.
+    let mcp_path = project.path().join(".mcp.json");
+    let preseed = json!({
+        "mcpServers": {
+            "cool": {
+                "command": "npx",
+                "args": ["-y", "@acme/mcp"],
+                "env": { "API_KEY": "" }
+            },
+            "user-kept-server": {
+                "command": "my-tool",
+                "args": ["serve"]
+            }
+        }
+    });
+    std::fs::write(&mcp_path, serde_json::to_vec_pretty(&preseed).unwrap()).unwrap();
+
+    // Manifest: the already-installed mcp dep + the failing skill dep.
+    let manifest = "name: demo\nversion: 0.0.0\ndependencies:\n  mcp:\n    - io.github.acme/cool\n  skills:\n    - alice/bad@0.1.0\n";
+    std::fs::write(project.path().join("agents.yml"), manifest).unwrap();
+
+    let mut cmd = Command::cargo_bin(BIN).unwrap();
+    cmd.current_dir(project.path()).args([
+        "install",
+        "--rollback-on-error",
+        "--pakx-base-url",
+        &server.uri(),
+        "--mcp-base-url",
+        &server.uri(),
+        "--no-smithery",
+        "--claude-home",
+        claude_home.path().to_str().unwrap(),
+    ]);
+    cmd.assert().failure();
+
+    // The user's `.mcp.json` must be intact — both the already-installed
+    // server entry AND the user's own server. The run never WROTE the
+    // file, so rollback must leave it alone.
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+    assert_eq!(
+        after["mcpServers"]["user-kept-server"]["command"], "my-tool",
+        "the user's own server must NOT be clobbered by rollback; after:\n{after:#}"
+    );
+    assert_eq!(
+        after["mcpServers"]["cool"]["command"], "npx",
+        "the already-installed entry must remain; after:\n{after:#}"
     );
 }

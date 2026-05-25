@@ -14,11 +14,12 @@ use pakx_core::manifest::{
 };
 use pakx_core::{http_client, RegistrySource};
 use pakx_registry_client::{
-    OfficialMcpSource, PakxSource, RegistryClient, RegistryError, Source, PAKX_BASE_URL,
+    OfficialMcpSource, Package, PakxSource, RegistryClient, RegistryError, Source, PAKX_BASE_URL,
 };
 use tracing::{debug, warn};
 
 use crate::commands::cache_tempdir::{cache_dir_at, make_cache_tempdir};
+use crate::install::mcp_translate::{translate, TranslateError};
 use crate::redact::{project_root_for, redact_path};
 use crate::registry_url::validate_base_url;
 use crate::ui;
@@ -204,10 +205,17 @@ pub async fn run(args: AddArgs) -> Result<()> {
                 Ok(None) => (PackageType::Mcp, true),
                 Err(e) => {
                     // Network / decode error on the probe is non-fatal:
-                    // keep the historical MCP-default behavior but log
-                    // so users can see why their skill landed under
-                    // `mcp:` if the registry was unreachable.
+                    // keep the historical MCP-default behavior. Surface a
+                    // visible warn (not just debug) so the user knows the
+                    // kind was GUESSED, not confirmed — and how to override
+                    // if their package is actually a skill.
                     debug!(target: "pakx::add", %id, error = %e, "pakx-registry kind probe failed; falling back to MCP default");
+                    eprintln!(
+                        "{} couldn't reach pakx-registry to classify {} — defaulting to kind=mcp \
+                         (re-run with `-t skills` if this is a pakx skill)",
+                        ui::glyph_warn_err(),
+                        id
+                    );
                     (PackageType::Mcp, false)
                 }
             }
@@ -218,39 +226,22 @@ pub async fn run(args: AddArgs) -> Result<()> {
 
     let mut manifest = load_or_init(&target)?;
 
-    if !args.no_validate && kind == PackageType::Mcp {
-        match validate_mcp(&id, args.mcp_base_url.as_deref(), args.no_cache).await {
-            Ok(version) => {
-                eprintln!(
-                    "{} {} v{} via official MCP Registry",
-                    ui::glyph_ok_err(),
-                    id,
-                    version
-                );
-            }
-            Err(e) => match e {
-                RegistryError::NotFound { .. } => {
-                    warn!(target: "pakx::add", %id, probed_pakx_404, "not in registry; adding anyway");
-                    if probed_pakx_404 {
-                        eprintln!(
-                            "{} {} not found in pakx-registry or the official MCP Registry; \
-                             adding to manifest anyway as kind=mcp \
-                             (override with -t skills if this is a pakx skill, or --no-validate to silence)",
-                            ui::glyph_warn_err(),
-                            id
-                        );
-                    } else {
-                        eprintln!(
-                            "{} {} not in the official MCP Registry; adding to manifest anyway (use --no-validate to silence)",
-                            ui::glyph_warn_err(),
-                            id
-                        );
-                    }
-                }
-                other => bail!("registry validation failed: {other}"),
-            },
-        }
-    }
+    // When `true`, the trailing `→ next: pakx install` hint is suppressed
+    // for this add. Set when validation proves `pakx install` will fail
+    // for the id as published (e.g. an MCP server with no installable
+    // transport), so we don't cheerfully point the user at a command that
+    // can't succeed yet.
+    let suppress_next_hint = if !args.no_validate && kind == PackageType::Mcp {
+        validate_mcp_and_report(
+            &id,
+            args.mcp_base_url.as_deref(),
+            args.no_cache,
+            probed_pakx_404,
+        )
+        .await
+    } else {
+        false
+    };
 
     let outcome = add_shorthand(&mut manifest, kind, id.clone())
         .map_err(|e| anyhow!("invalid package id {id:?}: {e}"))?;
@@ -292,8 +283,22 @@ pub async fn run(args: AddArgs) -> Result<()> {
     // The leading character is U+2192 RIGHTWARDS ARROW, written as
     // an escape so source files stay valid UTF-8 without an embedded
     // glyph some Windows terminals re-encode.
-    eprintln!("{}", ui::dim_err("\u{2192} next: pakx install"));
+    //
+    // Suppressed when validation proved the install can't succeed yet
+    // (e.g. no installable transport) — pointing the user at
+    // `pakx install` there would be a lie.
+    if !suppress_next_hint {
+        eprintln!("{}", ui::dim_err("\u{2192} next: pakx install"));
+    }
     Ok(())
+}
+
+/// One-line summary of a registry validation error for the human warn
+/// line. `RegistryError`'s `Display` can carry a multi-line transport
+/// cause; we take the first line so the `[warn]` stays on one row.
+fn short_validation_error(e: &RegistryError) -> String {
+    let s = e.to_string();
+    s.lines().next().unwrap_or(&s).to_owned()
 }
 
 /// Heuristic: `<owner>/skills/<name>` (literal `/skills/` segment) reads
@@ -416,11 +421,102 @@ fn parse_registry_kind(s: &str) -> Option<PackageType> {
     }
 }
 
+/// Validate an `mcp:` id against the official MCP Registry and print the
+/// appropriate human line. Returns `true` when the trailing
+/// `→ next: pakx install` hint should be SUPPRESSED — i.e. validation
+/// proved `pakx install` can't yet succeed for this id (no installable
+/// transport, or malformed install hints). Network / not-found problems
+/// are downgraded to warnings and never suppress the hint (the add still
+/// lands and may install fine once the upstream is reachable).
+async fn validate_mcp_and_report(
+    id: &str,
+    mcp_base_url: Option<&str>,
+    no_cache: bool,
+    probed_pakx_404: bool,
+) -> bool {
+    match validate_mcp(id, mcp_base_url, no_cache).await {
+        Ok(pkg) => {
+            // The id exists in the MCP Registry — but existing isn't
+            // enough: if it advertises NO installable transport,
+            // `pakx install` will always fail for it. Run the same
+            // translation the installer runs so the add is honest.
+            match translate(&pkg) {
+                Ok(_) => {
+                    eprintln!(
+                        "{} {} v{} via official MCP Registry",
+                        ui::glyph_ok_err(),
+                        id,
+                        pkg.version
+                    );
+                    false
+                }
+                Err(TranslateError::NoTransport { .. }) => {
+                    warn!(target: "pakx::add", %id, "id resolves but advertises no installable transport");
+                    eprintln!(
+                        "{} {} added, but it advertises no installable transport — \
+                         `pakx install` will fail until the publisher adds one",
+                        ui::glyph_warn_err(),
+                        id
+                    );
+                    true
+                }
+                Err(other) => {
+                    // Schema mismatch etc. — still let the add land, but
+                    // don't promise a clean install.
+                    warn!(target: "pakx::add", %id, error = %other, "install-hint translation failed during add validation");
+                    eprintln!(
+                        "{} {} added, but its registry install hints look malformed — \
+                         `pakx install` may fail",
+                        ui::glyph_warn_err(),
+                        id
+                    );
+                    true
+                }
+            }
+        }
+        Err(RegistryError::NotFound { .. }) => {
+            warn!(target: "pakx::add", %id, probed_pakx_404, "not in registry; adding anyway");
+            if probed_pakx_404 {
+                eprintln!(
+                    "{} {} not found in pakx-registry or the official MCP Registry; \
+                     adding to manifest anyway as kind=mcp \
+                     (override with -t skills if this is a pakx skill, or --no-validate to silence)",
+                    ui::glyph_warn_err(),
+                    id
+                );
+            } else {
+                eprintln!(
+                    "{} {} not in the official MCP Registry; adding to manifest anyway (use --no-validate to silence)",
+                    ui::glyph_warn_err(),
+                    id
+                );
+            }
+            false
+        }
+        // A non-NotFound error means we could not REACH or parse the MCP
+        // Registry (transient 500 / timeout / DNS / decode). That is no
+        // reason to block a local manifest write — the user simply
+        // couldn't validate right now. Downgrade to a warn and proceed
+        // with the add (and keep the `→ next` hint: install may well
+        // succeed once the upstream is back).
+        Err(other) => {
+            warn!(target: "pakx::add", %id, error = %other, "MCP Registry validation unreachable; adding anyway");
+            eprintln!(
+                "{} couldn't reach the MCP Registry to validate {} ({}) — adding anyway",
+                ui::glyph_warn_err(),
+                id,
+                short_validation_error(&other),
+            );
+            false
+        }
+    }
+}
+
 async fn validate_mcp(
     id: &str,
     base_url_override: Option<&str>,
     no_cache: bool,
-) -> Result<String, RegistryError> {
+) -> Result<Package, RegistryError> {
     let base = base_url_override.unwrap_or(DEFAULT_MCP_BASE);
     // Per-call cache root — see `outdated::build_clients` for
     // rationale. Wrapped in `tempfile::TempDir` so the dir is removed
@@ -437,5 +533,5 @@ async fn validate_mcp(
     // Drop the cache tempdir AFTER the fetch returns — the explicit
     // drop documents the lifetime constraint.
     drop(cache_root);
-    Ok(pkg.version)
+    Ok(pkg)
 }

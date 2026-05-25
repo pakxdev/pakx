@@ -198,17 +198,27 @@ impl ProgressSink for MultiProgressSink {
             .set_message(format!("{id}: {}", phase.verb()));
     }
 
+    // All three terminal calls `finish_and_clear` rather than
+    // `finish_with_message`: the live bar served its purpose (showing the
+    // dep advancing through resolve → install) and is now cleared so it
+    // leaves NO trail above the summary block. The authoritative
+    // per-dep record is the `installed:` / `skipped:` / `failed:` block
+    // that `commands::install` prints after the sink is dropped. Without
+    // this, a TTY rendered every dep twice — once as a settled bar
+    // (carrying trailing-space padding from the spinner template) and
+    // again under the summary headings — which is the doubled /
+    // misaligned output users reported. Clearing the bars makes the
+    // summary the single source of truth.
     fn finish_ok(&self, id: &str) {
-        self.bar_for(id).finish_with_message(format!("[ok] {id}"));
+        self.bar_for(id).finish_and_clear();
     }
 
     fn finish_skipped(&self, id: &str) {
-        self.bar_for(id).finish_with_message(format!("[skip] {id}"));
+        self.bar_for(id).finish_and_clear();
     }
 
-    fn finish_failed(&self, id: &str, reason: &str) {
-        self.bar_for(id)
-            .finish_with_message(format!("[fail] {id}: {reason}"));
+    fn finish_failed(&self, id: &str, _reason: &str) {
+        self.bar_for(id).finish_and_clear();
     }
 }
 
@@ -272,6 +282,33 @@ mod tests {
         // A terminal call on an id never `begin`-ed lazily creates its
         // bar (tolerated — defensive against ordering assumptions).
         sink.finish_skipped("c/three");
+    }
+
+    #[test]
+    fn terminal_calls_clear_the_bar_so_no_trail_remains() {
+        // After a terminal call the bar must be marked finished (cleared)
+        // — the summary block in `commands::install` is the authoritative
+        // per-dep record, so the live bars must leave NO settled trail
+        // above it (the round-... double-render fix). We assert the bar
+        // is finished after each terminal transition; a finished+cleared
+        // bar renders nothing further to the terminal.
+        let sink = MultiProgressSink::new(false);
+        sink.begin("a/one");
+        sink.finish_ok("a/one");
+        sink.begin("b/two");
+        sink.finish_skipped("b/two");
+        sink.begin("c/three");
+        sink.finish_failed("c/three", "boom");
+        let bars = sink
+            .bars
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (id, pb) in bars.iter() {
+            assert!(
+                pb.is_finished(),
+                "bar for {id} must be finished+cleared after a terminal call"
+            );
+        }
     }
 
     #[test]

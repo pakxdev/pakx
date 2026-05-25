@@ -89,6 +89,16 @@ struct Target {
     /// contents were moved aside; `None` when the target did not exist
     /// before the run (restore = delete the freshly-created entry).
     backup: Option<PathBuf>,
+    /// `true` for the shared `.mcp.json` merge target. Unlike a per-id
+    /// package tree (which only ever exists because *this* run wrote it),
+    /// `.mcp.json` is a shared file that may already hold servers the
+    /// user added by hand or via earlier runs. The MCP adapter only
+    /// writes it on an actual insert/change; an mcp dep that was
+    /// skip/already-installed leaves it untouched. So this target is
+    /// restored only when the run actually wrote `.mcp.json` (see
+    /// [`Snapshot::restore`]'s `mcp_json_written` gate) — otherwise
+    /// reverting it would clobber the user's existing servers.
+    is_mcp_json: bool,
 }
 
 /// A pre-mutation snapshot of every filesystem target an install run
@@ -143,7 +153,8 @@ impl Snapshot {
                     if !seen.insert(live.clone()) {
                         continue;
                     }
-                    let target = Self::capture_one(&live, backup_root.path(), &mut backup_idx)?;
+                    let target =
+                        Self::capture_one(&live, backup_root.path(), &mut backup_idx, false)?;
                     targets.push(target);
                 }
             }
@@ -157,7 +168,7 @@ impl Snapshot {
         if deps_for_kind(manifest, PackageType::Mcp).is_some_and(|d| !d.is_empty()) {
             let live = project_root.join(".mcp.json");
             if seen.insert(live.clone()) {
-                let target = Self::capture_one(&live, backup_root.path(), &mut backup_idx)?;
+                let target = Self::capture_one(&live, backup_root.path(), &mut backup_idx, true)?;
                 targets.push(target);
             }
         }
@@ -174,15 +185,31 @@ impl Snapshot {
         })
     }
 
-    /// Snapshot one live path. If it pre-exists, move it into the backup
-    /// dir under a unique leaf and record the backup location; otherwise
-    /// record `backup: None` so restore knows to delete a freshly
-    /// created entry.
-    fn capture_one(live: &Path, backup_root: &Path, backup_idx: &mut usize) -> Result<Target> {
+    /// Snapshot one live path. If it pre-exists, preserve its prior
+    /// contents in the backup dir under a unique leaf and record the
+    /// backup location; otherwise record `backup: None` so restore knows
+    /// to delete a freshly created entry.
+    ///
+    /// Per-id package trees are *moved* aside (a `rename`, atomic within a
+    /// filesystem) so the installer starts from a clean slate. The shared
+    /// `.mcp.json` merge target is instead *copied* aside, leaving the
+    /// live file in place: the MCP adapter does a read-modify-write merge,
+    /// so it must see the user's prior servers to merge into them. Moving
+    /// it away would make the adapter start from an empty config and drop
+    /// every pre-existing server even on a fully successful run. The copy
+    /// is cheap (`.mcp.json` is a small JSON file) and lets the rollback
+    /// gate revert it only when the run actually wrote it.
+    fn capture_one(
+        live: &Path,
+        backup_root: &Path,
+        backup_idx: &mut usize,
+        is_mcp_json: bool,
+    ) -> Result<Target> {
         if !live.exists() {
             return Ok(Target {
                 live: live.to_path_buf(),
                 backup: None,
+                is_mcp_json,
             });
         }
         // Per-target backup leaf — a flat counter avoids any collision
@@ -190,15 +217,26 @@ impl Snapshot {
         // (e.g. `skills/a-b` and `commands/a-b`).
         let backup = backup_root.join(format!("backup-{backup_idx}"));
         *backup_idx += 1;
-        std::fs::rename(live, &backup).with_context(|| {
-            format!(
-                "move existing {} aside for rollback snapshot",
-                live.display()
-            )
-        })?;
+        if is_mcp_json {
+            // Copy, not move: the adapter must read the live file to merge.
+            std::fs::copy(live, &backup).with_context(|| {
+                format!(
+                    "copy existing {} aside for rollback snapshot",
+                    live.display()
+                )
+            })?;
+        } else {
+            std::fs::rename(live, &backup).with_context(|| {
+                format!(
+                    "move existing {} aside for rollback snapshot",
+                    live.display()
+                )
+            })?;
+        }
         Ok(Target {
             live: live.to_path_buf(),
             backup: Some(backup),
+            is_mcp_json,
         })
     }
 
@@ -222,6 +260,13 @@ impl Snapshot {
     /// then — if the target pre-existed — move its backup back into
     /// place. Targets that did not pre-exist are left absent.
     ///
+    /// The shared `.mcp.json` merge target is special-cased: it is
+    /// reverted **only** when `mcp_json_written` is `true` (i.e. an mcp
+    /// dep's adapter actually merged + wrote it this run). When every mcp
+    /// dep was skip / already-installed / failed-before-write, `.mcp.json`
+    /// was never mutated, so reverting it would clobber servers the user
+    /// already had. In that case the live file is left exactly as it is.
+    ///
     /// Restore is best-effort-resilient: a failure on one target is
     /// logged and the remaining targets are still attempted, so a single
     /// stubborn path can't strand the rest in a half-restored state. The
@@ -233,11 +278,22 @@ impl Snapshot {
     /// Returns the first restore error encountered (after attempting all
     /// targets). The backup dir is retained on error so the user can
     /// recover by hand; on full success it is dropped.
-    pub fn restore(self) -> Result<()> {
+    pub fn restore(self, mcp_json_written: bool) -> Result<()> {
         let mut first_err: Option<anyhow::Error> = None;
         let mut restored = 0usize;
 
         for target in &self.targets {
+            if target.is_mcp_json && !mcp_json_written {
+                // The run never wrote `.mcp.json`; leave the user's file
+                // untouched rather than reverting it and dropping servers
+                // the run never touched.
+                debug!(
+                    target: "pakx::install::rollback",
+                    path = %target.live.display(),
+                    "skipping .mcp.json restore — run did not write it"
+                );
+                continue;
+            }
             if let Err(e) = restore_one(target) {
                 warn!(
                     target: "pakx::install::rollback",
@@ -399,7 +455,8 @@ mod tests {
         std::fs::write(live.join("SKILL.md"), b"installed").unwrap();
         assert!(live.exists());
 
-        snap.restore().unwrap();
+        // No mcp dep in this manifest, so `mcp_json_written` is irrelevant.
+        snap.restore(false).unwrap();
         assert!(
             !live.exists(),
             "newly-created target must be removed on rollback"
@@ -427,7 +484,7 @@ mod tests {
         std::fs::create_dir_all(&live).unwrap();
         std::fs::write(live.join("NEW.md"), b"version-two").unwrap();
 
-        snap.restore().unwrap();
+        snap.restore(false).unwrap();
 
         assert!(
             live.join("OLD.md").is_file(),
@@ -476,11 +533,54 @@ mod tests {
         // Simulate the MCP installer rewriting the merge file.
         std::fs::write(&mcp_path, br#"{"mcpServers":{"some-server":{}}}"#).unwrap();
 
-        snap.restore().unwrap();
+        // Run actually wrote `.mcp.json` → it is reverted to prior bytes.
+        snap.restore(true).unwrap();
         assert_eq!(
             std::fs::read(&mcp_path).unwrap(),
             br#"{"mcpServers":{}}"#,
             "prior .mcp.json bytes must be restored"
+        );
+    }
+
+    /// Regression for the `.mcp.json` clobber bug: when an mcp dep is
+    /// merely declared but the run never WRITES `.mcp.json` (it was
+    /// skip / already-installed), a later dep's failure must NOT revert
+    /// `.mcp.json` — doing so would clobber servers the user already had.
+    ///
+    /// Here a skill dep "fails" (we simulate by passing
+    /// `mcp_json_written = false`, which is what the runner records when
+    /// no mcp adapter wrote the file). The pre-existing `.mcp.json` with
+    /// the user's own server must survive untouched.
+    #[test]
+    fn restore_does_not_revert_mcp_json_when_run_never_wrote_it() {
+        let claude = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_mcp("already-installed-server");
+
+        // User already has a server they care about in `.mcp.json`.
+        let mcp_path = project.path().join(".mcp.json");
+        let user_bytes = br#"{"mcpServers":{"user-kept-server":{"command":"x"}}}"#;
+        std::fs::write(&mcp_path, user_bytes).unwrap();
+
+        let snap = Snapshot::capture(&manifest, claude.path(), project.path()).unwrap();
+
+        // Capture must COPY (not move) `.mcp.json` so the adapter's
+        // read-modify-write still sees the user's prior servers.
+        assert_eq!(
+            std::fs::read(&mcp_path).unwrap(),
+            user_bytes,
+            "capture must leave the live .mcp.json in place (copy, not move)"
+        );
+
+        // The mcp dep was already-installed: the adapter never wrote the
+        // file. A later dep fails → rollback fires with
+        // `mcp_json_written = false`.
+        snap.restore(false).unwrap();
+
+        assert_eq!(
+            std::fs::read(&mcp_path).unwrap(),
+            user_bytes,
+            "an unwritten .mcp.json must NOT be reverted/clobbered on rollback"
         );
     }
 

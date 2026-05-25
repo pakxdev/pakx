@@ -12,6 +12,28 @@ const BIN: &str = "pakx";
 
 async fn mock_mcp_server_ok(id: &str) -> MockServer {
     let server = MockServer::start().await;
+    // Advertise a real npm transport so `translate` succeeds — the add
+    // path now runs the same translation the installer runs and only
+    // prints the clean `via official MCP Registry` line when an
+    // installable transport is present.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v0/servers/.+"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": id,
+            "version_detail": { "version": "1.2.3" },
+            "packages": [ { "registry_name": "npm", "name": "@acme/cool-mcp" } ]
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A server whose record exists but advertises NO installable transport
+/// (empty `packages` + `remotes`). `translate` returns `NoTransport`, so
+/// `pakx add` must downgrade to a `[warn]` and SUPPRESS the
+/// `→ next: pakx install` hint — installing it would always fail.
+async fn mock_mcp_server_no_transport(id: &str) -> MockServer {
+    let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/v0/servers/.+"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -443,5 +465,111 @@ async fn add_routes_success_line_to_stdout_and_hint_to_stderr() {
     assert!(
         !stdout.contains("\u{2192} next: pakx install"),
         "→ next hint must NOT be on stdout; got stdout:\n{stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Honest add: an id that resolves but advertises no installable transport.
+// ---------------------------------------------------------------------------
+
+/// Root user-reported defect: `pakx add mcp <id>` said OK + "→ next:
+/// pakx install", then `install` always failed because the id has no
+/// installable transport. The add now runs the installer's own
+/// translation: when it returns `NoTransport`, the add still writes the
+/// manifest (honest about the local intent) but downgrades to a `[warn]`
+/// and SUPPRESSES the `→ next: pakx install` hint so the user isn't
+/// pointed at a command that can't succeed.
+#[tokio::test]
+async fn add_no_transport_warns_and_suppresses_next_hint() {
+    let temp = TempDir::new().unwrap();
+    let id = "io.github.acme/no-transport";
+    let server = mock_mcp_server_no_transport(id).await;
+
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["add", "mcp", id, "--mcp-base-url", &server.uri()])
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    let stdout = String::from_utf8(assertion.get_output().stdout.clone()).unwrap();
+
+    assert!(
+        stderr.contains("advertises no installable transport"),
+        "must warn about the missing transport; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("pakx install` will fail"),
+        "warn must say install will fail; stderr:\n{stderr}"
+    );
+    // The crucial part: NO `→ next: pakx install` hint anywhere.
+    assert!(
+        !stderr.contains("\u{2192} next: pakx install"),
+        "the → next hint must be suppressed; stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("\u{2192} next: pakx install"),
+        "the → next hint must be suppressed on stdout too; stdout:\n{stdout}"
+    );
+
+    // The add itself still landed — we're honest, not obstructive.
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    let m = parse_manifest(&body, None).unwrap();
+    assert!(
+        m.dependencies.mcp.is_some_and(|d| d.len() == 1),
+        "the dep must still be written to the manifest; body:\n{body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Transient validation failure (non-NotFound) must not block the add.
+// ---------------------------------------------------------------------------
+
+/// A 500 / timeout / DNS failure during MCP validation previously
+/// `bail!`ed the whole add, blocking a local manifest write the user
+/// clearly intended. Now it's a soft warn: the add proceeds and the
+/// `→ next: pakx install` hint is preserved (install may well succeed
+/// once the registry is reachable again).
+#[tokio::test]
+async fn add_soft_warns_on_transient_validation_error() {
+    let temp = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+    // Every server-detail request 500s; the search fallback also 500s, so
+    // the client surfaces a non-NotFound transport error.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v0/servers.*"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let assertion = Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args([
+            "add",
+            "mcp",
+            "flaky/server",
+            "--mcp-base-url",
+            &server.uri(),
+        ])
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("couldn't reach the MCP Registry to validate"),
+        "must soft-warn on a transient error; stderr:\n{stderr}"
+    );
+    // Add still lands AND the → next hint is preserved (transient, not a
+    // proven-unusable package).
+    assert!(
+        stderr.contains("\u{2192} next: pakx install"),
+        "→ next hint preserved on a transient validation error; stderr:\n{stderr}"
+    );
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    assert!(
+        body.contains("flaky/server"),
+        "dep must be written; body:\n{body}"
     );
 }
