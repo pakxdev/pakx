@@ -53,7 +53,19 @@ owo-colors = "4"
 # UTF-8 bordered tables for `pakx list` / `pakx search`. Chosen over
 # `tabled` because it streams (no full-table macro) and clamps to a
 # user-supplied width — handy for piping to narrow terminals.
-comfy-table = { version = "7", default-features = false }
+#
+# `custom_styling` makes column-width measurement ANSI-aware: a cell
+# whose content is a pre-colored owo_colors string (e.g. the green
+# `[ok]` badge in `pakx list`) is measured by its VISIBLE width
+# (`ansi_strip().width()`) instead of its raw escaped byte length.
+# Without it, the escape bytes inflate the computed column width and
+# the box-drawing borders no longer line up under `--color always` /
+# a real color terminal. The feature pulls in `console` + `ansi-str`;
+# `console` is already in the tree via `indicatif`, so the cost is
+# near-zero. It also re-enables the `tty` (crossterm) dep that
+# `default-features = false` had dropped — still cheap, and we keep
+# `default-features = false` to avoid any other default pickups.
+comfy-table = { version = "7", default-features = false, features = ["custom_styling"] }
 # Spinners + progress bars for long ops (install, publish upload).
 # Disabling default features keeps `regex` out; we only use the bar +
 # spinner APIs.
