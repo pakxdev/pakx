@@ -6,6 +6,21 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-05-25
+
+### Fixed
+
+- **Interactive confirmation prompts now fail fast instead of hanging
+  when stdin is not a TTY.** `pakx remove` (and the interactive prompts
+  in `update` / `init` / `new`) previously blocked forever waiting on a
+  confirmation that could never arrive when run in CI or a piped script
+  with no controlling terminal. They now detect the missing TTY up
+  front and exit with a clear error pointing at the `--yes` flag instead
+  of hanging.
+- Isolated the per-call-cache cleanup tests from a shared tempdir so
+  they no longer flake on `macos-latest` CI. Test-only change; no
+  user-facing behaviour difference.
+
 ## [0.1.5] — 2026-05-25
 
 ### Added
