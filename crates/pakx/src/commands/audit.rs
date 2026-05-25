@@ -17,6 +17,17 @@
 //! **not** trip the exit code — same shape as `pakx outdated`, so a
 //! transient network blip never breaks a CI gate that only cares about
 //! real deprecation. CI gate: `pakx audit || echo "deprecated dep"`.
+//!
+//! `--offline` performs the same walk WITHOUT any network I/O. The
+//! deprecation signal lives behind `fetch_version`, which is a live
+//! request (signed-URL TTL discipline means it never reads an on-disk
+//! cache), so an offline audit cannot KNOW whether a pakx entry is
+//! deprecated. Rather than emit a false `ok`, every pakx entry is
+//! reported as `skip` with a `note` of `not checked (offline)` — the
+//! same exit-code-neutral status used for sources that lack a
+//! deprecation signal. Offline mode never trips exit code 1 (nothing
+//! can be confirmed deprecated without the network); it exits 0 so an
+//! airgapped CI gate degrades gracefully instead of false-failing.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -35,6 +46,18 @@ use crate::registry_url::validate_base_url;
 use crate::ui;
 
 const LOCKFILE_FILENAME: &str = "agents.lock";
+
+/// Note attached to a pakx row that was skipped because `--offline`
+/// suppressed the live `fetch_version` probe. Surfaced verbatim in the
+/// human table and in the additive `note` JSON field so the `skip`
+/// status reads honestly as "unknown, not checked" rather than "no
+/// deprecation signal exists".
+const OFFLINE_NOTE: &str = "not checked (offline)";
+
+/// Note attached to non-pakx rows: those registries expose no
+/// per-version deprecation signal, so the `skip` is structural, not a
+/// consequence of `--offline`.
+const NO_SIGNAL_NOTE: &str = "no deprecation signal";
 
 /// Restrict the audit to entries from a single registry. Mirrors the
 /// shape used by `pakx outdated --registry <tag>` so the two commands
@@ -98,15 +121,26 @@ pub struct AuditArgs {
     /// `pakx audit`, `pakx search`, etc.
     #[arg(long)]
     pub no_cache: bool,
+
+    /// Skip the network round-trip. Report purely from local state —
+    /// every pakx entry is marked `skip` (note: `not checked
+    /// (offline)`) because the deprecation signal can only be fetched
+    /// live. Use this in airgapped / no-egress CI: the audit never
+    /// false-fails, but it also can't confirm a deprecation, so it
+    /// always exits 0.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 /// Per-entry classification after the registry query.
 ///
 /// `Deprecated` is the actionable row (exits 1). `Skip` covers
 /// registries without a deprecation signal — informational, not an
-/// error. `Ok` means the version is still active. `Error` is surfaced
-/// both in the table and on stderr without tripping the exit code so a
-/// transient network blip doesn't break CI.
+/// error — and, under `--offline`, pakx entries whose signal could not
+/// be fetched (the row's `note` distinguishes the two cases). `Ok`
+/// means the version is still active. `Error` is surfaced both in the
+/// table and on stderr without tripping the exit code so a transient
+/// network blip doesn't break CI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
@@ -137,6 +171,14 @@ struct JsonRow<'a> {
     status: &'static str,
     #[serde(rename = "deprecatedAt")]
     deprecated_at: Option<&'a str>,
+    /// Human-readable qualifier on a `skip` row. `not checked
+    /// (offline)` for a pakx entry whose deprecation signal was
+    /// suppressed by `--offline`; `no deprecation signal` for sources
+    /// that structurally lack one. Omitted (not `null`) on `ok` /
+    /// `deprecated` / `error` rows so the field never reads as a false
+    /// signal. Additive contract — only present when meaningful.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
 }
@@ -149,6 +191,9 @@ struct Row {
     registry: RegistrySource,
     status: Status,
     deprecated_at: Option<String>,
+    /// Qualifier on a `skip` row. See [`JsonRow::note`]. `None` on
+    /// non-skip rows.
+    note: Option<&'static str>,
     /// Populated for `Status::Error` only. Routed to stderr; never
     /// painted into the table (would wrap and look ugly).
     error: Option<String>,
@@ -190,13 +235,23 @@ pub async fn run(args: AuditArgs) -> Result<ExitCode> {
     // Smithery today (those sources have no per-version deprecation
     // signal). Still validate the URLs early so a typo surfaces with a
     // clean error instead of silently being ignored.
-    let (pakx, _cache_guard) = build_pakx_source(args.pakx_base_url.as_deref(), args.no_cache)?;
-    if let Some(u) = args.mcp_base_url.as_deref() {
-        validate_base_url(u)?;
-    }
-    if let Some(u) = args.smithery_base_url.as_deref() {
-        validate_base_url(u)?;
-    }
+    //
+    // Under `--offline` we never construct a `PakxSource` (no HTTP
+    // client, no cache tempdir) and never validate the override URLs —
+    // they are inert in offline mode, and constructing the source would
+    // be the only place that could touch the network.
+    let pakx_source = if args.offline {
+        None
+    } else {
+        let (pakx, cache_guard) = build_pakx_source(args.pakx_base_url.as_deref(), args.no_cache)?;
+        if let Some(u) = args.mcp_base_url.as_deref() {
+            validate_base_url(u)?;
+        }
+        if let Some(u) = args.smithery_base_url.as_deref() {
+            validate_base_url(u)?;
+        }
+        Some((pakx, cache_guard))
+    };
 
     let mut rows = Vec::with_capacity(lock.entries.len());
     for entry in lock.entries.values() {
@@ -205,12 +260,20 @@ pub async fn run(args: AuditArgs) -> Result<ExitCode> {
                 continue;
             }
         }
-        rows.push(audit_entry(entry, &pakx).await);
+        let row = match pakx_source.as_ref() {
+            Some((pakx, _)) => audit_entry(entry, pakx).await,
+            None => audit_entry_offline(entry),
+        };
+        rows.push(row);
     }
 
     render(&rows, args.json);
 
-    let any_deprecated = rows.iter().any(|r| r.status == Status::Deprecated);
+    // Offline mode can never confirm a deprecation (the signal is a
+    // live fetch), so it never trips exit code 1 — an airgapped CI gate
+    // degrades to "all clear" instead of false-failing. Online mode
+    // keeps the round-49 contract: exit 1 iff any row is `deprecated`.
+    let any_deprecated = !args.offline && rows.iter().any(|r| r.status == Status::Deprecated);
     Ok(if any_deprecated {
         ExitCode::from(1)
     } else {
@@ -278,8 +341,43 @@ async fn audit_entry(entry: &LockEntry, pakx: &PakxSource) -> Row {
             registry,
             status: Status::Skip,
             deprecated_at: None,
+            note: Some(NO_SIGNAL_NOTE),
             error: None,
         },
+    }
+}
+
+/// Offline counterpart to [`audit_entry`]: classify every entry without
+/// any network I/O. pakx entries become `skip` with the
+/// [`OFFLINE_NOTE`] qualifier — the deprecation signal is a live fetch,
+/// so offline we honestly report "not checked" rather than guessing
+/// `ok`. Non-pakx entries are `skip` regardless of mode (no signal),
+/// so they reuse the same classification as the online path.
+fn audit_entry_offline(entry: &LockEntry) -> Row {
+    let registry = entry.registry;
+    let note = match registry {
+        RegistrySource::Pakx => OFFLINE_NOTE,
+        RegistrySource::OfficialMcp
+        | RegistrySource::Smithery
+        | RegistrySource::Glama
+        | RegistrySource::Github
+        | RegistrySource::Git => NO_SIGNAL_NOTE,
+    };
+    debug!(
+        target: "pakx::audit",
+        id = %entry.name,
+        version = %entry.version,
+        ?registry,
+        "offline: skipping live deprecation probe"
+    );
+    Row {
+        id: entry.name.clone(),
+        version: entry.version.clone(),
+        registry,
+        status: Status::Skip,
+        deprecated_at: None,
+        note: Some(note),
+        error: None,
     }
 }
 
@@ -306,6 +404,7 @@ async fn audit_pakx(
             registry,
             status: Status::Error,
             deprecated_at: None,
+            note: None,
             error: Some(reason),
         };
     };
@@ -323,6 +422,7 @@ async fn audit_pakx(
                 registry,
                 status,
                 deprecated_at,
+                note: None,
                 error: None,
             }
         }
@@ -337,6 +437,7 @@ async fn audit_pakx(
                 registry,
                 status: Status::Error,
                 deprecated_at: None,
+                note: None,
                 error: Some(reason),
             }
         }
@@ -375,6 +476,7 @@ fn render_json(rows: &[Row]) {
             registry: r.registry.as_tag(),
             status: r.status.as_str(),
             deprecated_at: r.deprecated_at.as_deref(),
+            note: r.note,
             error: r.error.as_deref(),
         })
         .collect();
@@ -404,7 +506,11 @@ fn render_human(rows: &[Row]) {
     for r in rows {
         let deprecated_at = match (r.status, r.deprecated_at.as_deref()) {
             (Status::Deprecated, Some(ts)) => ts.to_owned(),
-            (Status::Skip, _) => "(no deprecation signal)".to_owned(),
+            // Skip rows print their note verbatim so offline pakx rows
+            // ("not checked (offline)") read differently from
+            // structural skips ("no deprecation signal"). Parenthesised
+            // for the same visual cue the old single string carried.
+            (Status::Skip, _) => format!("({})", r.note.unwrap_or(NO_SIGNAL_NOTE)),
             _ => "\u{2014}".to_owned(),
         };
         table.add_row(vec![
