@@ -31,6 +31,7 @@ use commands::install::{self as install_cmd, InstallArgs};
 use commands::list::{self as list_cmd, ListArgs};
 use commands::login::{self as login_cmd, LoginArgs};
 use commands::manifest::{self as manifest_cmd, ManifestArgs};
+use commands::new::{self as new_cmd, NewArgs};
 use commands::outdated::{self as outdated_cmd, OutdatedArgs};
 use commands::pack::{self as pack_cmd, PackArgs};
 use commands::publish::{self as publish_cmd, PublishArgs};
@@ -69,6 +70,9 @@ struct Cli {
 enum Command {
     /// Create an `agents.yml` manifest in the current directory.
     Init(InitArgs),
+    /// Scaffold a publishable bundle for a kind (`pakx new skills <name>`).
+    #[command(alias = "scaffold")]
+    New(NewArgs),
     /// Add a dependency to `agents.yml`.
     Add(AddArgs),
     /// Remove a dependency from `agents.yml`.
@@ -156,6 +160,7 @@ async fn main() -> ExitCode {
 async fn dispatch(cmd: Command) -> Result<ExitCode> {
     match cmd {
         Command::Init(args) => init::run(args).await.map(|()| ExitCode::SUCCESS),
+        Command::New(args) => new_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Add(args) => add::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Remove(args) => remove_cmd::run(args).await.map(|()| ExitCode::SUCCESS),
         Command::Install(args) => install_cmd::run_cmd(args).await.map(|()| ExitCode::SUCCESS),
