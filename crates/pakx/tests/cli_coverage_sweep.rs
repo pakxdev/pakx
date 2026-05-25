@@ -937,7 +937,16 @@ async fn outdated_cleans_up_its_per_call_cache_root() {
     );
     std::fs::write(project.path().join("agents.lock"), lock).unwrap();
 
-    let tmp = std::env::temp_dir();
+    // Redirect the child's temp resolution into a per-test isolated
+    // dir so the cleanup assertion is immune to sibling tests churning
+    // the shared system temp between snapshots (round-93 flake fix).
+    // `pakx`'s per-call cache root derives from `std::env::temp_dir()`,
+    // which reads `TMPDIR` (Unix/macOS) and `TMP`/`TEMP` (Windows).
+    let iso = tempfile::Builder::new()
+        .prefix("pakx-cleanup-iso-")
+        .tempdir()
+        .unwrap();
+    let tmp = iso.path();
     let prefix = "pakx-outdated-cache-";
     let snapshot = |dir: &std::path::Path| -> std::collections::HashSet<std::ffi::OsString> {
         std::fs::read_dir(dir)
@@ -949,16 +958,19 @@ async fn outdated_cleans_up_its_per_call_cache_root() {
             })
             .unwrap_or_default()
     };
-    let before = snapshot(&tmp);
+    let before = snapshot(tmp);
 
     Command::cargo_bin(BIN)
         .unwrap()
         .current_dir(project.path())
+        .env("TMPDIR", tmp)
+        .env("TMP", tmp)
+        .env("TEMP", tmp)
         .args(["outdated", "--pakx-base-url", &pakx_registry.uri()])
         .assert()
         .success();
 
-    let after = snapshot(&tmp);
+    let after = snapshot(tmp);
 
     // Any entries present after the call but not before must have
     // been created by `pakx outdated`. The round-47 cleanup

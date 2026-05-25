@@ -33,12 +33,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const BIN: &str = "pakx";
 
 /// Snapshot the set of `pakx-*-cache-*` entries currently sitting in
-/// the system temp dir. Used to subtract the pre-test residue from
-/// the post-test scan so the assertion focuses on entries the
-/// command-under-test created, not historical clutter from other
-/// processes (or earlier test runs that crashed before drop).
-fn snapshot_pakx_cache_dirs() -> HashSet<std::ffi::OsString> {
-    std::fs::read_dir(std::env::temp_dir())
+/// `dir`. Used to subtract the pre-test residue from the post-test
+/// scan so the assertion focuses on entries the command-under-test
+/// created, not historical clutter from other processes (or earlier
+/// test runs that crashed before drop).
+///
+/// `dir` is a per-test isolated tempdir that we point the child
+/// process's temp-resolution env vars at (see [`isolated_temp`]), so
+/// this scan never sees `pakx-*-cache-*` dirs created by sibling
+/// tests running in parallel — the source of the round-93 flake.
+fn snapshot_pakx_cache_dirs(dir: &std::path::Path) -> HashSet<std::ffi::OsString> {
+    std::fs::read_dir(dir)
         .map(|it| {
             it.filter_map(Result::ok)
                 .map(|e| e.file_name())
@@ -49,6 +54,27 @@ fn snapshot_pakx_cache_dirs() -> HashSet<std::ffi::OsString> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Allocate a per-test tempdir to redirect a child `pakx` process's
+/// temp resolution into. `pakx`'s per-call cache root derives from
+/// `std::env::temp_dir()` (see `commands::cache_tempdir::make_cache_tempdir`),
+/// which reads `TMPDIR` on Unix/macOS and `TMP`/`TEMP` on Windows.
+/// Setting all three on the child (via [`apply_isolated_temp`]) lands
+/// every `pakx-<cmd>-cache-*` dir inside this isolated dir, so the
+/// cleanup assertion is immune to sibling tests churning the shared
+/// system temp between the before/after snapshots.
+fn isolated_temp() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("pakx-cleanup-iso-")
+        .tempdir()
+        .expect("isolated temp dir")
+}
+
+/// Point a child command's temp-resolution env vars at `dir` so its
+/// `std::env::temp_dir()` resolves into our isolated tempdir.
+fn apply_isolated_temp(cmd: &mut Command, dir: &std::path::Path) {
+    cmd.env("TMPDIR", dir).env("TMP", dir).env("TEMP", dir);
 }
 
 #[tokio::test]
@@ -70,22 +96,23 @@ async fn search_cleans_up_its_per_call_cache_tempdir() {
         .mount(&mcp)
         .await;
 
-    let before = snapshot_pakx_cache_dirs();
+    let iso = isolated_temp();
+    let before = snapshot_pakx_cache_dirs(iso.path());
 
-    Command::cargo_bin(BIN)
-        .unwrap()
-        .args([
-            "search",
-            "sample",
-            "--mcp-base-url",
-            &mcp.uri(),
-            "--no-smithery",
-            "--no-pakx-registry",
-        ])
-        .assert()
-        .success();
+    let mut cmd = Command::cargo_bin(BIN).unwrap();
+    apply_isolated_temp(&mut cmd, iso.path());
+    cmd.args([
+        "search",
+        "sample",
+        "--mcp-base-url",
+        &mcp.uri(),
+        "--no-smithery",
+        "--no-pakx-registry",
+    ])
+    .assert()
+    .success();
 
-    let after = snapshot_pakx_cache_dirs();
+    let after = snapshot_pakx_cache_dirs(iso.path());
 
     // Anything in `after` but not in `before` must have been created
     // by the `pakx search` invocation. The fix guarantees these are
@@ -98,7 +125,7 @@ async fn search_cleans_up_its_per_call_cache_tempdir() {
     assert!(
         leaked.is_empty(),
         "`pakx search` leaked cache tempdirs in {:?}: {:?}",
-        std::env::temp_dir(),
+        iso.path(),
         leaked,
     );
 }
@@ -146,11 +173,12 @@ async fn test_cleans_up_its_per_call_cache_tempdir() {
     )
     .unwrap();
 
-    let before = snapshot_pakx_cache_dirs();
+    let iso = isolated_temp();
+    let before = snapshot_pakx_cache_dirs(iso.path());
 
-    Command::cargo_bin(BIN)
-        .unwrap()
-        .current_dir(project.path())
+    let mut cmd = Command::cargo_bin(BIN).unwrap();
+    apply_isolated_temp(&mut cmd, iso.path());
+    cmd.current_dir(project.path())
         .args([
             "test",
             "--mcp-base-url",
@@ -161,7 +189,7 @@ async fn test_cleans_up_its_per_call_cache_tempdir() {
         .assert()
         .success();
 
-    let after = snapshot_pakx_cache_dirs();
+    let after = snapshot_pakx_cache_dirs(iso.path());
 
     let leaked: Vec<_> = after
         .difference(&before)
@@ -170,7 +198,7 @@ async fn test_cleans_up_its_per_call_cache_tempdir() {
     assert!(
         leaked.is_empty(),
         "`pakx test` leaked cache tempdirs in {:?}: {:?}",
-        std::env::temp_dir(),
+        iso.path(),
         leaked,
     );
 }
