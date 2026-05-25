@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use comfy_table::Cell;
 use pakx_core::http_client;
+use pakx_core::manifest::{PackageType, PACKAGE_TYPES};
 use pakx_registry_client::{
     OfficialMcpSource, PakxSource, RegistryClient, SmitherySource, OFFICIAL_MCP_BASE_URL,
     PAKX_BASE_URL, SMITHERY_BASE_URL,
@@ -31,6 +32,18 @@ pub struct SearchArgs {
     /// clean diagnostic instead of producing an empty result page.
     #[arg(short = 'n', long, default_value_t = 20, value_parser = parse_limit)]
     pub limit: usize,
+
+    /// Filter results to a single package kind.
+    ///
+    /// Accepts the same kind tokens as the rest of the CLI
+    /// (`skills` / `mcp` / `subagents` / `prompts` / `commands` /
+    /// `hooks`). For the pakx-registry source the kind is forwarded as
+    /// `?kind=<kind>` so the registry does the filtering server-side;
+    /// federated sources with no kind concept (Smithery, the official MCP
+    /// Registry) list MCP servers exclusively, so `--kind mcp` keeps them
+    /// and any other kind drops them. Composes with the search query.
+    #[arg(long, value_parser = parse_kind)]
+    pub kind: Option<PackageType>,
 
     /// Emit machine-readable JSON on stdout (single line, newline-terminated).
     /// Field names are a stable contract for downstream pipelines.
@@ -95,6 +108,12 @@ struct JsonHit<'a> {
     name: &'a str,
     version: &'a str,
     source: &'static str,
+    /// Declared package kind. **Additive field** — `null` for federated
+    /// sources that carry no kind discriminator (Smithery, official MCP
+    /// Registry), the raw registry-declared kind string for pakx hits
+    /// (e.g. `"skill"`). Every pre-existing key (`id` / `name` /
+    /// `version` / `source` / `description`) keeps its shape.
+    kind: Option<&'a str>,
     /// Empty string when upstream has no description.
     description: &'a str,
 }
@@ -116,7 +135,8 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         args.no_cache,
     )?;
     let query = args.query.unwrap_or_default();
-    let results = client.search(&query).await;
+    let kind_tag = args.kind.map(PackageType::as_str);
+    let results = client.search_kind(&query, kind_tag).await;
 
     let truncated: Vec<_> = results.iter().take(args.limit).collect();
 
@@ -128,6 +148,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
                 name: pkg.name.as_str(),
                 version: pkg.version.as_str(),
                 source: pkg.source.as_tag(),
+                kind: pkg.kind.as_deref(),
                 description: pkg.description.as_deref().unwrap_or(""),
             })
             .collect();
@@ -144,14 +165,19 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     let mut table = ui::table();
     table.set_header(vec![
         Cell::new("source"),
+        Cell::new("kind"),
         Cell::new("name"),
         Cell::new("version"),
         Cell::new("description"),
     ]);
     for pkg in &truncated {
         let desc = pkg.description.as_deref().unwrap_or("");
+        // Federated sources carry no kind discriminator → render a dash
+        // rather than an empty cell so the column reads cleanly.
+        let kind = pkg.kind.as_deref().unwrap_or("-");
         table.add_row(vec![
             Cell::new(pkg.source.as_tag()),
+            Cell::new(kind),
             Cell::new(truncate(&pkg.name, 50)),
             Cell::new(pkg.version.as_str()),
             Cell::new(truncate(desc, 60)),
@@ -259,6 +285,22 @@ fn parse_limit(s: &str) -> Result<usize, String> {
         return Err("--limit must be >= 1 (use a larger value to see results)".to_owned());
     }
     Ok(n)
+}
+
+/// Clap value parser for `--kind`. Accepts exactly the canonical plural
+/// kind tokens (`skills` / `mcp` / ...) so the accepted set is identical
+/// to `pakx add <kind> <id>` and the rest of the CLI. Pulled from
+/// [`PACKAGE_TYPES`] so a future kind addition flows through here without
+/// a second edit.
+fn parse_kind(s: &str) -> Result<PackageType, String> {
+    PACKAGE_TYPES
+        .iter()
+        .copied()
+        .find(|t| t.as_str() == s)
+        .ok_or_else(|| {
+            let allowed: Vec<&str> = PACKAGE_TYPES.iter().map(|t| t.as_str()).collect();
+            format!("invalid kind {s:?}: expected one of {}", allowed.join("|"))
+        })
 }
 
 fn truncate(s: &str, max: usize) -> String {

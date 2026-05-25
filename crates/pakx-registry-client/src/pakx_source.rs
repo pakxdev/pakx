@@ -55,8 +55,15 @@ impl PakxSource {
         }
     }
 
-    fn cache_key_search(&self, query: &str) -> String {
-        format!("{TAG}@{}:search:{query}", self.base_url)
+    fn cache_key_search(&self, query: &str, kind: Option<&str>) -> String {
+        // The kind filter changes the server response, so it must be part
+        // of the cache key — otherwise a `--kind skills` query would hand
+        // back the cached unfiltered page (or vice versa) on the same
+        // base URL within the TTL window.
+        kind.map_or_else(
+            || format!("{TAG}@{}:search:{query}", self.base_url),
+            |k| format!("{TAG}@{}:search:{k}:{query}", self.base_url),
+        )
     }
 
     fn cache_key_fetch(&self, id: &str) -> String {
@@ -198,16 +205,37 @@ impl Source for PakxSource {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Package>, RegistryError> {
-        let key = self.cache_key_search(query);
+        self.search_kind(query, None).await
+    }
+
+    async fn search_kind(
+        &self,
+        query: &str,
+        kind: Option<&str>,
+    ) -> Result<Vec<Package>, RegistryError> {
+        let key = self.cache_key_search(query, kind);
         let http = self.http.clone();
         let base_url = self.base_url.clone();
         let q = query.to_owned();
+        let kind_owned = kind.map(str::to_owned);
         self.cache
             .get_or_fetch::<Vec<Package>, _, _>(&key, move || async move {
-                let url = if q.is_empty() {
+                // Compose `?q=` and `?kind=` independently — round 24's
+                // registry filter (`GET /api/v1/packages?kind=<kind>`)
+                // composes with the existing `?q=` text search, so the
+                // server does the kind filtering and the CLI never has to
+                // post-filter pakx hits.
+                let mut params: Vec<String> = Vec::new();
+                if !q.is_empty() {
+                    params.push(format!("q={}", urlencoding_minimal(&q)));
+                }
+                if let Some(k) = &kind_owned {
+                    params.push(format!("kind={}", urlencoding_minimal(k)));
+                }
+                let url = if params.is_empty() {
                     format!("{base_url}/api/v1/packages")
                 } else {
-                    format!("{base_url}/api/v1/packages?q={}", urlencoding_minimal(&q))
+                    format!("{base_url}/api/v1/packages?{}", params.join("&"))
                 };
                 debug!(target: "pakx::registry", %url, "pakx search");
                 let body: ListResponse = http
@@ -396,7 +424,12 @@ struct VersionEntry {
 
 fn list_into_package(raw: ListEntry) -> Package {
     let version = raw.latest_version.unwrap_or_else(|| "0.0.0".to_string());
+    let kind = raw.kind.clone();
     let mut hints = raw.extra;
+    // Keep `kind` mirrored into install_hints as well as on the typed
+    // `Package::kind` field: `commands::add::probe_pakx_kind` reads the
+    // hint to infer the install destination, and dropping it here would
+    // silently re-break the `pakx add` kind-inference path.
     if let Some(k) = raw.kind {
         hints.insert("kind".into(), Value::String(k));
     }
@@ -406,6 +439,7 @@ fn list_into_package(raw: ListEntry) -> Package {
         name: raw.id,
         version,
         description: raw.description,
+        kind,
         install_hints: Value::Object(hints),
     }
 }
@@ -416,6 +450,7 @@ fn detail_into_package(raw: DetailResponse, fallback_id: String) -> Package {
         .versions
         .first()
         .map_or_else(|| "0.0.0".to_string(), |v| v.version.clone());
+    let kind = raw.kind.clone();
     let mut hints = raw.extra;
     if let Some(k) = raw.kind {
         hints.insert("kind".into(), Value::String(k));
@@ -436,6 +471,7 @@ fn detail_into_package(raw: DetailResponse, fallback_id: String) -> Package {
         name: id,
         version,
         description: raw.description,
+        kind,
         install_hints: Value::Object(hints),
     }
 }

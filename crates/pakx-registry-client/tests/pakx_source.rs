@@ -78,6 +78,87 @@ async fn search_maps_list_entries() {
     assert!(results[1].description.is_none());
 }
 
+/// `Package::kind` is surfaced on the typed struct (not only buried in
+/// `install_hints`) so `pakx search` can render a kind column / JSON
+/// field without re-parsing the hint blob. Additive: federated sources
+/// emit `None`, the pakx-registry carries the declared kind verbatim.
+#[tokio::test]
+async fn search_surfaces_kind_on_package_struct() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [
+                { "id": "acme/one", "kind": "skill", "latestVersion": "1.0.0" },
+                { "id": "acme/two", "latestVersion": "2.0.0" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let results = src.search("").await.unwrap();
+    assert_eq!(results.len(), 2);
+    // Declared kind surfaces on the typed field.
+    assert_eq!(results[0].kind.as_deref(), Some("skill"));
+    // Still mirrored into install_hints for `pakx add`'s probe path.
+    assert_eq!(
+        results[0]
+            .install_hints
+            .get("kind")
+            .and_then(|v| v.as_str()),
+        Some("skill")
+    );
+    // Missing kind → None (additive, no fabrication).
+    assert_eq!(results[1].kind, None);
+}
+
+/// `search_kind(query, Some("skills"))` forwards the registry's round-24
+/// `?kind=<kind>` filter server-side, composed with the `?q=` text
+/// search. The mock asserts BOTH query params reach the wire.
+#[tokio::test]
+async fn search_kind_forwards_kind_query_param() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages"))
+        .and(query_param("q", "hello"))
+        .and(query_param("kind", "skills"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [{ "id": "acme/hello", "kind": "skill", "latestVersion": "0.1.0" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let results = src.search_kind("hello", Some("skills")).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, "acme/hello");
+    assert_eq!(results[0].kind.as_deref(), Some("skill"));
+}
+
+/// `search_kind` with no query still forwards `?kind=` alone (no stray
+/// `?q=`), so a bare `pakx search --kind mcp` hits the right endpoint.
+#[tokio::test]
+async fn search_kind_forwards_kind_without_query() {
+    let server = MockServer::start().await;
+    let cache = TempDir::new().unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages"))
+        .and(query_param("kind", "mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [{ "id": "acme/srv", "kind": "mcp", "latestVersion": "1.0.0" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let src = source_against(&server, &cache);
+    let results = src.search_kind("", Some("mcp")).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, "acme/srv");
+}
+
 #[tokio::test]
 async fn search_forwards_query_param() {
     let server = MockServer::start().await;

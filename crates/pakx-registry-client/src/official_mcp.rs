@@ -282,6 +282,12 @@ fn into_package(raw: ServerRaw) -> Package {
         name: core.name,
         version,
         description: core.description,
+        // The official MCP Registry lists MCP servers exclusively, but the
+        // wire shape carries no explicit kind discriminator. Emit `None`
+        // rather than synthesising `mcp` — the "no kind concept ⇒ MCP" rule
+        // for `pakx search --kind mcp` lives in the search command, keeping
+        // this field an honest reflection of what the source declared.
+        kind: None,
         install_hints: Value::Object(extra),
     }
 }
