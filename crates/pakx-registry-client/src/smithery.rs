@@ -148,6 +148,13 @@ fn into_package(raw: ServerRaw) -> Package {
         // Surface "latest" as a placeholder until Phase A v2 lands.
         version: "latest".to_owned(),
         description: raw.description,
+        // Smithery has no kind concept — every entry is an MCP server, but
+        // the source carries no explicit kind discriminator, so emit `None`
+        // rather than asserting `mcp` and lying about a field the upstream
+        // never declared. `pakx search --kind mcp` filters these in via the
+        // source-level "no kind concept ⇒ MCP" rule (documented in the
+        // search command), not via this field.
+        kind: None,
         install_hints,
     }
 }

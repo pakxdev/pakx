@@ -3,7 +3,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::{json, Value};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const BIN: &str = "pakx";
@@ -549,6 +549,265 @@ async fn search_accepts_no_cache_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("io.github.acme/cached"));
+}
+
+// ---------------------------------------------------------------------------
+// `--kind <kind>` filter (kind-first-class-everywhere completion).
+//
+// pakx source: forwards `?kind=<kind>` so the registry filters server-side.
+// Federated sources (smithery / official-mcp): no kind concept — `--kind mcp`
+// keeps them, any other `--kind` drops them, filtered client-side.
+// ---------------------------------------------------------------------------
+
+/// `--kind skills` forwards `?kind=skills` to the pakx-registry list
+/// endpoint (round-24 server-side filter). The mock only answers when
+/// BOTH the query AND the kind param arrive, so a passing assert proves
+/// the param reached the wire.
+#[tokio::test]
+async fn search_kind_skills_forwards_param_to_pakx_registry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages"))
+        .and(query_param("kind", "skills"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [
+                { "id": "alice/my-skill", "kind": "skill", "description": "a skill", "latestVersion": "1.0.0" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--pakx-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-official-mcp",
+            "--kind",
+            "skills",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("alice/my-skill"))
+        // The kind column renders the declared kind.
+        .stdout(predicate::str::contains("skill"));
+}
+
+/// `--kind` JSON output carries the additive `kind` field on each hit
+/// while keeping every pre-existing key intact.
+#[tokio::test]
+async fn search_kind_json_emits_kind_field() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages"))
+        .and(query_param("kind", "skills"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [
+                { "id": "alice/my-skill", "kind": "skill", "description": "a skill", "latestVersion": "1.0.0" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--pakx-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-official-mcp",
+            "--kind",
+            "skills",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let arr = parsed.as_array().expect("top level is an array");
+    assert_eq!(arr.len(), 1);
+    let hit = &arr[0];
+    // Additive field present + correct.
+    assert_eq!(hit["kind"], "skill");
+    // Every pre-existing key still present + unchanged shape.
+    for key in ["id", "name", "version", "source", "description"] {
+        assert!(hit.get(key).is_some(), "missing key {key:?} in {hit:?}");
+    }
+    assert_eq!(hit["id"], "alice/my-skill");
+    assert_eq!(hit["source"], "pakx");
+}
+
+/// The human table grows a `kind` column. Pin the header so a future
+/// column-drop regression trips this test.
+#[tokio::test]
+async fn search_human_table_has_kind_column() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/packages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "packages": [
+                { "id": "alice/my-skill", "kind": "skill", "latestVersion": "1.0.0" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--pakx-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-official-mcp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("kind"))
+        .stdout(predicate::str::contains("skill"));
+}
+
+/// `--kind skills` with ONLY federated (no-kind) sources returns an
+/// empty result — the documented "no kind concept ⇒ drop on any
+/// non-mcp filter" behavior. The official-mcp source returns a hit that
+/// the client-side filter then drops.
+#[tokio::test]
+async fn search_kind_skills_drops_federated_only_results() {
+    let mcp = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.acme/srv", "description": "an mcp", "version_detail": {"version": "1.0.0"} }
+            ]
+        })))
+        .mount(&mcp)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &mcp.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--kind",
+            "skills",
+        ])
+        .assert()
+        .success()
+        // Federated hit dropped by the client-side kind filter.
+        .stderr(predicate::str::contains("no results"));
+}
+
+/// `--kind mcp` KEEPS federated (no-kind) hits — Smithery and the
+/// official MCP Registry list MCP servers exclusively, so the
+/// "no kind concept ⇒ MCP" rule surfaces them under `--kind mcp`.
+#[tokio::test]
+async fn search_kind_mcp_keeps_federated_results() {
+    let mcp = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.acme/srv", "description": "an mcp", "version_detail": {"version": "1.0.0"} }
+            ]
+        })))
+        .mount(&mcp)
+        .await;
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &mcp.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--kind",
+            "mcp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("io.github.acme/srv"));
+}
+
+/// Search WITHOUT `--kind` is unchanged: the JSON shape gains the
+/// additive `kind` field (now `null` for federated MCP hits) but every
+/// pre-existing key is intact and no existing key is renamed/removed.
+#[tokio::test]
+async fn search_without_kind_json_keys_intact_with_additive_kind() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/servers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "servers": [
+                { "name": "io.github.acme/one", "description": "first", "version_detail": {"version": "1.0.0"} }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "search",
+            "--mcp-base-url",
+            &server.uri(),
+            "--no-smithery",
+            "--no-pakx-registry",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let hit = &parsed.as_array().unwrap()[0];
+    // Every legacy key still present.
+    for key in ["id", "name", "version", "source", "description"] {
+        assert!(hit.get(key).is_some(), "missing key {key:?} in {hit:?}");
+    }
+    // Additive kind field present + null for a no-kind federated source.
+    assert!(hit.get("kind").is_some(), "kind field must be present");
+    assert!(hit["kind"].is_null(), "federated mcp kind must be null");
+    assert_eq!(hit["source"], "official-mcp");
+}
+
+/// `--kind` rejects an unknown kind token at parse time with a precise
+/// diagnostic listing the accepted set — same value space as
+/// `pakx add <kind> <id>`.
+#[test]
+fn search_kind_rejects_unknown_kind_at_parse_time() {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args(["search", "anything", "--kind", "skill"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid kind"));
+}
+
+/// `--kind` must appear in the help surface so users discover the
+/// filter alongside the source toggles.
+#[test]
+fn search_help_advertises_kind_flag() {
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args(["search", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    assert!(help.contains("--kind"), "help missing --kind: {help}");
 }
 
 /// `--no-official-mcp` must appear in the help surface so users

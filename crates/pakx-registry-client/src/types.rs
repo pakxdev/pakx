@@ -17,6 +17,18 @@ pub struct Package {
     pub version: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Declared package kind as surfaced by the source.
+    ///
+    /// **Additive** (`#[serde(default)]`): federated sources that have no
+    /// kind concept (Smithery, official MCP Registry) deserialize this to
+    /// `None`; the first-party pakx-registry carries the publisher-declared
+    /// kind string (e.g. `"skill"` / `"mcp"`). The value is the *raw* wire
+    /// string from the source — callers that need to compare it against the
+    /// CLI's [`pakx_core::manifest::PackageType`] should normalize via a
+    /// tolerant mapper, since the registry historically emits the singular
+    /// form (`"skill"`) while the manifest uses the plural (`"skills"`).
+    #[serde(default)]
+    pub kind: Option<String>,
     /// Source-specific install metadata. Schema differs per source.
     #[serde(default)]
     pub install_hints: serde_json::Value,

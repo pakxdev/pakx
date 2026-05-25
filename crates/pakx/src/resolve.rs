@@ -141,6 +141,7 @@ mod tests {
             name: id.to_owned(),
             version: version.to_owned(),
             description: None,
+            kind: None,
             install_hints: json!({}),
         }
     }

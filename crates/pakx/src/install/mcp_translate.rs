@@ -201,6 +201,7 @@ mod tests {
             name: "io.github.acme/cool".into(),
             version: "1.0.0".into(),
             description: None,
+            kind: None,
             install_hints: hints,
         }
     }
