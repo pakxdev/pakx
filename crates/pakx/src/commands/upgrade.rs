@@ -440,7 +440,45 @@ fn resolve_current_exe() -> Result<PathBuf> {
     // Canonicalize so symlinks (e.g. brew's `bin/pakx` -> `Cellar/...`)
     // resolve to their real location before we classify. If canonicalize
     // fails (path vanished mid-run), fall back to the raw path.
-    Ok(exe.canonicalize().unwrap_or(exe))
+    //
+    // On Windows, `canonicalize` returns an extended-length / "verbatim"
+    // path with a `\\?\` prefix (e.g. `\\?\C:\Users\u\.pakx\bin\pakx.exe`).
+    // The verbatim form decomposes into a `Prefix(VerbatimDisk('C'))`
+    // first component, which is NOT equal to the `Prefix(Disk('C'))`
+    // component produced by the plain roots built from `home_dir()` /
+    // `CARGO_HOME` — so the component-wise `starts_with` in
+    // `detect_channel` would miss every channel and fall through to
+    // Unknown. Strip the prefix back to a plain drive path so the roots
+    // match. `strip_verbatim` is a no-op on non-verbatim / non-Windows
+    // paths.
+    let canon = exe.canonicalize().unwrap_or_else(|_| exe.clone());
+    Ok(strip_verbatim(&canon))
+}
+
+/// Strip a Windows extended-length ("verbatim") prefix from `path`,
+/// returning a plain drive path that matches the roots `detect_channel`
+/// builds from `home_dir()` / `CARGO_HOME`.
+///
+/// - `\\?\UNC\server\share\...` → `\\server\share\...`
+/// - `\\?\C:\...`               → `C:\...`
+/// - anything else              → unchanged
+///
+/// Operates on the lossy string form so it is fully testable on every
+/// platform (the byte transform is identical regardless of the host's
+/// native separator). Non-verbatim input is returned untouched.
+#[must_use]
+fn strip_verbatim(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    // Verbatim UNC: re-prepend the `\\` that names the host.
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    // Verbatim disk: drop the `\\?\` to recover a plain drive path.
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    // Not verbatim (or not Windows) — return unchanged.
+    path.to_path_buf()
 }
 
 /// Classify the install channel from the executable path. Pure: every
@@ -572,15 +610,33 @@ impl UpgradePlan {
 
 /// True when `path` is `base` or lives beneath it. Comparison is
 /// component-wise so it doesn't trip on trailing separators or `..`.
+///
+/// On Windows the comparison is case-insensitive: the filesystem is, and
+/// the casing of `home_dir()` (`C:\Users\Arwen`) can differ from the
+/// canonicalized exe path (`...arwen`), which would otherwise miss. On
+/// Unix the comparison stays case-sensitive (paths are case-sensitive
+/// there). This brings `starts_with` to parity with
+/// `path_contains_segments`, which already lowercases.
 fn starts_with(path: &Path, base: &Path) -> bool {
     let mut p = path.components();
     for b in base.components() {
         match p.next() {
-            Some(pc) if pc == b => {}
+            Some(pc) if components_eq(pc, b) => {}
             _ => return false,
         }
     }
     true
+}
+
+/// Compare two path components for `starts_with`. Case-insensitive on
+/// Windows (where the filesystem is), case-sensitive everywhere else.
+fn components_eq(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
+    if cfg!(windows) {
+        a.as_os_str().to_string_lossy().to_ascii_lowercase()
+            == b.as_os_str().to_string_lossy().to_ascii_lowercase()
+    } else {
+        a == b
+    }
 }
 
 /// True when `needles` appear as consecutive path components anywhere in
@@ -685,6 +741,48 @@ mod tests {
     fn detects_script_from_pakx_bin_windows() {
         let env = env_with(r"C:\Users\u", Some(r"C:\Users\u\.cargo"), Os::Windows);
         let exe = PathBuf::from(r"C:\Users\u\.pakx\bin\pakx.exe");
+        assert_eq!(detect_channel(&exe, &env), Channel::Script);
+    }
+
+    // Windows-only regression for the verbatim-prefix bug: on Windows
+    // `current_exe().canonicalize()` returns a `\\?\C:\...` path. Before
+    // the `strip_verbatim` fix in `resolve_current_exe`, the verbatim disk
+    // prefix component did not equal the plain disk prefix from
+    // `home_dir()`, so `detect_channel` fell through to Unknown and the
+    // channel menu was printed instead of auto-running the script upgrade.
+    // Feeding the stripped+detected path here asserts the fix: a verbatim
+    // `~/.pakx/bin` path classifies as Script (not Unknown).
+    #[cfg(windows)]
+    #[test]
+    fn detects_script_from_verbatim_pakx_bin_windows() {
+        let env = env_with(r"C:\Users\u", Some(r"C:\Users\u\.cargo"), Os::Windows);
+        // The exact shape `canonicalize` returns on Windows.
+        let verbatim = PathBuf::from(r"\\?\C:\Users\u\.pakx\bin\pakx.exe");
+        let exe = strip_verbatim(&verbatim);
+        assert_eq!(detect_channel(&exe, &env), Channel::Script);
+    }
+
+    // Companion: a verbatim `~/.cargo/bin` path classifies as Cargo after
+    // stripping (the cargo arm of the same root-comparison bug).
+    #[cfg(windows)]
+    #[test]
+    fn detects_cargo_from_verbatim_cargo_bin_windows() {
+        let env = env_with(r"C:\Users\u", Some(r"C:\Users\u\.cargo"), Os::Windows);
+        let verbatim = PathBuf::from(r"\\?\C:\Users\u\.cargo\bin\pakx.exe");
+        let exe = strip_verbatim(&verbatim);
+        assert_eq!(detect_channel(&exe, &env), Channel::Cargo);
+    }
+
+    // Windows-only regression for the case-insensitivity bug: the home dir
+    // reported by `home_dir()` can differ in case from the canonicalized
+    // exe path (`C:\Users\U` vs `c:\users\u`). With case-sensitive
+    // component comparison this missed every channel; `components_eq`
+    // lowercases on Windows so it now matches.
+    #[cfg(windows)]
+    #[test]
+    fn detects_script_case_insensitive_windows() {
+        let env = env_with(r"c:\users\u", Some(r"c:\users\u\.cargo"), Os::Windows);
+        let exe = PathBuf::from(r"C:\Users\U\.pakx\bin\pakx.exe");
         assert_eq!(detect_channel(&exe, &env), Channel::Script);
     }
 
@@ -851,6 +949,41 @@ mod tests {
             &PathBuf::from("/a/bc"),
             &PathBuf::from("/a/b")
         ));
+    }
+
+    // -- strip_verbatim (pure, runs on every platform) ---------------------
+
+    #[test]
+    fn strip_verbatim_removes_disk_prefix() {
+        // The exact failing case: `canonicalize` on Windows yields this
+        // shape, which broke component-wise root matching.
+        assert_eq!(
+            strip_verbatim(&PathBuf::from(r"\\?\C:\Users\u\.pakx\bin\pakx.exe")),
+            PathBuf::from(r"C:\Users\u\.pakx\bin\pakx.exe"),
+        );
+    }
+
+    #[test]
+    fn strip_verbatim_rewrites_unc_prefix() {
+        // `\\?\UNC\server\share\...` → `\\server\share\...`.
+        assert_eq!(
+            strip_verbatim(&PathBuf::from(r"\\?\UNC\server\share\pakx\bin\pakx.exe")),
+            PathBuf::from(r"\\server\share\pakx\bin\pakx.exe"),
+        );
+    }
+
+    #[test]
+    fn strip_verbatim_leaves_plain_paths_untouched() {
+        // Non-verbatim Windows-style path: unchanged.
+        assert_eq!(
+            strip_verbatim(&PathBuf::from(r"C:\Users\u\.pakx\bin\pakx.exe")),
+            PathBuf::from(r"C:\Users\u\.pakx\bin\pakx.exe"),
+        );
+        // Unix-style path: unchanged.
+        assert_eq!(
+            strip_verbatim(&PathBuf::from("/home/u/.pakx/bin/pakx")),
+            PathBuf::from("/home/u/.pakx/bin/pakx"),
+        );
     }
 
     #[test]
