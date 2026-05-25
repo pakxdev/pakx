@@ -159,6 +159,28 @@ pub async fn run(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
+    let table = build_table(&entries);
+    println!("{table}");
+
+    Ok(())
+}
+
+/// Build the human-readable `pakx list` table from the reconciled
+/// entries.
+///
+/// The `status` cell holds a PRE-COLORED `owo_colors` string (e.g. the
+/// green-bold `[ok]` badge) when stdout color is enabled. comfy-table
+/// is built with the `custom_styling` feature so its column-width
+/// measurement is ANSI-aware (`ansi_strip().width()`): the badge cell
+/// is measured by its 4-visible-char width, not by the ~13 raw escaped
+/// bytes. Without that feature the escape bytes inflate the `status`
+/// column and the box-drawing borders no longer line up under
+/// `--color always` / a real color terminal.
+///
+/// Extracted from [`run`] so the alignment invariant is unit-testable
+/// with color forced on (see the `tests` module): a colored cell must
+/// not widen the column relative to its visible content.
+fn build_table(entries: &[(&String, &LockEntry, &'static str)]) -> comfy_table::Table {
     let mut table = ui::table();
     // `kind` sits between `id` and `version` so a reader scans
     // "what package, what type, what version" left-to-right. The
@@ -173,7 +195,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
         Cell::new("registry"),
         Cell::new("agents"),
     ]);
-    for (_key, entry, status) in &entries {
+    for (_key, entry, status) in entries {
         let badge = match *status {
             "ok" => ui::glyph_ok(),
             "drift" => ui::glyph_drift(),
@@ -194,9 +216,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
             Cell::new(agents),
         ]);
     }
-    println!("{table}");
-
-    Ok(())
+    table
 }
 
 fn build_claude(
@@ -215,4 +235,138 @@ fn matches_entry(installed: &pakx_agents::Installed, entry: &pakx_core::LockEntr
     // installed.id and entry.name both hold canonical `<owner>/<name>`;
     // differently-named fields are intentional, not a copy-paste bug.
     installed.id == entry.name && installed.version == entry.version
+}
+
+#[cfg(test)]
+mod tests {
+    use comfy_table::presets;
+    use comfy_table::{Cell, CellAlignment, ContentArrangement, Table};
+    use owo_colors::{OwoColorize, Style};
+
+    /// Strip ANSI escape sequences (CSI `ESC [ ... m`) so we can measure
+    /// the VISIBLE width of a rendered table line. Deliberately tiny and
+    /// dependency-free — the badge cell only ever carries SGR color
+    /// sequences (`\x1b[32m`, `\x1b[1m`, `\x1b[0m`).
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Consume `[ … <final byte>` of a CSI sequence. SGR
+                // (color) sequences end in `m`; any final byte in the
+                // 0x40..=0x7e range terminates a CSI sequence.
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for inner in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&inner) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Build a table mirroring the real `pakx list` layout, but with the
+    /// status cell forced to a PRE-COLORED `owo_colors` string (the same
+    /// shape `ui::glyph_ok()` produces under `--color always`). This
+    /// isolates the width-measurement behaviour without touching the
+    /// process-global color `OnceLock` that `ui::glyph_ok()` reads.
+    fn colored_status_table() -> Table {
+        let mut t = Table::new();
+        t.load_preset(presets::UTF8_FULL_CONDENSED);
+        t.set_content_arrangement(ContentArrangement::Dynamic);
+        t.set_header(vec![
+            Cell::new("status"),
+            Cell::new("id"),
+            Cell::new("kind"),
+            Cell::new("version").set_alignment(CellAlignment::Right),
+            Cell::new("registry"),
+            Cell::new("agents"),
+        ]);
+        // `[ok]` painted green+bold — exactly what the badge cell holds
+        // when stdout color is on. Raw byte length is ~13; visible width
+        // is 4. Without comfy-table's `custom_styling` feature the column
+        // is sized from the 13 escaped bytes and the borders misalign.
+        let badge = "[ok]".style(Style::new().green().bold()).to_string();
+        assert!(
+            badge.len() > "[ok]".len(),
+            "test precondition: badge must actually carry ANSI bytes"
+        );
+        t.add_row(vec![
+            Cell::new(badge),
+            Cell::new("arwenizEr/hello-world"),
+            Cell::new("skills"),
+            Cell::new("0.1.0").set_alignment(CellAlignment::Right),
+            Cell::new("pakx"),
+            Cell::new("claude-code"),
+        ]);
+        t
+    }
+
+    /// Regression for the colored-table misalignment bug: a pre-colored
+    /// status cell must NOT inflate its column width. We assert every
+    /// rendered line has the SAME visible width (ANSI stripped). Before
+    /// enabling comfy-table's `custom_styling` feature this FAILS — the
+    /// header/data border lines differ in visible width because the
+    /// `status` column is sized from the escaped byte length of the
+    /// badge while the badge renders as 4 visible chars.
+    #[test]
+    fn colored_status_cell_does_not_misalign_table() {
+        let table = colored_status_table();
+        let rendered = table.to_string();
+
+        let widths: Vec<usize> = rendered
+            .lines()
+            .map(|line| strip_ansi(line).chars().count())
+            .collect();
+        assert!(widths.len() >= 4, "expected a bordered multi-line table");
+
+        let first = widths[0];
+        assert!(
+            widths.iter().all(|&w| w == first),
+            "table rows must all have equal visible width when a cell is \
+             ANSI-colored; got per-line visible widths {widths:?} from:\n{rendered}"
+        );
+    }
+
+    /// Pin the exact mechanism: the border-separator characters (`│` /
+    /// `┆`) in the colored data row must sit at the same byte/char
+    /// columns (after ANSI strip) as in the header row. This is the
+    /// reader-visible symptom from the bug report — the `│`/`┆`
+    /// separators not lining up.
+    #[test]
+    fn colored_status_cell_keeps_separators_column_aligned() {
+        let table = colored_status_table();
+        let rendered = table.to_string();
+        let lines: Vec<String> = rendered.lines().map(strip_ansi).collect();
+
+        // Header content row is the first line that starts with a `│`
+        // vertical border; the colored data row is the next such line.
+        let bordered: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.trim_start().starts_with('│'))
+            .collect();
+        assert!(
+            bordered.len() >= 2,
+            "expected a header content row and a data row, got {bordered:?}"
+        );
+
+        let sep_cols = |line: &str| -> Vec<usize> {
+            line.char_indices()
+                .filter(|&(_, c)| c == '│' || c == '┆')
+                .map(|(i, _)| i)
+                .collect()
+        };
+        let header_seps = sep_cols(bordered[0]);
+        let data_seps = sep_cols(bordered[1]);
+        assert_eq!(
+            header_seps, data_seps,
+            "column separators must align between the header row and the \
+             ANSI-colored data row; header={header_seps:?} data={data_seps:?}\n{rendered}"
+        );
+    }
 }
