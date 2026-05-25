@@ -28,6 +28,7 @@ use tracing::{debug, warn};
 
 use super::bundle::{install_bundle_from_pakx, ResolvedBundle};
 use super::mcp_translate::{translate, TranslateError};
+use super::rollback::Snapshot;
 use super::skill::{install_skill_from_pakx, parse_skill_shorthand, ResolvedSkill};
 use crate::commands::cache_tempdir::cache_dir_at;
 use crate::redact::redact_path;
@@ -82,6 +83,15 @@ pub struct InstallOpts {
     /// installer's cache reads happen via `RegistryClient` /
     /// `PakxSource::fetch`, both of which honour the `CacheDir` TTL.
     pub no_cache: bool,
+    /// Restore the local filesystem to its pre-run state when any dep
+    /// fails. When `true`, the runner snapshots every target dir the run
+    /// will touch *before* the first adapter write, then — if the run
+    /// ends with at least one failure — restores each target (deleting
+    /// dirs the run created, moving prior contents back for dirs that
+    /// pre-existed). Default `false`: today's partial-install behaviour
+    /// is preserved unless the caller opts in. Default-on is reserved
+    /// for a future major bump.
+    pub rollback_on_error: bool,
 }
 
 #[derive(Debug, Default)]
@@ -181,6 +191,15 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
 
     let claude = build_claude_adapter(&opts, &project_root);
 
+    // Rollback snapshot: when `--rollback-on-error` is set, record the
+    // prior on-disk state of every target this run will touch BEFORE the
+    // first adapter write. On a failed run we restore from this snapshot
+    // so the filesystem looks as if the run never happened; on a clean
+    // run we commit (discard the snapshot). Captured here — after the
+    // adapter is built so we know the resolved Claude home, but before
+    // any install loop mutates disk.
+    let snapshot = maybe_capture_snapshot(&opts, &manifest, &claude)?;
+
     let mut report = InstallReport::default();
     let mut entries: BTreeMap<String, LockEntry> = BTreeMap::new();
 
@@ -238,6 +257,14 @@ pub async fn run(opts: InstallOpts) -> Result<InstallReport> {
         &mut entries,
     )
     .await;
+
+    // Rollback gate (only when `--rollback-on-error` set, i.e.
+    // `snapshot.is_some()`): a failed run restores the pre-run
+    // filesystem state and reports zero installs; a clean run commits
+    // (drops the snapshot, keeping what landed). When the flag is absent
+    // this whole block is a no-op and partial installs survive exactly
+    // as before.
+    apply_rollback_gate(snapshot, &mut report)?;
 
     // Lockfile write gate: skip if any dep failed.
     //
@@ -450,6 +477,90 @@ async fn install_mcp_dep(
                 Some(mcp.version.clone()),
                 e.to_string(),
             );
+        }
+    }
+}
+
+/// Capture a rollback [`Snapshot`] when `--rollback-on-error` is set,
+/// else `None`. Pulled out of `run` so the top-level loop stays under
+/// the line cap; the snapshot must be taken after the Claude adapter is
+/// built (so the resolved home + project root are known) but before any
+/// install loop mutates disk.
+///
+/// # Errors
+///
+/// Surfaces a snapshot-capture failure (backup dir creation or moving a
+/// pre-existing target aside).
+fn maybe_capture_snapshot(
+    opts: &InstallOpts,
+    manifest: &Manifest,
+    claude: &ClaudeCodeAdapter,
+) -> Result<Option<Snapshot>> {
+    if !opts.rollback_on_error {
+        return Ok(None);
+    }
+    let snap = Snapshot::capture(manifest, claude.config_dir(), claude.project_root())?;
+    Ok(Some(snap))
+}
+
+/// Apply the `--rollback-on-error` gate after the install loops finish.
+///
+/// `snapshot` is `Some` only when the flag was set. On a clean run we
+/// commit (drop the snapshot, keeping what landed); on a failed run we
+/// restore the pre-run filesystem state and re-cast the report so it no
+/// longer claims installs that were reverted. When `snapshot` is `None`
+/// this is a no-op and partial installs survive exactly as before.
+///
+/// # Errors
+///
+/// Surfaces a restore failure (some targets may be left half-restored;
+/// the backup dir is retained on disk for manual recovery).
+fn apply_rollback_gate(snapshot: Option<Snapshot>, report: &mut InstallReport) -> Result<()> {
+    let Some(snapshot) = snapshot else {
+        return Ok(());
+    };
+    if report.failed.is_empty() {
+        snapshot.commit();
+        return Ok(());
+    }
+    warn!(
+        target: "pakx::install",
+        failed = report.failed.len(),
+        "install failed with --rollback-on-error; restoring pre-run state"
+    );
+    snapshot
+        .restore()
+        .context("rollback failed; some targets may be left half-restored")?;
+    // After a successful rollback nothing the run installed remains on
+    // disk. Re-cast every `installed`/`skipped` row as a
+    // failure-rolled-back outcome so the human summary + the `--json`
+    // payload don't claim installs that were reverted.
+    mark_rolled_back(report);
+    Ok(())
+}
+
+/// After a successful rollback, re-cast the report so it no longer
+/// claims installs that were reverted off disk.
+///
+/// The previously-`Ok` / `Skipped` rows describe work that was undone by
+/// the restore, so leaving them in `installed` / `skipped` would lie to
+/// the user (and to `--json` consumers). We:
+///   * clear the legacy `installed` / `skipped` vecs (nothing remains
+///     installed), and
+///   * rewrite each structured entry that was `Ok` / `Skipped` to
+///     `Failed` with a `rolled back` note, leaving the genuinely-failed
+///     rows (which carry the real error) untouched.
+///
+/// The `failed` vec is left as-is — it already lists the dep(s) whose
+/// failure triggered the rollback, which is exactly what the non-zero
+/// exit code and summary should reflect.
+fn mark_rolled_back(report: &mut InstallReport) {
+    report.installed.clear();
+    report.skipped.clear();
+    for entry in &mut report.entries {
+        if matches!(entry.status, InstallStatus::Ok | InstallStatus::Skipped) {
+            entry.status = InstallStatus::Failed;
+            entry.error = Some("rolled back: install run had failures".to_owned());
         }
     }
 }

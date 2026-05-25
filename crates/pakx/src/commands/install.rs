@@ -70,6 +70,18 @@ pub struct InstallArgs {
     /// `pakx add`.
     #[arg(long)]
     pub no_cache: bool,
+
+    /// Restore local state if any dependency fails (all-or-nothing).
+    ///
+    /// Snapshots every install target before writing, then reverts the
+    /// whole run on any failure: dirs created by the run are removed and
+    /// dirs that already existed are restored to their prior contents,
+    /// leaving the filesystem as if the run never happened. Opt-in in
+    /// this version; becoming the default is reserved for a future major
+    /// release. Without this flag, a partial failure leaves the
+    /// already-installed dependencies in place (the current behavior).
+    #[arg(long)]
+    pub rollback_on_error: bool,
 }
 
 pub async fn run_cmd(args: InstallArgs) -> Result<()> {
@@ -89,6 +101,7 @@ pub async fn run_cmd(args: InstallArgs) -> Result<()> {
         claude_home: args.claude_home,
         no_lockfile: args.no_lockfile,
         no_cache: args.no_cache,
+        rollback_on_error: args.rollback_on_error,
     };
     let pb = ui::spinner("resolving dependencies");
     let report = run(opts).await;
