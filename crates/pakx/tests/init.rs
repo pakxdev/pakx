@@ -60,6 +60,32 @@ fn yes_force_overwrites() {
     );
 }
 
+/// Regression for the non-TTY hang: `pakx init` WITHOUT `--yes` runs an
+/// interactive wizard (`Text` / `MultiSelect` / preview `Confirm`) that
+/// reads stdin. With no terminal it would block forever on the first
+/// prompt — it must instead fail fast with the "not a TTY" hint.
+/// `assert_cmd` gives the child a non-TTY stdin by default.
+#[test]
+fn init_without_yes_and_no_tty_bails_instead_of_hanging() {
+    let temp = TempDir::new().unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .write_stdin("")
+        .args(["init"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stdin is not a TTY"))
+        .stderr(predicate::str::contains("--yes"));
+
+    // No manifest written — the guard fires before any wizard step.
+    assert!(
+        !temp.path().join("agents.yml").exists(),
+        "init must not write a manifest when it bails on a missing TTY"
+    );
+}
+
 #[test]
 fn name_flag_overrides_default() {
     let temp = TempDir::new().unwrap();

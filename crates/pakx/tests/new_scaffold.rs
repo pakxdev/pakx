@@ -49,6 +49,59 @@ fn pack_json(dir: &std::path::Path, out: &std::path::Path) -> Value {
     serde_json::from_str(stdout.trim()).expect("pack --json emits valid json")
 }
 
+/// Regression for the non-TTY hang: `pakx new <kind> <name>` WITHOUT
+/// `--yes` and WITHOUT `--description` prompts for a one-line
+/// description via `inquire::Text`, which blocks forever on a closed
+/// stdin. It must fail fast with the "not a TTY" hint instead.
+/// `assert_cmd` runs the child with a non-TTY stdin by default.
+#[test]
+fn new_without_yes_and_no_tty_bails_instead_of_hanging() {
+    let work = TempDir::new().unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(work.path())
+        .write_stdin("")
+        .args(["new", "skills", "my-skill"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stdin is not a TTY"))
+        .stderr(predicate::str::contains("--yes"));
+
+    // No bundle dir created — the guard fires before any file write.
+    assert!(
+        !work.path().join("my-skill").exists(),
+        "new must not scaffold a bundle when it bails on a missing TTY"
+    );
+}
+
+/// `pakx new` with `--description` supplied (but no `--yes`) must NOT
+/// bail on a missing TTY: the description prompt is the only interactive
+/// step and supplying it means nothing needs to be read from stdin.
+#[test]
+fn new_with_description_flag_does_not_require_a_tty() {
+    let work = TempDir::new().unwrap();
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(work.path())
+        .write_stdin("")
+        .args([
+            "new",
+            "skills",
+            "my-skill",
+            "--description",
+            "a hand-supplied description",
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        work.path().join("my-skill").join("SKILL.md").is_file(),
+        "bundle must scaffold when --description supplies the only prompt"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Per-kind: scaffold creates the expected files AND the bundle then packs
 // with ZERO kind-validation warnings. This is the #2 ↔ #78 contract.

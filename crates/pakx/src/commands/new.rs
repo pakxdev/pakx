@@ -89,6 +89,12 @@ pub async fn run(args: NewArgs) -> Result<()> {
 
     ensure_target_free(&target, args.force)?;
 
+    // `pick_description` prompts for a one-line description when neither
+    // `--description` nor `--yes` is supplied. Fail fast if that prompt
+    // would have no TTY to read from rather than blocking forever.
+    if args.description.is_none() {
+        ui::ensure_interactive(args.yes, "scaffold the bundle")?;
+    }
     let description = pick_description(args.description.clone(), &args.name, args.yes)?;
 
     let files = templates_for(kind, &args.name, &description);

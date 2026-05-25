@@ -117,6 +117,72 @@ fn paint(text: &str, style: Style, tty: bool) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Interactive confirmation — fail fast when there is no TTY to prompt on.
+// ---------------------------------------------------------------------------
+
+/// Gate an interactive y/n confirmation behind a `--yes` flag and a TTY
+/// check, so a confirmation prompt never blocks forever on stdin in a
+/// non-interactive context (CI, a script, a piped shell).
+///
+/// Resolution order:
+///
+/// 1. `yes == true` → the caller already consented; return `Ok(true)`
+///    without prompting.
+/// 2. stdin is **not** a terminal → there is no human to answer the
+///    prompt, so bail with an actionable hint instead of hanging on a
+///    `read`/`inquire` call that would never return. The error names the
+///    `--yes` escape hatch and echoes `action` so the message reads as a
+///    full sentence (e.g. "Re-run with --yes to remove <id> …").
+/// 3. otherwise (interactive TTY) → run `prompt`, which performs the
+///    actual `inquire` call and returns the user's answer.
+///
+/// `prompt` is a closure rather than a value so the (potentially
+/// blocking) `inquire` call is only constructed on the interactive path.
+///
+/// # Errors
+///
+/// Returns an error when stdin is not a terminal and `yes` is `false`,
+/// or when the supplied `prompt` closure itself errors.
+pub fn confirm_or_bail<F>(yes: bool, action: &str, prompt: F) -> anyhow::Result<bool>
+where
+    F: FnOnce() -> anyhow::Result<bool>,
+{
+    if yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "refusing to prompt for confirmation: stdin is not a TTY. \
+             Re-run with --yes to {action} non-interactively."
+        );
+    }
+    prompt()
+}
+
+/// Guard a block of interactive prompts (a setup wizard — `Text` /
+/// `MultiSelect` / preview `Confirm`) the same way [`confirm_or_bail`]
+/// guards a single y/n: when the caller did not pass `--yes` and stdin
+/// is not a terminal there is no human to answer, so bail with an
+/// actionable hint rather than blocking forever on the first prompt.
+///
+/// Returns `Ok(())` when it is safe to prompt — either `yes` is set
+/// (callers should then take defaults without prompting) or stdin is a
+/// real terminal.
+///
+/// # Errors
+///
+/// Returns an error when `yes` is `false` and stdin is not a terminal.
+pub fn ensure_interactive(yes: bool, action: &str) -> anyhow::Result<()> {
+    if !yes && !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "refusing to prompt for input: stdin is not a TTY. \
+             Re-run with --yes to {action} non-interactively."
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Status glyphs — always 7 chars wide so columns line up across rows.
 // `[ok]`, `[drift]`, `[fail]`, `[warn]`.
 // ---------------------------------------------------------------------------

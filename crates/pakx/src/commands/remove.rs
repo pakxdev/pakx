@@ -90,7 +90,8 @@ pub async fn run(args: RemoveArgs) -> Result<()> {
 
     let kind = pick_kind(&manifest, &args.id, args.kind.map(RemoveKind::to_core))?;
 
-    if !args.yes && !confirm(&args.id, kind)? {
+    let action = format!("remove {}", args.id);
+    if !ui::confirm_or_bail(args.yes, &action, || confirm(&args.id, kind))? {
         eprintln!("aborted; manifest unchanged");
         return Ok(());
     }

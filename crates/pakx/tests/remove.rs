@@ -364,6 +364,78 @@ fn remove_yes_flag_skips_prompt() {
         .success();
 }
 
+/// Regression for the non-TTY hang: `pakx remove <id>` WITHOUT `--yes`
+/// used to call `inquire::Confirm` unconditionally, which blocks forever
+/// reading stdin when there is no terminal (CI / a piped shell). It must
+/// instead fail fast with an actionable "not a TTY" hint. `assert_cmd`
+/// runs the child with a non-TTY stdin by default, so this exercises the
+/// non-interactive branch and returns immediately rather than hanging.
+#[test]
+fn remove_without_yes_and_no_tty_bails_instead_of_hanging() {
+    let temp = TempDir::new().unwrap();
+    write_manifest(
+        temp.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - a/b\n",
+    );
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        // Empty stdin → closed pipe, not a TTY. The guard must fire
+        // before any blocking read.
+        .write_stdin("")
+        .args(["remove", "a/b"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stdin is not a TTY"))
+        .stderr(predicate::str::contains("--yes"));
+
+    // The manifest must be untouched — the bail happens before any write.
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    let m = parse_manifest(&body, None).unwrap();
+    assert_eq!(m.dependencies.mcp.as_ref().unwrap().len(), 1);
+}
+
+/// Removing the LAST dependency under a kind must not leave a dangling
+/// empty `mcp:` key that would later break `pakx test` validation. The
+/// core `remove_shorthand` drops the now-empty section, so the rewritten
+/// `agents.yml` parses clean. We prove it end-to-end by running
+/// `pakx test --offline` on the result and asserting it passes.
+#[test]
+fn remove_last_dep_in_kind_leaves_manifest_that_pakx_test_accepts() {
+    let temp = TempDir::new().unwrap();
+    write_manifest(
+        temp.path(),
+        "name: demo\nversion: 0.1.0\ndependencies:\n  mcp:\n    - only/one\n",
+    );
+
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["remove", "only/one", "--yes"])
+        .assert()
+        .success();
+
+    // No dangling `mcp:` key in the serialized YAML.
+    let body = std::fs::read_to_string(temp.path().join("agents.yml")).unwrap();
+    assert!(
+        !body.contains("mcp:"),
+        "empty kind key must be dropped, not left dangling; got:\n{body}"
+    );
+    let m = parse_manifest(&body, None).unwrap();
+    assert!(m.dependencies.mcp.is_none());
+
+    // The rewritten manifest must still validate. `--offline` skips the
+    // registry round-trip; with no deps left there is nothing to resolve
+    // and `pakx test` exits clean.
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["test", "--offline"])
+        .assert()
+        .success();
+}
+
 /// Regression for the 2026-05-23 stdout/stderr alignment: the success
 /// line must remain on **stdout** (the pre-existing behaviour) and the
 /// `→ next: pakx install` hint must move to **stderr** so a script

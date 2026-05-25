@@ -51,6 +51,12 @@ pub async fn run(args: InitArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| cwd.join(MANIFEST_FILENAME));
 
+    // `init` is an interactive wizard: without `--yes` it prompts for
+    // name / version / agents (and may prompt to overwrite an existing
+    // file). Fail fast if there is no TTY to answer those prompts rather
+    // than blocking forever on a closed/redirected stdin.
+    ui::ensure_interactive(args.yes, "scaffold agents.yml")?;
+
     handle_existing_file(&target, args.force, args.yes)?;
 
     let default_name = cwd

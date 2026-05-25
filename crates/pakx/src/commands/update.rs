@@ -234,8 +234,15 @@ pub async fn run(args: UpdateArgs) -> Result<ExitCode> {
         // id (the invocation itself is consent), `--yes`, or
         // `--dry-run` (rendering a confirmation prompt during a
         // dry-run is just noise).
-        let should_prompt = !args.yes && !args.dry_run && !explicit_id;
-        if should_prompt && !confirm_update(&plan)? {
+        // `--yes`, an explicit id, or `--dry-run` all suppress the
+        // prompt. When none of those apply we still must not block on a
+        // closed/redirected stdin (CI, a piped shell): `confirm_or_bail`
+        // fails fast with a `--yes` hint instead of hanging. The
+        // `yes` argument folds in the dry-run / explicit-id skips so the
+        // TTY check is only reached on the genuinely-interactive path.
+        let auto_proceed = args.yes || args.dry_run || explicit_id;
+        let action = format!("update {}", plan.id_no_version);
+        if !ui::confirm_or_bail(auto_proceed, &action, || confirm_update(&plan))? {
             kept += 1;
             println!(
                 "{} kept {} at the existing pin",
