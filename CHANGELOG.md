@@ -6,6 +6,24 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-05-25
+
+### Added
+
+- **`pakx upgrade` now detects how the binary was installed and auto-runs
+  the matching upgrade command.** Previously `pakx upgrade` printed a
+  generic hint and left the actual upgrade to the user. It now inspects
+  `current_exe()` to identify the install channel — Cargo
+  (`cargo install`), the install script (`install.sh` / `install.ps1`),
+  Homebrew, or Scoop — and runs the channel-appropriate command for you
+  (`cargo install ... --force`, re-run of the install script, `brew
+  upgrade`, `scoop update`). The action is confirm-gated; pass `--yes` to
+  skip the prompt, or `--check` for a read-only report of the detected
+  channel and what would run. The prompt is non-TTY-safe (fails fast with
+  a clear message instead of hanging when there is no controlling
+  terminal). On Windows the script channel prints the command to run in a
+  fresh shell rather than attempting an in-place self-replace.
+
 ## [0.1.6] — 2026-05-25
 
 ### Fixed
