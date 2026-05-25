@@ -633,6 +633,12 @@ mod tests {
         assert_eq!(detect_channel(&exe, &env), Channel::Script);
     }
 
+    // Windows-only: backslash paths are only parsed into components by
+    // `std::path` on Windows. On a Unix host `PathBuf::from(r"C:\...")` is a
+    // single opaque component, so this scenario can only be exercised where
+    // `\` is the native separator. The Windows CI leg (main-push + release
+    // matrix) covers it; the Unix equivalent is `detects_script_from_pakx_bin`.
+    #[cfg(windows)]
     #[test]
     fn detects_script_from_pakx_bin_windows() {
         let env = env_with(r"C:\Users\u", Some(r"C:\Users\u\.cargo"), Os::Windows);
@@ -662,10 +668,23 @@ mod tests {
         assert_eq!(detect_channel(&exe, &env), Channel::Brew);
     }
 
+    // Windows-only for the same backslash-component reason as the script
+    // test above. The Unix `scoop/apps/pakx` segment match is covered by
+    // `detects_scoop_from_apps_path_unix`.
+    #[cfg(windows)]
     #[test]
     fn detects_scoop_from_apps_path() {
         let env = env_with(r"C:\Users\u", Some(r"C:\Users\u\.cargo"), Os::Windows);
         let exe = PathBuf::from(r"C:\Users\u\scoop\apps\pakx\current\pakx.exe");
+        assert_eq!(detect_channel(&exe, &env), Channel::Scoop);
+    }
+
+    // Unix-representable cover for the `scoop/apps/pakx` consecutive-segment
+    // match (keeps `path_contains_segments` exercised on the Linux PR leg).
+    #[test]
+    fn detects_scoop_from_apps_path_unix() {
+        let env = env_with("/home/u", Some("/home/u/.cargo"), Os::Unix);
+        let exe = PathBuf::from("/home/u/scoop/apps/pakx/current/pakx");
         assert_eq!(detect_channel(&exe, &env), Channel::Scoop);
     }
 
