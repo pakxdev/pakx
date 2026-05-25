@@ -171,28 +171,7 @@ fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<(Manifest, Vec<S
     let sponsors = frontmatter.sponsors.unwrap_or_default();
     validate_sponsors(&sponsors)
         .map_err(|e| anyhow!("{SKILL_MD} sponsor-link validation failed: {e}"))?;
-    // `pakx pack` only operates on directories containing a `SKILL.md`
-    // (the function bails earlier otherwise), so by definition the
-    // bundle is a skills package — there is no other kind that uses
-    // this entry point. Warn (don't error) when `description:` is
-    // missing or empty: Claude Code reads the SKILL.md frontmatter
-    // `description` field at discovery time to decide whether to load
-    // a skill at all (see <https://code.claude.com/docs/en/skills>),
-    // so a missing description ships a package that is effectively
-    // dead-on-arrival inside Claude Code. Publishers should still be
-    // able to pack technically-malformed bundles for local smoke /
-    // air-gapped uploads — hence warning, not failure.
     let mut warnings = Vec::new();
-    let has_description = frontmatter
-        .description
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty());
-    if !has_description {
-        warnings.push(format!(
-            "{SKILL_MD} is missing `description:` \u{2014} Claude Code uses this field to decide when to load the skill; consider adding one."
-        ));
-    }
     // Default to `"skills"` when the SKILL.md frontmatter omits an
     // explicit `kind:` — historically every SKILL.md bundle is a
     // skills package and the existing JSON contract is `"kind": "skills"`.
@@ -205,6 +184,19 @@ fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<(Manifest, Vec<S
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "skills".to_string());
+    // Per-kind bundle validation. Each kind has a Claude Code spec
+    // (skills / sub-agents / slash-commands / hooks); we warn — never
+    // hard-error — when the bundle is missing the field Claude Code
+    // needs to load it, so technically-malformed bundles still pack for
+    // local smoke / air-gapped uploads (mirrors the round-32 skills
+    // `description:` warning). MCP is config, not a file bundle, so it
+    // has no pack-time file checks.
+    validate_kind_bundle(
+        &kind,
+        src_dir,
+        frontmatter.description.as_deref(),
+        &mut warnings,
+    );
     // Optionally capture the bundle's `README.md`. Absent file → `None`
     // (every bundle prior to this round shipped without one, and the
     // registry column is nullable). Oversize source → truncate to
@@ -224,6 +216,280 @@ fn read_manifest(src_dir: &Path, project_root: &Path) -> Result<(Manifest, Vec<S
         },
         warnings,
     ))
+}
+
+/// Claude Code documentation URLs cited inline in the per-kind pack
+/// warnings so a publisher knows the authoritative source for the field
+/// they're missing.
+const SKILLS_DOC_URL: &str = "https://code.claude.com/docs/en/skills";
+const SUBAGENTS_DOC_URL: &str = "https://code.claude.com/docs/en/sub-agents";
+const COMMANDS_DOC_URL: &str = "https://code.claude.com/docs/en/slash-commands";
+const HOOKS_DOC_URL: &str = "https://code.claude.com/docs/en/hooks";
+
+/// Known Claude Code hook event names. A `hooks` bundle declares at
+/// least one of these (typically inside a `hooks:` block in
+/// `settings.json` / a hook config file) so Claude Code knows when to
+/// fire the hook. See <https://code.claude.com/docs/en/hooks>.
+const HOOK_EVENTS: [&str; 8] = [
+    "PreToolUse",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "Notification",
+    "Stop",
+    "SubagentStop",
+    "PreCompact",
+    "SessionStart",
+];
+
+/// Run the per-kind, pack-time bundle validation and append any advisory
+/// to `warnings`. Never errors — a publisher must always be able to pack
+/// a technically-malformed bundle for local smoke / air-gapped uploads
+/// (same discipline as the round-32 skills `description:` warning). The
+/// `kind` selects which checks run; `skill_description` is the SKILL.md
+/// frontmatter `description:` already parsed by the caller.
+///
+/// Unknown kinds (anything outside the six known `PackageType`s) are
+/// left to the registry to validate server-side, so they get no
+/// pack-time check here.
+fn validate_kind_bundle(
+    kind: &str,
+    src_dir: &Path,
+    skill_description: Option<&str>,
+    warnings: &mut Vec<String>,
+) {
+    let has_description = skill_description
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    // Each arm guards on the *missing-field* condition: when the field
+    // is present (guard is false) the arm doesn't match and control
+    // falls through to `_ => {}` — i.e. no warning. `mcp` is server
+    // config, not a file bundle, so it never warns; unknown kinds fall
+    // through to registry-side validation.
+    match kind {
+        // Claude Code reads the SKILL.md frontmatter `description` field
+        // at discovery time to decide whether to load a skill at all, so
+        // a missing description ships a package that is effectively
+        // dead-on-arrival inside Claude Code.
+        "skills" if !has_description => {
+            warnings.push(format!(
+                "{SKILL_MD} is missing `description:` \u{2014} Claude Code uses this field to decide when to load the skill; consider adding one (see {SKILLS_DOC_URL})."
+            ));
+        }
+        // Claude Code sub-agents require YAML frontmatter with both
+        // `name:` (kebab-case) and `description:`; without them the agent
+        // file is unusable. We scan the bundle's markdown for a file
+        // carrying both. SKILL.md (the pack entry point) is the natural
+        // candidate, but any `.md` in the bundle counts.
+        "subagents" if !bundle_has_subagent_frontmatter(src_dir) => {
+            warnings.push(format!(
+                "subagent bundle has no markdown with both `name:` (kebab-case) and `description:` frontmatter \u{2014} Claude Code sub-agents require both (see {SUBAGENTS_DOC_URL})."
+            ));
+        }
+        // Slash-command files use frontmatter `description:` to show a
+        // one-line summary in the slash-command menu. Optional but
+        // recommended — warn if no command markdown declares one.
+        "commands" if !bundle_has_markdown_with_description(src_dir) => {
+            warnings.push(format!(
+                "command bundle has no markdown with a `description:` frontmatter \u{2014} Claude Code shows it in the slash-command menu; consider adding one (see {COMMANDS_DOC_URL})."
+            ));
+        }
+        // No public frontmatter spec for prompts; keep it light — just
+        // warn when the bundle ships nothing but empty files.
+        "prompts" if !bundle_has_nonempty_file(src_dir) => {
+            warnings.push(
+                "prompt bundle has no non-empty file \u{2014} a prompt bundle should ship at least one prompt file with content.".to_string(),
+            );
+        }
+        // Hooks need an event (PreToolUse, PostToolUse, …) so Claude Code
+        // knows when to fire them. Best-effort: scan the bundle for any
+        // known event name; warn if none is found.
+        "hooks" if !bundle_declares_hook_event(src_dir) => {
+            warnings.push(format!(
+                "hooks bundle declares no recognised hook event ({}) \u{2014} Claude Code hooks need an event + matcher (see {HOOKS_DOC_URL}).",
+                HOOK_EVENTS.join(", ")
+            ));
+        }
+        _ => {}
+    }
+}
+
+/// Read every regular file directly under `src_dir` (recursively) whose
+/// name ends in `.md`, returning `(relative_name, contents)` pairs.
+/// Best-effort: unreadable files are skipped (validation is advisory,
+/// never fatal). Skips the same noise dirs `collect_files` skips.
+fn read_markdown_files(src_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![src_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if matches!(name, ".git" | "node_modules" | "target" | "__pycache__") {
+                        continue;
+                    }
+                }
+                stack.push(path);
+            } else if ft.is_file() {
+                let is_md = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+                if is_md {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        out.push(text);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// True when at least one markdown file in the bundle has YAML
+/// frontmatter declaring BOTH a kebab-case `name:` and a non-empty
+/// `description:`. Used by the `subagents` pack check.
+fn bundle_has_subagent_frontmatter(src_dir: &Path) -> bool {
+    read_markdown_files(src_dir).iter().any(|text| {
+        extract_frontmatter(text).is_ok_and(|fm| {
+            let name_ok = fm.name.as_deref().map(str::trim).is_some_and(is_kebab_case);
+            let desc_ok = fm
+                .description
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty());
+            name_ok && desc_ok
+        })
+    })
+}
+
+/// True when at least one markdown file in the bundle has a non-empty
+/// `description:` in its frontmatter. Used by the `commands` pack check.
+fn bundle_has_markdown_with_description(src_dir: &Path) -> bool {
+    read_markdown_files(src_dir).iter().any(|text| {
+        extract_frontmatter(text).is_ok_and(|fm| {
+            fm.description
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+        })
+    })
+}
+
+/// True when the bundle ships at least one prompt file with
+/// non-whitespace content. The top-level `SKILL.md` (the pack manifest
+/// itself, always present and always carrying frontmatter) is NOT
+/// counted — otherwise every prompt bundle would trivially pass on the
+/// manifest alone. A prompt bundle must ship actual prompt content
+/// alongside the manifest. Used by the `prompts` pack check.
+fn bundle_has_nonempty_file(src_dir: &Path) -> bool {
+    let mut stack = vec![src_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let is_root = dir == src_dir;
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if matches!(name, ".git" | "node_modules" | "target" | "__pycache__") {
+                        continue;
+                    }
+                }
+                stack.push(path);
+            } else if ft.is_file() {
+                // Skip the top-level pack manifest — its frontmatter is
+                // always non-empty and would mask a content-less bundle.
+                if is_root
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n == SKILL_MD)
+                {
+                    continue;
+                }
+                if let Ok(meta) = entry.metadata() {
+                    if meta.len() == 0 {
+                        continue;
+                    }
+                }
+                // Non-empty by byte length, but a file of only
+                // whitespace is effectively empty for a prompt. Read
+                // and check for any non-whitespace char.
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if !text.trim().is_empty() {
+                        return true;
+                    }
+                } else {
+                    // Non-UTF8 binary file with bytes counts as content.
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// True when any file in the bundle mentions a recognised Claude Code
+/// hook event name. Best-effort substring scan over file contents (hook
+/// configs live in JSON / settings files, not markdown, so we read all
+/// regular files, not just `.md`). Used by the `hooks` pack check.
+fn bundle_declares_hook_event(src_dir: &Path) -> bool {
+    let mut stack = vec![src_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if matches!(name, ".git" | "node_modules" | "target" | "__pycache__") {
+                        continue;
+                    }
+                }
+                stack.push(path);
+            } else if ft.is_file() {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if HOOK_EVENTS.iter().any(|ev| text.contains(ev)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Lightweight kebab-case check for sub-agent `name:` frontmatter:
+/// lowercase ASCII letters / digits separated by single hyphens, no
+/// leading / trailing / doubled hyphens. Matches the Claude Code
+/// sub-agent naming convention.
+fn is_kebab_case(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    if s.starts_with('-') || s.ends_with('-') || s.contains("--") {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Read `<src_dir>/README.md`, truncate to `README_MAX_BYTES` if needed,
