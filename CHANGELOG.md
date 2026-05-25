@@ -6,6 +6,19 @@ The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-05-25
+
+### Fixed
+
+- **`pakx upgrade` now detects the install channel and auto-runs on
+  Windows (was printing the menu).** On Windows, `canonicalize()` returns
+  a `\\?\` verbatim path prefix that broke `detect_channel`'s prefix
+  match, so the channel always resolved to Unknown and `pakx upgrade`
+  printed the channel-selection menu instead of auto-running the detected
+  channel. The verbatim prefix is now stripped and the Windows path match
+  is case-insensitive, so the channel-aware auto-upgrade fires correctly
+  on Windows.
+
 ## [0.1.9] — 2026-05-25
 
 ### Fixed
