@@ -142,9 +142,15 @@ pub async fn run(args: ListArgs) -> Result<()> {
     }
 
     let mut table = ui::table();
+    // `kind` sits between `id` and `version` so a reader scans
+    // "what package, what type, what version" left-to-right. The
+    // lockfile entry already carries the kind (`entry.kind.as_str()`);
+    // `--json` exposes it as `type`. This human column is additive —
+    // the JSON contract is unchanged.
     table.set_header(vec![
         Cell::new("status"),
         Cell::new("id"),
+        Cell::new("kind"),
         Cell::new("version").set_alignment(CellAlignment::Right),
         Cell::new("registry"),
         Cell::new("agents"),
@@ -164,6 +170,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
         table.add_row(vec![
             Cell::new(badge),
             Cell::new(entry.name.as_str()),
+            Cell::new(entry.kind.as_str()),
             Cell::new(entry.version.as_str()).set_alignment(CellAlignment::Right),
             Cell::new(entry.registry.as_tag()),
             Cell::new(agents),

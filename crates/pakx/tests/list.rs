@@ -65,6 +65,27 @@ fn list_shows_entries_from_lockfile() {
         .stdout(predicate::str::contains("1.2.3"));
 }
 
+/// The human table gained a `kind` column (Feature 2). The lockfile
+/// fixture above is an `mcp` entry, so the rendered table must show both
+/// the `kind` header and the `mcp` value. This is a human-output-only
+/// change; the `--json` shape (which already carries kind as `type`) is
+/// asserted unchanged by `list_json_emits_valid_array_with_expected_keys`.
+#[test]
+fn list_human_table_shows_kind_column() {
+    let project = TempDir::new().unwrap();
+    std::fs::write(project.path().join("agents.lock"), ONE_ENTRY_LOCKFILE).unwrap();
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .current_dir(project.path())
+        .args(["list", "--no-check"])
+        .assert()
+        .success()
+        // Column header present.
+        .stdout(predicate::str::contains("kind"))
+        // Value for the mcp fixture entry present.
+        .stdout(predicate::str::contains("mcp"));
+}
+
 #[test]
 fn list_json_emits_valid_array_with_expected_keys() {
     let project = TempDir::new().unwrap();

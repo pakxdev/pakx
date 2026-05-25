@@ -195,6 +195,268 @@ fn pack_quiet_when_description_present() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Feature 1 — per-kind bundle validation (warnings, never errors).
+//
+// Each kind's pack-time check warns when the bundle lacks the field
+// Claude Code needs to load it, but the pack still SUCCEEDS (exit 0) so
+// local-smoke / air-gapped uploads work. These tests assert: (a) a
+// missing-field bundle emits the expected warning, (b) a valid bundle
+// stays quiet, (c) the warning lands in `--json` `warnings[]`, and (d)
+// every case exits 0 with the tarball written.
+// ---------------------------------------------------------------------------
+
+/// Run `pakx pack <src> --out <out>` and return the asserted command
+/// output. Always asserts success (exit 0) — warnings never fail pack.
+fn run_pack(src: &std::path::Path, out: &std::path::Path) -> std::process::Output {
+    Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone()
+}
+
+/// subagents: a SKILL.md whose frontmatter carries both kebab-case
+/// `name:` and `description:` is a valid sub-agent bundle — no warning.
+#[test]
+fn pack_subagent_quiet_when_name_and_description_present() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: code-reviewer\nversion: 0.1.0\nkind: subagents\ndescription: Reviews diffs.\n",
+    );
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("sub-agents require both"),
+        "no subagent warning expected when name + description present: {stderr}"
+    );
+    assert!(out.path().join("code-reviewer-0.1.0.tgz").is_file());
+}
+
+/// subagents: a bundle missing `description:` (only `name:` present)
+/// must warn, cite the sub-agents doc, and still pack.
+#[test]
+fn pack_subagent_warns_when_description_missing() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    // name is kebab-case + present; description absent → warn.
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: code-reviewer\nversion: 0.1.0\nkind: subagents\n",
+    );
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("sub-agents require both"),
+        "subagent warning expected when description missing: {stderr}"
+    );
+    assert!(
+        stderr.contains("https://code.claude.com/docs/en/sub-agents"),
+        "warning must cite the sub-agents doc: {stderr}"
+    );
+    assert!(out.path().join("code-reviewer-0.1.0.tgz").is_file());
+}
+
+/// subagents: the warning also lands in `--json` `warnings[]` (additive)
+/// and exit code stays 0.
+#[test]
+fn pack_subagent_warning_carried_in_json() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: code-reviewer\nversion: 0.1.0\nkind: subagents\n",
+    );
+    let output = Command::cargo_bin(BIN)
+        .unwrap()
+        .args([
+            "pack",
+            src.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: Value = serde_json::from_str(stdout.trim()).expect("valid json");
+    assert_eq!(v["kind"], "subagents");
+    let warnings = v["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("sub-agents require both")),
+        "json warnings[] must carry the subagent advisory: {warnings:?}"
+    );
+}
+
+/// commands: a command bundle whose markdown declares `description:` is
+/// valid — no warning.
+#[test]
+fn pack_command_quiet_when_description_present() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(
+        src.path(),
+        "name: deploy\nversion: 0.1.0\nkind: commands\ndescription: Deploy the app.\n",
+    );
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("slash-command menu"),
+        "no command warning expected when description present: {stderr}"
+    );
+    assert!(out.path().join("deploy-0.1.0.tgz").is_file());
+}
+
+/// commands: a command bundle without any `description:` frontmatter
+/// must warn (recommended, not required), cite the slash-commands doc,
+/// and still pack.
+#[test]
+fn pack_command_warns_when_description_missing() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(src.path(), "name: deploy\nversion: 0.1.0\nkind: commands\n");
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("slash-command menu"),
+        "command warning expected when description missing: {stderr}"
+    );
+    assert!(
+        stderr.contains("https://code.claude.com/docs/en/slash-commands"),
+        "warning must cite the slash-commands doc: {stderr}"
+    );
+    assert!(out.path().join("deploy-0.1.0.tgz").is_file());
+}
+
+/// prompts: a prompt bundle with a non-empty file is valid — no warning.
+#[test]
+fn pack_prompt_quiet_when_nonempty_file_present() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    // SKILL.md body is non-empty → counts as content.
+    write_skill_with_frontmatter(src.path(), "name: greet\nversion: 0.1.0\nkind: prompts\n");
+    std::fs::write(
+        src.path().join("prompt.txt"),
+        b"Write a haiku about Rust.\n",
+    )
+    .unwrap();
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("prompt bundle has no non-empty file"),
+        "no prompt warning expected when a non-empty file is present: {stderr}"
+    );
+    assert!(out.path().join("greet-0.1.0.tgz").is_file());
+}
+
+/// prompts: a prompt bundle whose only files are empty / whitespace must
+/// warn — but still pack. The SKILL.md frontmatter alone (no body) plus
+/// empty sibling files leaves nothing with content.
+#[test]
+fn pack_prompt_warns_when_only_empty_files() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    // SKILL.md with frontmatter only + an empty body (no markdown text
+    // after the closing fence) and an empty sibling. Write SKILL.md by
+    // hand so the body is whitespace-only.
+    std::fs::write(
+        src.path().join("SKILL.md"),
+        "---\nname: greet\nversion: 0.1.0\nkind: prompts\n---\n   \n",
+    )
+    .unwrap();
+    std::fs::write(src.path().join("empty.txt"), b"").unwrap();
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("prompt bundle has no non-empty file"),
+        "prompt warning expected when every file is empty/whitespace: {stderr}"
+    );
+    assert!(out.path().join("greet-0.1.0.tgz").is_file());
+}
+
+/// hooks: a bundle declaring a recognised hook event (e.g. `PreToolUse`)
+/// in any file is valid — no warning.
+#[test]
+fn pack_hooks_quiet_when_event_declared() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(src.path(), "name: guard\nversion: 0.1.0\nkind: hooks\n");
+    std::fs::write(
+        src.path().join("hooks.json"),
+        br#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[]}]}}"#,
+    )
+    .unwrap();
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("declares no recognised hook event"),
+        "no hooks warning expected when a known event is declared: {stderr}"
+    );
+    assert!(out.path().join("guard-0.1.0.tgz").is_file());
+}
+
+/// hooks: a bundle with no recognised hook event anywhere must warn,
+/// cite the hooks doc, and still pack.
+#[test]
+fn pack_hooks_warns_when_no_event_declared() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(src.path(), "name: guard\nversion: 0.1.0\nkind: hooks\n");
+    std::fs::write(
+        src.path().join("notes.md"),
+        b"# just some notes, no event\n",
+    )
+    .unwrap();
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("declares no recognised hook event"),
+        "hooks warning expected when no event is declared: {stderr}"
+    );
+    assert!(
+        stderr.contains("https://code.claude.com/docs/en/hooks"),
+        "warning must cite the hooks doc: {stderr}"
+    );
+    assert!(out.path().join("guard-0.1.0.tgz").is_file());
+}
+
+/// mcp: declared as config, not a file bundle — no pack-time file check,
+/// so a bare `kind: mcp` SKILL.md must NOT emit any kind-validation
+/// warning. (It also must not emit the skills `description:` warning,
+/// which only fires for `kind: skills`.)
+#[test]
+fn pack_mcp_emits_no_kind_validation_warning() {
+    let src = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    write_skill_with_frontmatter(src.path(), "name: server\nversion: 0.1.0\nkind: mcp\n");
+    let output = run_pack(src.path(), out.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("missing `description:`"),
+        "mcp kind must not trigger the skills description warning: {stderr}"
+    );
+    assert!(
+        !stderr.contains("require both")
+            && !stderr.contains("slash-command")
+            && !stderr.contains("hook event"),
+        "mcp kind must not trigger any bundle warning: {stderr}"
+    );
+    assert!(out.path().join("server-0.1.0.tgz").is_file());
+}
+
 /// A skill template author could include a symlink to `~/.ssh/id_rsa` or
 /// `/etc/shadow` in the source tree. `pakx pack` must refuse — silently
 /// skipping would hide the surprise; following the link would exfiltrate

@@ -23,15 +23,15 @@
 //!
 //! ## Validation
 //!
-//! v0 validation is *structural* only: the tarball must download,
-//! sha256-verify, and extract without tripping the same zip-slip /
-//! symlink / 50 MiB guards the skill path enforces. Per-kind file-
-//! shape validation (e.g. requiring an `AGENT.md` for subagents) is
-//! deferred — Claude Code's docs only fully spec `SKILL.md`-shaped
-//! bundles for `skills` + `commands`, and no public spec exists yet
-//! for the strict file shape of `subagents` / `prompts` / `hooks`.
-//! Each is logged with a `tracing::info!` so users / operators see
-//! that best-effort install is what's happening.
+//! Install-time validation here is *structural* only: the tarball must
+//! download, sha256-verify, and extract without tripping the same
+//! zip-slip / symlink / 50 MiB guards the skill path enforces. Per-kind
+//! file-shape validation now happens at PACK time instead (see
+//! `pack::validate_kind_bundle`) — Claude Code publicly specs
+//! every kind (skills / sub-agents / slash-commands / hooks), so the
+//! publisher gets the advisory before upload. Install stays best-effort
+//! and each kind is logged with a `tracing::info!` so users / operators
+//! see that structural-only install is what's happening here.
 
 use std::path::Path;
 
