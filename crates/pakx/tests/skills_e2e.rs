@@ -425,7 +425,9 @@ async fn install_skill_aborts_on_sha256_mismatch() {
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("integrity mismatch"));
+        .stderr(predicates::str::contains(
+            "downloaded tarball failed its integrity check",
+        ));
 
     let extracted = claude_home.path().join("skills").join("alice-mismatch");
     assert!(
@@ -553,7 +555,9 @@ async fn install_skill_errors_when_registry_omits_tarball_url() {
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("omits tarballUrl"));
+        .stderr(predicates::str::contains(
+            "registry did not return a download URL for this version",
+        ));
 }
 
 // ---------------------------------------------------------------------------
@@ -658,8 +662,8 @@ async fn install_json_emits_failed_row_on_integrity_mismatch() {
         .as_str()
         .expect("error string present on failed row");
     assert!(
-        err.contains("integrity mismatch"),
-        "error should mention integrity mismatch: {err}"
+        err.contains("downloaded tarball failed its integrity check"),
+        "error should mention the integrity-check failure: {err}"
     );
 }
 
